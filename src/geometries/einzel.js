@@ -18,10 +18,20 @@
  * accelerating immersion lens. That property is a free physics check, and
  * tests/physics.test.js asserts it.
  *
- * Focusing is a second-order effect: the radial field kicks inward in one
- * half of each gap and outward in the other, but the ion is slower where the
- * inward kick acts (for a decelerating centre electrode), so the inward
- * impulse wins. The net result is convergent for either sign of Vc.
+ * Focusing is a second-order effect. Crossing each gap, the ion passes
+ * through one region where the radial field converges and one where it
+ * diverges, and to first order those impulses would cancel. They do not,
+ * because the ion's axial speed differs between the two: it lingers in the
+ * converging half and hurries through the diverging one. The converging
+ * impulse therefore wins, and it does so for EITHER sign of Vc - which is
+ * why an einzel lens is always convergent and never a diverging element.
+ *
+ * Note the default configuration here (Vc negative, positive ion) is the
+ * ACCELERATING mode: the ion speeds up through the centre electrode, reaching
+ * roughly 3 keV for a 1 keV beam at Vc = -2000 V. The decelerating mode
+ * (Vc positive for a positive ion) focuses more strongly, but only transmits
+ * while the on-axis peak stays below the beam energy - above that the lens
+ * becomes an ion mirror and reflects.
  *
  * All dimensions in, and only in, millimetres. Conversion to SI happens once,
  * at the boundary, via mmToM.
@@ -140,6 +150,19 @@ export function buildEinzelLens(options = {}, solverOpts = {}) {
   }
 
   const { basis, reports } = solveBasis(grid, solverOpts);
+
+  // Non-convergence must reach the caller, not just the console. A field that
+  // has not converged looks entirely plausible on screen.
+  const stalled = reports
+    .map((r, e) => (r.converged ? null : grid.electrodeNames[e]))
+    .filter(Boolean);
+  if (stalled.length) {
+    warnings.push(
+      `Laplace solve did not converge for: ${stalled.join(', ')}. The field is ` +
+        'not trustworthy; try a coarser grid or a higher sweep limit.'
+    );
+  }
+
   const field = new Field(grid, basis);
 
   return {

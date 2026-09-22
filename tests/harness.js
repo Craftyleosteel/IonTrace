@@ -25,6 +25,18 @@ export function assert(condition, message) {
   if (!condition) throw new Error(message || 'Assertion failed');
 }
 
+/**
+ * Assert a value is a finite number.
+ *
+ * Needed because comparison-based checks silently pass on NaN: `NaN > x` and
+ * `NaN < x` are both false, so an accumulator written as
+ * `if (err > worst) worst = err` discards NaN entirely and reports zero error
+ * on a solution that has blown up completely.
+ */
+export function assertFinite(x, message = '') {
+  assert(Number.isFinite(x), `${message}: expected a finite number, got ${x}`);
+}
+
 /** Absolute-tolerance comparison. */
 export function assertClose(actual, expected, tol, message = '') {
   const diff = Math.abs(actual - expected);

@@ -16,7 +16,14 @@
  * bug no matter how plausible the trajectory looks on screen.
  */
 
-import { describe, it, assert, assertClose, assertRelClose } from './harness.js';
+import {
+  describe,
+  it,
+  assert,
+  assertClose,
+  assertRelClose,
+  assertFinite,
+} from './harness.js';
 
 import {
   ELEMENTARY_CHARGE,
@@ -40,7 +47,7 @@ import {
   totalEnergy,
   kineticEnergy,
 } from '../src/integrator.js';
-import { makeIon, parallelBeam, axialCrossing } from '../src/ion.js';
+import { makeIon, parallelBeam, axialCrossing, focalCrossing } from '../src/ion.js';
 import { buildEinzelLens } from '../src/geometries/einzel.js';
 
 /* ------------------------------------------------------------------ */
@@ -71,12 +78,15 @@ function solveAgainstExact(grid, exact, opts = {}) {
 
   const report = relax(grid, phi, { tolerance: 1e-12, maxSweeps: 200000, ...opts });
 
+  // Math.max, never `if (err > worst)`. A comparison silently drops NaN, so a
+  // solution that has blown up entirely would report zero error and pass.
   let worst = 0;
   for (let j = 0; j < grid.nr; j++) {
     for (let i = 0; i < grid.nz; i++) {
       if (grid.isElectrode(i, j)) continue;
-      const err = Math.abs(phi[grid.idx(i, j)] - exact(grid.zAt(i), grid.rAt(j)));
-      if (err > worst) worst = err;
+      const value = phi[grid.idx(i, j)];
+      assertFinite(value, `potential at node (${i}, ${j})`);
+      worst = Math.max(worst, Math.abs(value - exact(grid.zAt(i), grid.rAt(j))));
     }
   }
 
@@ -389,6 +399,243 @@ describe('Field evaluation', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* the metal/vacuum interface                                          */
+/* ------------------------------------------------------------------ */
+
+describe('Field at a conductor surface', () => {
+  /**
+   * A grounded slab filling y <= 2 mm, with a linear potential above it.
+   *
+   * The potential map is written analytically rather than solved, so the only
+   * thing under test is the differencing. Everything is registered as one
+   * electrode because the electrode MAP is what the gradient code consults;
+   * the values come from the supplied basis array.
+   */
+  function slabField(step = 0.5e-3, slabTop = 2e-3, top = 10e-3, V = 100) {
+    const nr = Math.round(top / step) + 1;
+    const grid = new PotentialArray({ nz: 21, nr, step, symmetry: PLANAR });
+    const id = grid.addElectrode('metal');
+    grid.paintEnclosure(id);
+    grid.paint(id, (z, y) => y <= slabTop + 1e-12);
+
+    const phi = new Float64Array(grid.nz * nr);
+    for (let j = 0; j < nr; j++) {
+      const y = grid.rAt(j);
+      const value = y <= slabTop ? 0 : (V * (y - slabTop)) / (top - slabTop);
+      for (let i = 0; i < grid.nz; i++) phi[grid.idx(i, j)] = value;
+    }
+
+    const field = new Field(grid, [phi]);
+    field.setVoltages([1]);
+    return { grid, field, expected: -V / (top - slabTop) };
+  }
+
+  it('returns the full surface field, not half of it', () => {
+    // A central difference taken AT a surface node reaches one node into the
+    // conductor, where the potential is pinned at the electrode value. It
+    // therefore returns (phi_vacuum - V) / 2h where the true surface
+    // derivative is (phi_vacuum - V) / h - exactly half, and being a factor
+    // rather than a truncation term it does not shrink with refinement.
+    for (const step of [1e-3, 0.5e-3, 0.25e-3]) {
+      const { grid, field, expected } = slabField(step);
+      const j = Math.round(2e-3 / step); // the surface node
+      const Ey = field.Er[grid.idx(10, j)];
+      assertRelClose(
+        Ey,
+        expected,
+        1e-9,
+        `surface field at h = ${step * 1e3} mm (half would be ${expected / 2})`
+      );
+    }
+  });
+
+  it('gives zero field inside a conductor', () => {
+    const { grid, field } = slabField();
+    const j = Math.round(1e-3 / 0.5e-3); // well inside the slab
+    assertClose(field.Er[grid.idx(10, j)], 0, 1e-9, 'field inside metal');
+  });
+
+  it('does not extrapolate the field outside the domain', () => {
+    // Clamping the cell index but not the interpolation fraction lets the
+    // bilinear form run away outside the grid: the default lens reported
+    // 807 V at r = 66 mm inside a grounded 16 mm housing.
+    const { field } = buildEinzelLens({ gridStep: 1 });
+    field.setVoltages({ housing: 0, entrance: 0, centre: -500, exit: 0 });
+
+    let inside = 0;
+    for (let k = 0; k < field.phi.length; k++) {
+      inside = Math.max(inside, Math.abs(field.phi[k]));
+    }
+    for (const [z, r] of [[0.06, 0.021], [0.06, 0.066], [0.06, -0.004], [0.4, 0.008]]) {
+      const value = Math.abs(field.potentialAt(z, r));
+      assert(
+        value <= inside + 1e-9,
+        `potential at (${z}, ${r}) m is ${value} V, outside the solved range of ` +
+          `${inside} V - the interpolator is extrapolating`
+      );
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* absolute scale and geometry                                         */
+/* ------------------------------------------------------------------ */
+
+describe('Absolute scale', () => {
+  it('pins the millimetre conversion to an absolute length', () => {
+    // Every lens assertion in this suite is a ratio or an ordering, and most
+    // express their bounds through the same mmToM they rely on. A global
+    // rescale - mmToM returning centimetres, say - would leave all of them
+    // green while making the modelled device ten times too big. This is the
+    // one assertion that cannot be satisfied that way.
+    assertRelClose(mmToM(1), 1e-3, 0, 'one millimetre in metres');
+    assertRelClose(mmToM(123), 0.123, 1e-15, '123 mm in metres');
+
+    const { grid, geometry } = buildEinzelLens({ gridStep: 0.5 });
+    assertRelClose(geometry.totalLength, 123, 1e-12, 'lens length in mm');
+    assertRelClose(grid.zLength, 0.123, 1e-12, 'lens length in metres');
+    assertRelClose(grid.step, 5e-4, 1e-15, 'grid step in metres');
+    assertRelClose(grid.rLength, 0.016, 1e-12, 'housing radius in metres');
+  });
+
+  it('recovers a known field strength in volts per metre', () => {
+    // An absolute V/m, with the gap written as a literal in metres so it does
+    // not route through the converter under test.
+    const gap = 0.008; // m
+    const V = 100;
+    const { grid, field } = (() => {
+      const g = new PotentialArray({ nz: 21, nr: 21, step: 0.5e-3, symmetry: PLANAR });
+      const { phi } = solveAgainstExact(g, (z, y) => (V * y) / 0.01);
+      const f = new Field(g, [phi]);
+      f.setVoltages([1]);
+      return { grid: g, field: f };
+    })();
+    assertRelClose(
+      field.fieldAt(5e-3, 5e-3).Er,
+      -V / 0.01,
+      1e-9,
+      'transverse field in V/m'
+    );
+    assert(grid.step === 0.5e-3, 'grid step literal');
+    assert(gap > 0, 'gap defined');
+  });
+
+  it('paints the geometry that was requested', () => {
+    // Nothing else checks that the painted metal matches the specification,
+    // so an electrode silently painted at half its length would pass the
+    // whole suite.
+    const { grid, geometry } = buildEinzelLens({ gridStep: 0.5 });
+    const extent = (name) => {
+      const id = grid.electrodeNames.indexOf(name);
+      let zMin = Infinity;
+      let zMax = -Infinity;
+      let rMin = Infinity;
+      let rMax = -Infinity;
+      for (let j = 0; j < grid.nr; j++) {
+        for (let i = 0; i < grid.nz; i++) {
+          if (grid.electrodeId[grid.idx(i, j)] !== id) continue;
+          zMin = Math.min(zMin, grid.zAt(i));
+          zMax = Math.max(zMax, grid.zAt(i));
+          rMin = Math.min(rMin, grid.rAt(j));
+          rMax = Math.max(rMax, grid.rAt(j));
+        }
+      }
+      return { zMin, zMax, rMin, rMax };
+    };
+
+    const b = geometry.bounds;
+    const h = grid.step;
+    for (const [name, z0, z1] of [
+      ['entrance', b.z1, b.z2],
+      ['centre', b.z3, b.z4],
+      ['exit', b.z5, b.z6],
+    ]) {
+      const e = extent(name);
+      assertClose(e.zMin, mmToM(z0), h, `${name} starts at z = ${z0} mm`);
+      assertClose(e.zMax, mmToM(z1), h, `${name} ends at z = ${z1} mm`);
+      assertClose(e.rMin, mmToM(geometry.boreRadius), h, `${name} bore radius`);
+      assertClose(e.rMax, mmToM(geometry.outerRadius), h, `${name} outer radius`);
+    }
+
+    // The device is axially symmetric by construction.
+    const counts = grid.electrodeNodeCounts();
+    const idOf = (n) => grid.electrodeNames.indexOf(n);
+    assert(
+      counts[idOf('entrance')] === counts[idOf('exit')],
+      'entrance and exit cylinders must be painted identically'
+    );
+  });
+
+  it('refuses a domain rim that no electrode owns', () => {
+    // The relaxation never updates rim nodes, so an unpainted rim is frozen
+    // at 0 V - an invisible grounded box no voltage setting can override.
+    const grid = new PotentialArray({ nz: 11, nr: 11, step: 1e-3, symmetry: PLANAR });
+    grid.addElectrode('partial');
+    grid.paint(0, (z, y) => y <= 0); // only the floor
+    let threw = false;
+    try {
+      solveBasis(grid);
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'an unowned rim must be refused, not silently grounded');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* focus detection                                                     */
+/* ------------------------------------------------------------------ */
+
+describe('Axial crossing', () => {
+  const pt = (x, z, vz = 1) => ({ x, z, vz, vx: 0 });
+
+  it('returns the first forward crossing, not the last', () => {
+    // The back focal point is where the ray FIRST reaches the axis. A ray
+    // that crosses, diverges and is turned again by a later element focuses
+    // at the first crossing; reporting the last would name the wrong plane.
+    const path = [pt(1, 0), pt(-1, 2), pt(1, 4), pt(-1, 6)];
+    assertClose(axialCrossing(path), 1, 1e-12, 'first crossing');
+  });
+
+  it('finds a crossing that lands exactly on the axis', () => {
+    // A strict sign product misses this: a.x * 0 is never negative.
+    assertClose(axialCrossing([pt(1, 0), pt(0.5, 1), pt(0, 2)]), 2, 1e-12, 'exact landing');
+  });
+
+  it('reports no crossing for a ray that never leaves the axis', () => {
+    assert(
+      axialCrossing([pt(0, 0), pt(0, 1), pt(0, 2)]) === null,
+      'an on-axis ray has no crossing, and certainly not one at the far wall'
+    );
+  });
+
+  it('reports no crossing for a ray diverging from the axis', () => {
+    assert(axialCrossing([pt(0, 0), pt(1, 1), pt(2, 2)]) === null, 'diverging ray');
+  });
+
+  it('ignores crossings made while travelling backwards', () => {
+    const returning = [pt(1, 4, -1), pt(-1, 2, -1), pt(-2, 0, -1)];
+    assert(axialCrossing(returning) === null, 'a reflected ray has no focus');
+  });
+
+  it('extrapolates a focus that lies beyond the modelled region', () => {
+    // Beyond the last electrode the ray is straight, so the crossing follows
+    // from the exit position and slope. Without this, a weak lens whose focus
+    // lies past the end of the grid reports "no focus" even though it works.
+    const exit = { x: 2e-3, z: 0.1, vx: -1e3, vz: 1e5, t: 0 };
+    const f = focalCrossing([{ x: 3e-3, z: 0.09, vx: -1e3, vz: 1e5, t: 0 }, exit]);
+    assert(f !== null && f.extrapolated, 'expected an extrapolated focus');
+    // z = 0.1 - 2e-3 * (1e5 / -1e3) = 0.1 + 0.2 = 0.3
+    assertRelClose(f.z, 0.3, 1e-12, 'extrapolated crossing');
+  });
+
+  it('does not extrapolate a focus for a diverging ray', () => {
+    const exit = { x: 2e-3, z: 0.1, vx: +1e3, vz: 1e5, t: 0 };
+    assert(focalCrossing([exit, exit]) === null, 'diverging ray has no focus ahead');
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* integrators, isolated from the field solver                         */
 /* ------------------------------------------------------------------ */
 
@@ -669,6 +916,28 @@ describe('Einzel lens physics', () => {
     field.setVoltages(VOLTS);
   });
 
+  it('reports a reflected ion as reflected, not transmitted', () => {
+    // A decelerating bias above the beam energy turns the lens into an ion
+    // mirror. The ion leaves through the ENTRANCE face, and calling that
+    // "exited" would count it as transmitted and let its backwards axis
+    // crossing masquerade as a focal length.
+    // Launched on-axis, so the return path is clean. An off-axis ion above
+    // the barrier is usually driven into metal on the way back out, which is
+    // itself correct behaviour but tests a different branch.
+    field.setVoltages({ housing: 0, entrance: 0, centre: 3000, exit: 0 });
+    const { points, stop } = flyIon(field, makeIon({ ...SPEC, x: 0 }), { cfl: 0.05 });
+    const last = points[points.length - 1];
+    field.setVoltages(VOLTS);
+
+    assert(stop === 'reflected', `expected 'reflected', got '${stop}'`);
+    assert(last.vz < 0, 'a reflected ion must be travelling backwards');
+    assert(last.z < points[0].z, 'a reflected ion must end upstream of its launch');
+    assert(
+      focalCrossing(points) === null,
+      'a reflected ion has no focus; its return path must not be reported as one'
+    );
+  });
+
   it('reflects an ion that cannot climb the centre electrode barrier', () => {
     // A decelerating bias above the beam energy is a potential barrier. The
     // ion must turn around rather than tunnel through it, which is both
@@ -678,5 +947,119 @@ describe('Einzel lens physics', () => {
     const last = points[points.length - 1];
     assert(last.vz < 0, `expected reflection, but the ion left with vz = ${last.vz} m/s`);
     field.setVoltages(VOLTS);
+  });
+
+  it('gives the same focus for every ion mass at fixed energy', () => {
+    // Electrostatic optics depends only on E/q: the force is qE and the
+    // trajectory shape is set by the ratio of kinetic to potential energy, in
+    // which mass cancels entirely. Only the flight TIME scales, as sqrt(m).
+    //
+    // This is real device physics and is external to the code, so it cannot
+    // be satisfied by a self-consistent-but-wrong implementation. It is also
+    // the sharpest available check on the unit chain: a stray factor of u, of
+    // e, or of 1000 anywhere between makeIon and the force would break the
+    // mass independence immediately.
+    const foci = [];
+    const times = [];
+    for (const mass of [1, 100, 10000]) {
+      const { points } = flyIon(field, makeIon({ ...SPEC, mass, x: 3 }), { cfl: 0.05 });
+      const f = axialCrossing(points);
+      assert(f !== null, `no focus for mass ${mass} u`);
+      foci.push(f);
+      times.push(points[points.length - 1].t);
+    }
+    assertRelClose(foci[1], foci[0], 1e-6, 'focus at 100 u vs 1 u');
+    assertRelClose(foci[2], foci[0], 1e-6, 'focus at 10000 u vs 1 u');
+
+    // Flight time must scale as sqrt(m): 100x the mass is 10x the time.
+    assertRelClose(times[1] / times[0], 10, 1e-4, 'flight time scaling with mass');
+    assertRelClose(times[2] / times[0], 100, 1e-4, 'flight time scaling with mass');
+  });
+
+  it('transmits a negative ion at mirrored polarity identically', () => {
+    // Reversing the sign of both the charge and every electrode gives an
+    // identical force at every point, so the trajectory must be identical.
+    // Nothing else in the suite flies anything but a singly-charged cation.
+    const a = flyIon(field, makeIon({ ...SPEC, x: 3 }), { cfl: 0.05 });
+
+    field.setVoltages({ housing: 0, entrance: 0, centre: 2000, exit: 0 });
+    const b = flyIon(field, makeIon({ ...SPEC, charge: -1, x: 3 }), { cfl: 0.05 });
+    field.setVoltages(VOLTS);
+
+    assert(b.stop === 'exited', `mirrored anion did not transmit (${b.stop})`);
+    assertRelClose(
+      axialCrossing(b.points),
+      axialCrossing(a.points),
+      1e-9,
+      'anion at mirrored polarity must follow the cation trajectory exactly'
+    );
+  });
+
+  it('reports a ray that hits the housing as an electrode strike', () => {
+    // The outer wall is real metal, unlike the end faces. An ion driven into
+    // it must be a strike, not an escape.
+    const steep = makeIon({ ...SPEC, x: 0, angle: 45 });
+    const { points, stop } = flyIon(field, steep, { cfl: 0.05 });
+    const last = points[points.length - 1];
+    assert(stop === 'electrode', `expected 'electrode', got '${stop}'`);
+    assert(
+      Math.abs(last.x) <= built.grid.rLength + 1e-12,
+      'a strike must be recorded at or inside the wall, not beyond it'
+    );
+  });
+
+  it('never produces a non-finite potential or field', () => {
+    // Comparison-based error accumulators silently pass on NaN, so a blown-up
+    // solve can look perfect. Check the arrays directly.
+    for (let k = 0; k < field.phi.length; k++) {
+      assertFinite(field.phi[k], `phi[${k}]`);
+      assertFinite(field.Ez[k], `Ez[${k}]`);
+      assertFinite(field.Er[k], `Er[${k}]`);
+    }
+  });
+
+  it('converges every basis solution', () => {
+    for (let e = 0; e < built.solverReports.length; e++) {
+      assert(
+        built.solverReports[e].converged,
+        `basis solution for "${built.grid.electrodeNames[e]}" did not converge`
+      );
+    }
+  });
+
+  it('reduces energy drift at second order, not merely below a threshold', () => {
+    // A bare bound is a regression pin: it is flat in the time step, so it
+    // cannot detect a broken integrator, and it fails for non-physics reasons
+    // as soon as the default grid changes. The documented claim is that the
+    // drift is the O(h^2) force/potential interpolation mismatch, so test the
+    // scaling instead of the value.
+    const driftAt = (gridStep) => {
+      const { field: f } = buildEinzelLens({ gridStep });
+      f.setVoltages(VOLTS);
+      return flyIon(f, makeIon({ ...SPEC, x: 2 }), { cfl: 0.05 }).energyDrift;
+    };
+    const coarse = driftAt(1.0);
+    const mid = driftAt(0.5);
+    const fine = driftAt(0.25);
+
+    const r1 = coarse / mid;
+    const r2 = mid / fine;
+    assert(
+      r1 > 3 && r1 < 5.5 && r2 > 3 && r2 < 5.5,
+      `expected ~4x drift reduction per halving, got ${r1.toFixed(2)} and ${r2.toFixed(2)}`
+    );
+  });
+
+  it('keeps energy drift independent of the time step', () => {
+    // The counterpart to the test above. If the drift really is a grid
+    // artefact, shrinking the time step by 20x must not change it - and if it
+    // DOES change, the drift is integrator error after all and the O(h^2)
+    // story in docs/PHYSICS.md is wrong. This is the test that a degraded
+    // integrator cannot pass.
+    const at = (cfl) =>
+      flyIon(field, makeIon({ ...SPEC, x: 2 }), { cfl }).energyDrift;
+    const coarse = at(0.2);
+    const fine = at(0.01);
+    assertRelClose(fine, coarse, 0.1, 'energy drift must not depend on the time step');
   });
 });

@@ -88,21 +88,67 @@ export function divergentBeam({ count = 7, maxAngle = 3, ...spec }) {
 }
 
 /**
- * Axial crossing of a trajectory: the z at which the path last changes the
- * sign of x, found by linear interpolation between the bracketing points.
+ * First axial crossing of a trajectory while the ion is travelling forwards,
+ * found by linear interpolation between the bracketing points.
  *
- * For a parallel input ray this is the lens's focal point. Returns null if the
- * ray never crosses, which is what a diverging (or untouched) ray does.
+ * For a parallel input ray this is the lens's focal point, which is why it
+ * must be the FIRST crossing and not the last: a ray that crosses, diverges
+ * and is turned again by a later element focuses at the first crossing. It
+ * must also require forward motion, because a reflected ion re-crosses the
+ * axis on its way back out and that crossing is not a focus of anything.
+ *
+ * Returns null when there is no crossing: a diverging ray, a reflected ray,
+ * or a ray that lies on the axis for its whole flight - the last of which has
+ * no crossing at all rather than one everywhere.
  */
 export function axialCrossing(points) {
-  for (let n = points.length - 1; n > 0; n--) {
+  for (let n = 1; n < points.length; n++) {
     const a = points[n - 1];
     const b = points[n];
-    if (a.x === 0) return a.z;
+
+    // A returning ion's crossing is not a focus.
+    if (b.vz <= 0) continue;
+
+    // Identically on the axis over this interval: no crossing here.
+    if (a.x === 0 && b.x === 0) continue;
+
+    // Landing exactly on the axis is a crossing; a strict sign product would
+    // miss it, since a.x * 0 is never negative.
+    if (b.x === 0) return b.z;
+
     if (a.x * b.x < 0) {
       const f = a.x / (a.x - b.x); // fraction of the way from a to b
       return a.z + f * (b.z - a.z);
     }
   }
   return null;
+}
+
+/**
+ * Where a ray crosses the axis, extrapolating beyond the modelled region if
+ * it has not crossed by the time it leaves.
+ *
+ * Without this, the reported focus is truncated by the domain: a weak lens
+ * whose focus lies past the end of the grid reports "no crossing", and one
+ * whose focus lies just past the end reports only the most aberrated outer
+ * rays, biasing the number low. Beyond the last electrode the field is
+ * negligible and the ray is straight, so the crossing follows exactly from
+ * the exit position and slope:
+ *
+ *     z_cross = z - x * (vz / vx)
+ *
+ * @returns {{z: number, extrapolated: boolean} | null}
+ */
+export function focalCrossing(points) {
+  const inside = axialCrossing(points);
+  if (inside !== null) return { z: inside, extrapolated: false };
+
+  const p = points[points.length - 1];
+  // A reflected, parallel, or diverging ray has no focus ahead of it.
+  if (p.vz <= 0 || p.vx === 0) return null;
+  if (p.x * p.vx >= 0) return null; // moving away from the axis
+
+  const z = p.z - p.x * (p.vz / p.vx);
+  if (!Number.isFinite(z) || z <= p.z) return null;
+  return { z, extrapolated: true };
 }

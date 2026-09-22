@@ -26,6 +26,8 @@
  * exactly that.
  */
 
+import { PLANAR } from './grid.js';
+
 /**
  * @typedef {object} IonState
  * @property {number} mass    kg
@@ -123,6 +125,13 @@ export function stepVerlet(field, ion, dt) {
 
 export const INTEGRATORS = { rk4: stepRK4, verlet: stepVerlet };
 
+/**
+ * Default step-size aggressiveness: the fraction of a grid step an ion is
+ * allowed to advance per step. Defined once so the library default, the JSDoc
+ * and docs/PHYSICS.md cannot drift apart from each other.
+ */
+export const DEFAULT_CFL = 0.05;
+
 /** Kinetic energy in joules. */
 export function kineticEnergy(ion) {
   return 0.5 * ion.mass * (ion.vx * ion.vx + ion.vz * ion.vz);
@@ -151,7 +160,7 @@ export function totalEnergy(field, ion) {
  *
  * `cfl` below 1 keeps the ion sampling the field several times per cell.
  */
-export function suggestTimeStep(field, ion, cfl = 0.1) {
+export function suggestTimeStep(field, ion, cfl = DEFAULT_CFL) {
   const h = field.grid.step;
   const qm = ion.charge / ion.mass;
   const { ax, az } = accelerationAt(field, qm, ion.x, ion.z);
@@ -176,17 +185,23 @@ export function suggestTimeStep(field, ion, cfl = 0.1) {
  * @param {IonState} ion  Initial state, in SI units.
  * @param {object} [opts]
  * @param {'rk4'|'verlet'} [opts.method]
- * @param {number} [opts.cfl]        Step-size aggressiveness (default 0.1).
+ * @param {number} [opts.cfl]        Step-size aggressiveness (default DEFAULT_CFL).
  * @param {number} [opts.maxSteps]   Iteration cap (default 200000).
  * @param {number} [opts.maxTime]    Flight-time cap in seconds.
  * @param {number} [opts.recordEvery] Keep every Nth point (default 1).
- * @returns {{points: IonState[], stop: string, energyDrift: number}}
+ * @returns {{points: IonState[], stop: StopReason, energyDrift: number}}
+ *
+ * `stop` is one of:
+ *   'exited'     left forwards through the far face - transmitted
+ *   'reflected'  came back out of the entrance face - NOT transmitted
+ *   'electrode'  struck metal, including the outer wall
+ *   'time-limit' / 'step-limit'  ran out of budget
  */
 export function flyIon(field, ion, opts = {}) {
   const step = INTEGRATORS[opts.method ?? 'rk4'];
   if (!step) throw new Error(`Unknown integrator "${opts.method}"`);
 
-  const cfl = opts.cfl ?? 0.1;
+  const cfl = opts.cfl ?? DEFAULT_CFL;
   const maxSteps = opts.maxSteps ?? 200000;
   const maxTime = opts.maxTime ?? Infinity;
   const recordEvery = opts.recordEvery ?? 1;
@@ -195,6 +210,14 @@ export function flyIon(field, ion, opts = {}) {
   const zMin = grid.z0;
   const zMax = grid.z0 + grid.zLength;
   const rMax = grid.rLength;
+
+  // Cylindrical geometry folds the signed transverse coordinate onto a
+  // radius; planar geometry does not, because there its transverse axis runs
+  // from 0 to rLength with no symmetry about zero. Folding it anyway would
+  // mirror the electrode map about y = 0 and let an ion below the floor keep
+  // flying through an extrapolated field.
+  const planar = grid.symmetry === PLANAR;
+  const transverse = (x) => (planar ? x : Math.abs(x));
 
   let current = { ...ion };
   const points = [current];
@@ -209,20 +232,36 @@ export function flyIon(field, ion, opts = {}) {
     const dt = suggestTimeStep(field, current, cfl);
     const next = step(field, current, dt);
 
-    // Leaving the solved region is a legitimate end of flight, not an error:
-    // the ion has simply flown out of the modelled optic.
-    if (next.z < zMin || next.z > zMax || Math.abs(next.x) > rMax) {
+    const r = transverse(next.x);
+
+    // Metal is tested first. The outer radial wall is real hardware, so a
+    // step that overshoots it must be a strike and not an escape - and since
+    // electrodeHit already ignores the open end faces, testing it first
+    // cannot steal a legitimate exit.
+    //
+    // Resolution is one grid node, which biases every aperture *inward* by
+    // h/2 rather than merely blurring it: transmission is systematically
+    // pessimistic. See docs/PHYSICS.md section 3.6.
+    if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
+      current = next;
+      stop = 'electrode';
+      points.push(current);
+      break;
+    }
+
+    // Leaving through an open face ends the flight, and the direction matters.
+    // An ion that comes back out of the entrance has been REFLECTED, not
+    // transmitted; reporting both as "exited" turns a working ion mirror into
+    // a lens with a negative focal length.
+    if (next.z > zMax) {
       current = next;
       stop = 'exited';
       points.push(current);
       break;
     }
-
-    // Striking an electrode ends the flight. Resolution is one grid node, so
-    // the reported impact point carries an uncertainty of order h/2.
-    if (electrodeHit(grid, next.z, Math.abs(next.x))) {
+    if (next.z < zMin) {
       current = next;
-      stop = 'electrode';
+      stop = 'reflected';
       points.push(current);
       break;
     }

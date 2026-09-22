@@ -45,10 +45,18 @@ informative diagnostic available: a unit slip, a mis-scaled field, a bad
 interpolation and an unstable time step all show up in it.
 
 For an axisymmetric field, angular momentum about the axis
-$L_z = m r^2 \dot\theta$ is also conserved. IonTrace currently launches ions
-with $\dot\theta = 0$, so $L_z = 0$ and the trajectory stays in a plane
-containing the axis for all time. This is what makes a 2D integration exact
-rather than approximate — see §3.3.
+$L_z = m r^2 \dot\theta$ is conserved, because there is no $E_\theta$ to
+produce a torque. In IonTrace $L_z$ is not merely conserved but **identically
+zero**, and structurally so: `IonState` has no azimuthal slot and `makeIon`
+sets only $v_x$ and $v_z$, so azimuthal velocity cannot be introduced. The
+orbit therefore stays in a plane containing the axis for all time and there is
+no centrifugal term. This is what makes the 2D integration exact rather than
+approximate.
+
+Note the consequence: a real beam that *does* carry angular momentum — from a
+magnetic lens upstream, a skewed source, or off-axis extraction — cannot be
+represented at all, and nothing warns. Absence of $E_\theta$ conserves $L_z$;
+it does not make it zero.
 
 ---
 
@@ -76,13 +84,38 @@ real consequences: the box is at a fixed potential and therefore shields, so
 placing it too close to the electrodes distorts the field. `buildEinzelLens`
 warns when the enclosure sits within one bore radius of the cylinders.
 
-The two **end faces** are a special case. They must carry a fixed potential for
-the solve to be well posed, but physically they are where the beam enters and
-leaves. They are marked as open faces (`grid.openFaces`): electrically they are
-boundary nodes, but an ion reaching one is reported as having left the modelled
-region rather than as having struck an electrode. The outer radial wall is
-*not* open — in the einzel geometry that surface is the grounded housing, which
-is real metal an ion can genuinely hit.
+The two **end faces** are a special case. They carry a fixed potential, and an
+ion reaching one is reported as having left the modelled region rather than as
+having struck an electrode (`grid.openFaces`). The outer radial wall is *not*
+open — in the einzel geometry that surface is the grounded housing, which is
+real metal an ion can genuinely hit.
+
+Two honest caveats about that choice:
+
+**Dirichlet end faces are a convenience, not a necessity.** A mixed
+Dirichlet/Neumann problem is uniquely solvable so long as Dirichlet data exists
+somewhere on the boundary, which it does (the housing and the three cylinders).
+Homogeneous Neumann $\partial\phi/\partial z = 0$ on the end faces would be
+equally well posed and would be the better model of a drift tube continuing
+past the domain. IonTrace uses Dirichlet because it is simpler, not because it
+is required.
+
+**The end faces behave as solid grounded plates across the aperture.** This is
+harmless while the outer cylinders are also at 0 V — 15 mm of drift is enough
+for the entry field to vanish, verified by extending it to 120 mm and seeing no
+change. It stops being harmless if the entrance or exit electrode is biased:
+with `entrance = 100 V`, the 0 V plate at $z = 0$ creates a real potential
+difference across the entry drift and an accelerating field of several kV/m
+where the actual instrument has none. Meanwhile the trajectory code flies ions
+straight through that same face as though it were open. The field and the
+flight then disagree about what is there. The UI flags this when the outer
+electrodes are biased away from zero; the proper fix is Neumann end faces.
+
+There is also a solver invariant worth stating: the relaxation never updates
+rim nodes, so any rim node not owned by an electrode would sit frozen at 0 V —
+an invisible grounded box that no voltage setting could override.
+`solveBasis` refuses to run in that case rather than returning a plausible
+wrong field.
 
 ---
 
@@ -115,10 +148,14 @@ the hardest to see, because the solution still looks plausible. The test suite
 checks it directly against $\phi = z^2 - r^2/2$, which is exactly harmonic in
 axisymmetric coordinates and which the stencil reproduces to solver tolerance.
 
-Both stencils are second-order accurate. `converges at second order in the grid
-step` verifies this empirically against $1/\sqrt{r^2+z^2}$, a smooth harmonic
-function the stencil *cannot* reproduce exactly, so a genuine discretisation
-error appears and can be measured.
+Both stencils are second-order accurate **for a smooth solution on a smooth
+boundary**. `converges at second order in the grid step` verifies this
+empirically against $1/\sqrt{r^2+z^2}$, a smooth harmonic function the stencil
+*cannot* reproduce exactly, so a genuine discretisation error appears and can
+be measured.
+
+That qualifier matters, and §7 gives the measured rate for the actual lens,
+which is closer to 1.5 than to 2. The limiter is not the stencil.
 
 ### 3.2 Relaxation and fast adjust
 
@@ -137,11 +174,24 @@ where $\phi_i$ solves the problem with electrode $i$ at 1 V and all others at
 0 V. This is SIMION's "fast adjust". The relaxation is paid once per electrode;
 changing a voltage afterwards costs one multiply–add per node.
 
-**The superposition is only valid because every basis solution satisfies the
-same homogeneous outer boundary condition.** The grounded enclosure sits at 0 V
-in all of them. If one basis solution had a different outer boundary, summing
-them would be wrong. `superposes basis solutions to the same answer as a direct
-solve` checks the claim numerically rather than trusting the argument.
+**What makes the superposition valid is not that anything is grounded.** In
+IonTrace the enclosure is itself a registered electrode, so its own basis
+solution holds the enclosure at 1 V and nothing in that solve is at zero — and
+superposition still holds exactly. The real conditions are:
+
+1. the set of Dirichlet-frozen nodes is **identical** in every basis solve, so
+   the geometry must not change between them; and
+2. those frozen nodes are **partitioned** by the electrodes — every frozen node
+   is owned by exactly one electrode.
+
+If a frozen node were owned by no electrode, `solveBasis` would hold it at zero
+in every basis solution and no combination of voltages could ever reproduce its
+intended potential. Condition 2 is asserted at build time for that reason.
+
+What would genuinely break superposition: a floating (charge-constrained)
+electrode, space charge, a field-dependent permittivity, or any geometry change
+between solves. `superposes basis solutions to the same answer as a direct
+solve` checks the result numerically rather than trusting the argument.
 
 ### 3.3 Field interpolation
 
@@ -149,26 +199,66 @@ $\mathbf{E} = -\nabla\phi$ is evaluated by central differences **at the grid
 nodes**, and those nodal field components are then bilinearly interpolated to
 the ion's position.
 
-The order matters. Interpolating $\phi$ and differentiating the interpolant is
-cheaper but produces an $\mathbf{E}$ that jumps discontinuously across cell
-boundaries, injecting spurious impulses that an integrator accumulates into
-drifting energy. Differencing first and interpolating second gives a continuous
-$\mathbf{E}$.
+The order matters, though **not** for the reason it is tempting to give.
+Interpolating $\phi$ and differentiating the interpolant produces an
+$\mathbf{E}$ that jumps across cell boundaries, and it is easy to assert that
+those jumps pump energy. They do not: that scheme gives
+$\mathbf{E} = -\nabla\phi_{\text{bilinear}}$ *exactly*, so the work along any
+path is exactly $-\Delta\phi_{\text{bilinear}}$ and the energy is exactly
+conserved. A discontinuous but conservative force cannot pump energy. Its real
+defects are accuracy — $\mathbf{E}$ is only first-order and piecewise constant
+normal to each edge — and a jumpy force that upsets adaptive stepping.
+
+The chosen scheme trades that for the opposite property. Interpolating $E_z$
+and $E_r$ independently gives a **continuous** field that is **not curl-free**:
+$\partial E_r/\partial z \neq \partial E_z/\partial r$ within a cell, so no
+potential exists whose gradient it is, and there is no exactly conserved
+energy. Measured circulation around a sub-cell loop in the einzel fringe is
+$6.8\times10^{-2}$ V against a 68.6 V drop across that cell — a part in
+$10^{3}$. It is the better trade, but it should be understood as a trade.
 
 On the axis, $E_r$ is set to exactly zero rather than differenced. This is not
 a numerical convenience: rotational symmetry leaves a radial field at $r = 0$
 with no direction to point in, so $E_r(0, z) = 0$ is exact, and imposing it
 prevents round-off from deflecting an on-axis ion.
 
+**Conductor surfaces need one-sided differences.** A central difference taken
+*at* a node lying on an electrode reaches one node into the metal, where the
+potential is pinned at the electrode value. It returns
+$(\phi_{\text{vac}} - V)/2h$ where the true surface derivative is
+$(\phi_{\text{vac}} - V)/h$ — exactly half. Being a factor rather than a
+truncation term, it does not shrink with refinement (measured ratio
+0.446 → 0.485 → 0.496 as $h$ falls), and bilinear interpolation then spreads
+the halved value a full cell into the vacuum, leaving a fixed $-25\%$ error
+half a cell off the metal. That is exactly where aperture-grazing rays fly, and
+the error is one-signed, so it does not cancel along a trajectory. Such nodes
+therefore use the one-sided difference on the vacuum side.
+
 **Known inconsistency.** The force uses interpolated nodal $\mathbf{E}$, while
-the energy diagnostic uses interpolated $\phi$. These two are consistent only to
-$O(h^2)$, so the reported energy drift contains a contribution that is *not*
-integrator error and does not shrink when the time step shrinks. It does shrink
-when the grid is refined, and the test `reduces energy drift as the grid is
-refined` exists specifically to confirm that this is the explanation. An
-interpolation scheme that is exactly conservative — bicubic $\phi$ with its
-analytic gradient — would remove it, at the cost of more code. It has not been
-done for this version.
+the energy diagnostic uses interpolated $\phi$. The *pointwise* mismatch between
+them is $O(h)$ in the smooth interior, and $O(1)$ — non-convergent — next to
+electrode rims, where it tracks the diverging corner field. What converges at
+second order is the quantity that actually matters: the mismatch is oscillatory
+with near-zero mean over a cell traversal, so it largely cancels and the
+*path-accumulated* energy drift falls as $O(h^2)$. Measured:
+$1.10\times10^{-2} \to 2.54\times10^{-3} \to 5.37\times10^{-4} \to
+1.40\times10^{-4}$ for $h = 1, 0.5, 0.25, 0.125$ mm.
+
+Two consequences for the reported energy drift:
+
+- It is a **grid-quality** number, not an integrator-quality one. It is flat to
+  within 2 % across a 40× change in time step, so it cannot detect a degraded
+  integrator. `keeps energy drift independent of the time step` asserts that
+  flatness deliberately, and `reduces energy drift at second order` asserts the
+  $h^2$ scaling. Together they pin the explanation rather than the value.
+- It is normalised by $|E_0| = |KE + q\phi|$, which is **gauge-dependent**:
+  shifting every electrode by a constant leaves the field and the trajectory
+  identical but changes the reported percentage. Treat it as an order of
+  magnitude, not a figure of merit.
+
+An interpolation scheme that is exactly conservative — bicubic $\phi$ with its
+analytic gradient — would remove the inconsistency entirely, at the cost of more
+code. It has not been done for this version.
 
 ### 3.4 Trajectory integration
 
@@ -177,7 +267,17 @@ Two integrators, kept deliberately:
 | Method | Order | Symplectic | Notes |
 |---|---|---|---|
 | Runge–Kutta 4 | 4 | no | Default. Highest accuracy per step; the method SIMION uses. Energy error grows slowly and secularly. |
-| Velocity Verlet | 2 | yes | Energy error oscillates about zero rather than accumulating. Kept for future periodic-field (trapping) work. |
+| Velocity Verlet | 2 | in practice | Energy error oscillates about zero rather than accumulating. Kept for future periodic-field (trapping) work. |
+
+Verlet's symplecticity carries an asterisk. Formally it requires
+$\mathbf{F} = -\nabla U$, and the interpolated field is not curl-free, so no
+such $U$ exists and the map is not strictly symplectic. Empirically the
+non-conservative part is oscillatory and cancels: over 3000 oscillation periods
+on a real grid field, Verlet's relative energy error stays bounded in
+$[-2.2\times10^{-2}, -5.6\times10^{-3}]$ with no trend while RK4's ramps
+monotonically from $-0.11$ to $-0.49$. The behaviour the table claims is real;
+the guarantee behind it is not exact, and it would be the first thing to break
+on a coarse grid or a very long trapping run.
 
 Running a case through both and comparing is evidence about the trajectory
 rather than about either method's internal consistency, so the suite does that.
@@ -199,14 +299,45 @@ Adaptive, with two limits and the smaller winning:
 - **acceleration**: $\tfrac{1}{2}|a|\,\Delta t^2 \le C h$, which takes over near
   rest, where the travel limit alone would permit an unbounded step.
 
-$C$ (the "step fraction") defaults to 0.05.
+$C$ (the "step fraction") defaults to 0.05, exported as `DEFAULT_CFL` so the
+code, this document and the UI cannot drift apart.
+
+Both limits bound **displacement**, not time, and that has consequences worth
+knowing. There is no upper bound on $\Delta t$ itself: an ion nearly at rest in
+a nearly field-free region is given an enormous step — 6.6 ms for an ion
+balanced at the top of a +1000 V barrier, against a device transit time of
+microseconds. The trajectory is not wrong, because the displacement limit still
+holds, but the reported flight time is meaningless and `maxTime` becomes a
+post-hoc detector rather than a bound. Relative velocity change is also
+unbounded: whenever the acceleration limit binds, the step permits the speed to
+at least triple. Neither limit is an accuracy control — they prevent the ion
+skipping field structure, nothing more. Step-size accuracy is not currently
+estimated at all, and the energy drift figure cannot supply it (§3.3).
 
 ### 3.6 Flight termination
 
-A flight ends when the ion leaves the domain (`exited`), strikes an electrode
-that is not on an open face (`electrode`), or exhausts its step or time budget.
-Electrode strikes are resolved to the nearest grid node, so the reported impact
-point carries an uncertainty of order $h/2$.
+A flight ends in one of these states:
+
+| `stop` | Meaning |
+|---|---|
+| `exited` | Left forwards through the far face. **Transmitted.** |
+| `reflected` | Came back out of the entrance face. **Not transmitted.** |
+| `electrode` | Struck metal, including the outer housing wall. |
+| `time-limit` / `step-limit` | Ran out of budget. |
+
+The distinction between `exited` and `reflected` is not cosmetic. An einzel
+lens biased above the beam energy is a working ion mirror, and reporting a
+reflected ion as transmitted lets its backwards axis crossing masquerade as a
+focal length — a negative one, for a device that is not a lens at all.
+
+**Electrode strikes are biased, not merely uncertain.** Resolution is to the
+nearest grid node, which shrinks every aperture by exactly $h/2$ in one
+direction. Measured on a field-free lens, the largest transmitted radius is
+5.499 / 5.749 / 5.874 mm at $h$ = 1 / 0.5 / 0.25 mm against a true 6 mm bore —
+always `bore − h/2`. At the default 0.5 mm step the modelled bore is 5.75 mm,
+a 4 % radius deficit and an 8 % acceptance-area deficit. **Transmission figures
+from IonTrace are therefore systematically pessimistic**, and the bias shrinks
+only linearly in $h$.
 
 ---
 
@@ -259,7 +390,7 @@ trustworthy where the corresponding term is negligible.
 | Space charge | ion–ion Coulomb | Dense clouds and high beam currents. Causes emittance growth and, in traps, frequency shifts. |
 | RF / time-dependent fields | $\phi(\mathbf{r}, t)$ | Every Paul trap, quadrupole filter and ion funnel. This build solves a static field only. |
 | Image charge | induced surface charge | Very close electrode approach; small for typical bore radii. |
-| Relativistic correction | $\gamma$ | Electrons above ~10 keV. Reported by `relativisticError`, warned on above 0.1 %. |
+| Relativistic correction | $\gamma$ | Reported by `relativisticError`; warned on above 0.1 %, which for an electron is **341 eV** ($\beta = 0.037$). A 10 keV electron is already 2.9 % off. Ions are safe: a 1 keV, 100 u ion is off by $1.6\times10^{-8}$. |
 | Surface effects | patch potentials, roughness | Real instruments at high precision. |
 | Secondary emission | — | Ion–surface impact; flights simply end at metal. |
 
@@ -284,30 +415,89 @@ output.
 | Planar stencil | $\phi = z^2 - y^2$, exactly harmonic |
 | Cylindrical stencil | $\phi = z^2 - r^2/2$, exactly harmonic, including the axis |
 | Convergence | $1/\sqrt{r^2+z^2}$; second order confirmed empirically |
-| Solver correctness | Laplace residual; maximum principle (no interior extrema) |
-| Fast adjust | superposition vs an independent direct solve |
-| Axis symmetry | $E_r(0,z) = 0$ to machine zero |
+| Solver convergence | Laplace residual (iteration only — see below); maximum principle |
+| Fast adjust | superposition vs an independent direct solve; unowned rim refused |
+| Conductor surfaces | full surface field recovered, not half; zero field inside metal |
+| Absolute scale | mm→m pinned to literal metres; a known field in V/m; painted geometry matches the specification |
 | Integrators | analytic simple harmonic motion; orders 4 and 2 confirmed; exactness in a uniform field |
 | Symplecticity | Verlet energy bounded over 300 oscillation periods |
-| Einzel lens | no net work; mirror symmetry; focusing; positive spherical aberration; monotonic focal length vs bias; reflection above the barrier; RK4 vs Verlet agreement |
+| Focus detection | first forward crossing; exact axis landing; no focus for on-axis, diverging or reflected rays; extrapolation beyond the grid |
+| Einzel lens | no net work; mirror symmetry; positive spherical aberration; monotonic focal length vs bias; reflection reported as reflection; mass-independence of the focus; anion at mirrored polarity |
+| Energy drift | $O(h^2)$ in the grid **and** flat in the time step |
+
+Two cautions about what this table does *not* claim.
+
+**`maxResidual` does not validate the stencil.** It evaluates the same
+expressions the relaxation iterates, so a mis-derived stencil reproduces its own
+error and the residual still falls to round-off — demonstrated with wrong radial
+weights of $1 \pm 1/j$, which gives 9.4×10⁻² error against the analytic solution
+while the residual reads 3.4×10⁻¹⁴. Likewise the maximum principle holds *by
+construction* for any convex-weighted stencil, right or wrong. The stencils are
+validated instead by the closed-form harmonic tests, which do reject that error.
+
+**NaN defeats comparison-based checks.** `NaN > x` is false, so an accumulator
+written `if (err > worst) worst = err` silently discards non-finite values and
+reports zero error on a solution that has blown up entirely. Both the solver's
+convergence test and the suite's error accumulator use `Math.max`, which
+propagates NaN, and `assertFinite` guards the arrays directly.
 
 The einzel-lens tests are the ones that matter most to a user, because they
 check properties the *real device* has. An einzel lens does no net work on a
-transmitted ion, its trajectories are mirror symmetric, and its outer rays
-focus before its inner ones. Those hold regardless of how good the numerics
-are, so a violation is a bug no matter how plausible the picture looks.
+transmitted ion, its trajectories are mirror symmetric, its outer rays focus
+before its inner ones, and its focus is independent of ion mass at fixed energy
+because electrostatic optics depends only on $E/q$. Those hold regardless of how
+good the numerics are, so a violation is a bug no matter how plausible the
+picture looks.
+
+The mass-independence test is also the sharpest check on the unit chain in the
+suite: a stray factor of $u$, of $e$, or of 1000 anywhere between `makeIon` and
+the force would break it immediately, and it is external to the code in a way
+that ratio and ordering tests are not.
 
 ---
 
 ## 7. Known limitations of this version
 
-1. Electrode surfaces are staircase approximations on the grid. SIMION
-   mitigates this with surface-enhanced refinement; IonTrace does not. Expect
-   field error near sharply curved electrodes to be first order in $h$ there,
-   even though the interior solution is second order.
-2. The energy diagnostic is inconsistent with the force at $O(h^2)$ — §3.3.
-3. Electrode strikes are resolved only to the nearest node.
-4. Space charge, collisions and time-dependent fields are absent — §5.
-5. Only one geometry (`einzel`) ships. The potential-array architecture is
+**1. The lens does not converge at second order, and the reason is not
+staircasing.** Measured Richardson orders for `buildEinzelLens` at
+$h$ = 1 / 0.5 / 0.25 / 0.125 mm: on-axis $\phi$ near the gap ≈ 1.5, peak
+on-axis $|E_z|$ ≈ 1.4. There is in fact **no staircase at all** — at the
+default parameters every electrode edge lands exactly on a node
+(`rAt(12) === mmToM(6)` is exactly true), so the boundary is represented
+perfectly.
+
+The limiter is the **sharp 90° conducting rim** at each cylinder end. The
+vacuum wedge there subtends $3\pi/2$, so $\phi - \phi_{\text{edge}} \sim
+\rho^{2/3}$ and $|E| \sim \rho^{-1/3}$: the field at the rim **diverges** as
+the grid is refined rather than converging. Measured $|E|$ one node inside the
+bore from the corner: 47.0 → 60.4 → 77.8 → 99.8 kV/m, a ratio of 1.285 per
+halving against the predicted $2^{1/3} = 1.26$. That is the edge singularity,
+confirmed.
+
+This is a property of the *geometry*, not of the solver, and it would be
+present with a perfectly body-fitted mesh. Real hardware has a finite edge
+radius. Consequences: the global rate is ≈ $O(h^{1.5})$, the focal length
+carries ≈ 0.2 % error at the default grid and ≈ 0.6 % at the 1 mm setting, and
+any future field-strength or breakdown readout must not quote the peak $|E|$,
+which is meaningless.
+
+2. Nodal $\mathbf{E}$ is *not* generally second order even where $\phi$ is:
+   central-differencing an $O(h^2)$-accurate $\phi$ amplifies the error by
+   $1/h$. Measured order for on-axis $E_z$ against a smooth analytic harmonic
+   is ≈ 1.6–1.75.
+3. The energy diagnostic is inconsistent with the force — §3.3. It is a grid
+   diagnostic, not an integrator one, and it is gauge-dependent.
+4. Electrode strikes are resolved only to the nearest node, biasing every
+   aperture inward by $h/2$ — §3.6.
+5. The SOR stopping test is "largest nodal change per sweep", which
+   underestimates the true iteration error by a factor that grows with grid
+   size (≈ 8× at $n$ = 33, ≈ 74× at $n$ = 257). At the default tolerance of
+   $10^{-9}$ on a 1 V basis this still leaves only ~$10^{-7}$ V of error, but
+   it is not the guarantee the name suggests.
+6. `optimalOmega` is derived for an empty rectangle and ignores interior
+   electrodes; it costs roughly 30 % more sweeps than the empirical optimum on
+   the shipped geometry. A speed matter only — the converged answer is the same.
+7. Space charge, collisions and time-dependent fields are absent — §5.
+8. Only one geometry (`einzel`) ships. The potential-array architecture is
    geometry-agnostic; `paint()` accepts any predicate over $(z, r)$, so adding
    an element means describing its metal, not writing new field code.

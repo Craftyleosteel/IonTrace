@@ -113,9 +113,17 @@ export class PotentialArray {
     return this.electrodeId[this.idx(i, j)] !== NO_ELECTRODE;
   }
 
-  /** True if (i, j) lies on the outer rim of the domain. */
+  /**
+   * True if (i, j) lies on a physical rim of the domain.
+   *
+   * In cylindrical mode the axis row j = 0 is a symmetry line, not a rim, so
+   * it is excluded except where the two end faces cross it. Reporting the
+   * axis as boundary would contradict paintEnclosure, which deliberately
+   * leaves it free so the solver can find the on-axis potential.
+   */
   isBoundary(i, j) {
-    return i === 0 || j === 0 || i === this.nz - 1 || j === this.nr - 1;
+    if (i === 0 || i === this.nz - 1 || j === this.nr - 1) return true;
+    return j === 0 && this.symmetry === PLANAR;
   }
 
   /**

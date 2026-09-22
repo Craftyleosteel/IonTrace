@@ -81,11 +81,40 @@ output:
 | Laplace stencils | closed-form harmonic functions, including on the singular axis |
 | Convergence | second order confirmed empirically against $1/\sqrt{r^2+z^2}$ |
 | Fast adjust | superposition vs an independent direct solve |
+| Conductor surfaces | full surface field recovered, not half |
+| Absolute scale | mm→m pinned to literal metres; painted geometry matches the spec |
 | Integrators | analytic simple harmonic motion; orders 4 and 2 confirmed |
-| Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection above the barrier |
+| Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection reported as reflection, focus independent of ion mass |
 
 The lens tests check properties the *real device* has, so they fail for
-physical reasons rather than because an output number moved.
+physical reasons rather than because an output number moved. The sharpest of
+them is mass-independence: electrostatic optics depends only on $E/q$, so
+1 u and 10 000 u ions at the same energy must focus at the same point (only the
+flight time differs, as $\sqrt{m}$). A stray factor of $u$, of $e$, or of 1000
+anywhere in the unit chain breaks it immediately.
+
+This suite was written against an adversarial review. Four independent agents
+audited the solver, the integrator, the units and ion-optics realism, and the
+test suite itself — the last by mutation testing, deliberately breaking the
+physics to find which tests failed to notice. `docs/PHYSICS.md` records what
+they found, including the parts that are still wrong.
+
+## Known limitations
+
+Read [docs/PHYSICS.md §7](docs/PHYSICS.md) before trusting a number. The
+headline ones:
+
+- **Transmission is systematically pessimistic.** Electrode strikes resolve to
+  the nearest grid node, shrinking every aperture by $h/2$ — a 6 mm bore models
+  as 5.75 mm at the default resolution.
+- **The lens converges at ≈ $O(h^{1.5})$, not $O(h^2)$**, limited by the field
+  singularity at the sharp 90° electrode rims, where $|E| \sim \rho^{-1/3}$ and
+  the peak field does not converge at all.
+- **The energy-drift readout is a grid-quality number, not an integrator one.**
+  It is flat in the time step and gauge-dependent.
+- **Biasing the entrance or exit electrode** puts a spurious field across the
+  drift regions, because the domain end faces act as grounded plates. The UI
+  flags it.
 
 ## Layout
 

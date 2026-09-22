@@ -23,7 +23,7 @@
  * is what the energy-conservation test in tests/physics.test.js relies on.
  */
 
-import { CYLINDRICAL, PLANAR } from './grid.js';
+import { CYLINDRICAL, PLANAR, NO_ELECTRODE } from './grid.js';
 
 export class Field {
   /**
@@ -105,28 +105,53 @@ export class Field {
    * radial field at r = 0 would have no direction to point in, so Er(0, z) = 0
    * is exact, and imposing it keeps ions launched on-axis from acquiring a
    * spurious radial kick from round-off.
+   *
+   * A central difference must not straddle a conductor surface. At a node
+   * lying ON an electrode, the neighbour on the metal side sits inside the
+   * conductor, where the potential is constant at the electrode value. The
+   * central difference then returns
+   *
+   *     (phi_vacuum - V) / 2h   instead of   (phi_vacuum - V) / h
+   *
+   * exactly half the true surface field - and being a factor, not a
+   * truncation term, it does not shrink as the grid is refined. Bilinear
+   * interpolation spreads that halved value a full cell into the vacuum, so
+   * an ion grazing an aperture feels a systematically weak radial field. Such
+   * nodes therefore use the one-sided difference on the vacuum side, which is
+   * the correct surface derivative. Nodes buried inside metal keep the
+   * central form and give E = 0, as a conductor's interior should.
    */
   #computeGradient() {
-    const { nz, nr, step, symmetry } = this.grid;
+    const { nz, nr, step, symmetry, electrodeId } = this.grid;
     const { phi, Ez, Er } = this;
     const inv2h = 1 / (2 * step);
     const invh = 1 / step;
     const cylindrical = symmetry === CYLINDRICAL;
+    const metal = (k) => electrodeId[k] !== NO_ELECTRODE;
 
     for (let j = 0; j < nr; j++) {
       const row = j * nz;
       for (let i = 0; i < nz; i++) {
         const k = row + i;
+        const onMetal = metal(k);
 
         // dphi/dz
         if (i === 0) Ez[k] = -(phi[k + 1] - phi[k]) * invh;
         else if (i === nz - 1) Ez[k] = -(phi[k] - phi[k - 1]) * invh;
+        else if (onMetal && metal(k - 1) && !metal(k + 1))
+          Ez[k] = -(phi[k + 1] - phi[k]) * invh;
+        else if (onMetal && metal(k + 1) && !metal(k - 1))
+          Ez[k] = -(phi[k] - phi[k - 1]) * invh;
         else Ez[k] = -(phi[k + 1] - phi[k - 1]) * inv2h;
 
         // dphi/dr
         if (j === 0) {
           Er[k] = cylindrical ? 0 : -(phi[k + nz] - phi[k]) * invh;
         } else if (j === nr - 1) {
+          Er[k] = -(phi[k] - phi[k - nz]) * invh;
+        } else if (onMetal && metal(k - nz) && !metal(k + nz)) {
+          Er[k] = -(phi[k + nz] - phi[k]) * invh;
+        } else if (onMetal && metal(k + nz) && !metal(k - nz)) {
           Er[k] = -(phi[k] - phi[k - nz]) * invh;
         } else {
           Er[k] = -(phi[k + nz] - phi[k - nz]) * inv2h;
@@ -163,7 +188,17 @@ export class Field {
     if (i > grid.nz - 2) i = grid.nz - 2;
     if (j > grid.nr - 2) j = grid.nr - 2;
 
-    return { i, j, fz: gz - i, fr: gr - j };
+    // Clamp the fractional offsets too. Clamping only the cell index leaves
+    // fz or fr outside [0, 1] for a point beyond the domain, and the bilinear
+    // form then EXTRAPOLATES rather than saturating: the grounded 16 mm
+    // housing of the default lens reports 807 V at r = 66 mm, growing without
+    // limit. RK4's intermediate stages can land out there even when the step
+    // endpoint does not, so the fabricated field would feed back into a
+    // trajectory that never visibly left the grid.
+    const fz = Math.min(1, Math.max(0, gz - i));
+    const fr = Math.min(1, Math.max(0, gr - j));
+
+    return { i, j, fz, fr };
   }
 
   /** Bilinear sample of `arr` at (z, r). */

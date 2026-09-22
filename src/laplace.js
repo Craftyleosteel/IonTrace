@@ -51,14 +51,23 @@ import { CYLINDRICAL, NO_ELECTRODE } from './grid.js';
  * Theoretically optimal over-relaxation factor for a Dirichlet Laplace
  * problem on an nz x nr grid.
  *
- * The Jacobi iteration's spectral radius on such a grid is
- * rho = (cos(pi/nz) + cos(pi/nr)) / 2, and the SOR optimum follows as
- * omega = 2 / (1 + sqrt(1 - rho^2)). Real geometries have interior electrodes
- * that this estimate ignores, so it is an approximation - but a good enough
- * one to turn an O(N^2) relaxation into roughly O(N^1.5).
+ * The Jacobi iteration's spectral radius on a grid with nz by nr TOTAL nodes,
+ * hence nz-2 interior ones, is rho = (cos(pi/(nz-1)) + cos(pi/(nr-1))) / 2,
+ * and the SOR optimum follows as omega = 2 / (1 + sqrt(1 - rho^2)). The
+ * denominators are node spacings, not node counts; using nz directly biases
+ * omega upward, which is the worse side to err on because the SOR spectral
+ * radius degrades linearly in omega - 1 above the optimum.
+ *
+ * This remains an estimate. The formula is derived for an empty rectangle,
+ * and interior electrodes change the spectrum; measured against a sweep of
+ * omega on the shipped einzel geometry it costs roughly 30 % more sweeps than
+ * the empirical optimum. That is a speed matter, not an accuracy one - the
+ * converged solution is the same - and it still turns an O(N^2) relaxation
+ * into roughly O(N^1.5).
  */
 export function optimalOmega(nz, nr) {
-  const rho = (Math.cos(Math.PI / nz) + Math.cos(Math.PI / nr)) / 2;
+  const rho =
+    (Math.cos(Math.PI / (nz - 1)) + Math.cos(Math.PI / (nr - 1))) / 2;
   return 2 / (1 + Math.sqrt(1 - rho * rho));
 }
 
@@ -103,8 +112,12 @@ export function relax(grid, phi, opts = {}) {
         const target = (4 * phi[nz + i] + phi[k + 1] + phi[k - 1]) / 6;
         const delta = omega * (target - phi[k]);
         phi[k] += delta;
-        const mag = Math.abs(delta);
-        if (mag > change) change = mag;
+        // Math.max, not a comparison. `NaN > change` is false, so a
+        // comparison silently discards non-finite updates and leaves `change`
+        // at zero - the iteration would then report convergence on a grid
+        // that had blown up to NaN. Math.max propagates NaN, which falls out
+        // of the loop and is reported as not converged.
+        change = Math.max(change, Math.abs(delta));
       }
     }
 
@@ -123,8 +136,12 @@ export function relax(grid, phi, opts = {}) {
           (wUp * phi[k + nz] + wDown * phi[k - nz] + phi[k + 1] + phi[k - 1]) / 4;
         const delta = omega * (target - phi[k]);
         phi[k] += delta;
-        const mag = Math.abs(delta);
-        if (mag > change) change = mag;
+        // Math.max, not a comparison. `NaN > change` is false, so a
+        // comparison silently discards non-finite updates and leaves `change`
+        // at zero - the iteration would then report convergence on a grid
+        // that had blown up to NaN. Math.max propagates NaN, which falls out
+        // of the loop and is reported as not converged.
+        change = Math.max(change, Math.abs(delta));
       }
     }
 
@@ -138,9 +155,15 @@ export function relax(grid, phi, opts = {}) {
  * Largest absolute residual of Laplace's equation over the free nodes,
  * expressed as h^2 * div grad phi in volts.
  *
- * This is an independent check on the answer rather than on the iteration: a
- * converged relaxation can still be wrong if a stencil is mis-derived, but it
- * cannot have a small residual if it is. Used by the test suite.
+ * This measures how completely the ITERATION has converged, and nothing more.
+ * It deliberately does not claim to validate the stencil: it evaluates the
+ * same expressions `relax` iterates, so a mis-derived stencil reproduces its
+ * own error here and the residual still falls to round-off. Relaxing with
+ * deliberately wrong radial weights of 1 +/- 1/j gives a max error of 9.4e-2
+ * against the analytic solution while this function reports 3.4e-14.
+ *
+ * The stencil itself is validated instead by solving a closed-form harmonic
+ * function and comparing - see tests/physics.test.js.
  */
 export function maxResidual(grid, phi) {
   const { nz, nr, symmetry, electrodeId } = grid;
@@ -174,6 +197,40 @@ export function maxResidual(grid, phi) {
 }
 
 /**
+ * Verify that every node the relaxation never updates belongs to an electrode.
+ *
+ * `relax` sweeps only the interior (plus the axis row in cylindrical mode),
+ * so the domain rim is frozen at whatever it was initialised to regardless of
+ * whether any electrode was painted there. An unpainted rim is therefore held
+ * at 0 V invisibly - a grounded box the caller never asked for and cannot
+ * change by setting voltages. Catching it here turns a silently wrong field
+ * into an error at build time.
+ */
+export function assertFrozenNodesAreOwned(grid) {
+  const { nz, nr, symmetry, electrodeId } = grid;
+  const axisIsFree = symmetry === CYLINDRICAL;
+
+  for (let j = 0; j < nr; j++) {
+    for (let i = 0; i < nz; i++) {
+      const rim =
+        i === 0 ||
+        i === nz - 1 ||
+        j === nr - 1 ||
+        (j === 0 && !axisIsFree);
+      if (!rim) continue;
+      if (electrodeId[j * nz + i] === NO_ELECTRODE) {
+        throw new Error(
+          `Grid node (i=${i}, j=${j}) lies on the domain rim but belongs to no ` +
+            'electrode. The relaxation never updates rim nodes, so it would be ' +
+            'frozen at 0 V and impose an invisible grounded boundary. Paint an ' +
+            'enclosure electrode over the whole rim (see paintEnclosure).'
+        );
+      }
+    }
+  }
+}
+
+/**
  * Solve the unit basis solutions that make fast adjustment possible.
  *
  * For each electrode in turn, Laplace's equation is solved with that
@@ -187,9 +244,22 @@ export function maxResidual(grid, phi) {
  * relaxation is paid once per electrode, after which changing a voltage costs
  * one multiply-add per node instead of a fresh solve.
  *
- * The superposition is only valid because every basis solution satisfies the
- * *same* homogeneous outer boundary condition (the grounded enclosure sits at
- * 0 V in all of them). field.js documents the consequence for the caller.
+ * What makes the superposition valid is NOT that some electrode sits at 0 V.
+ * In this codebase the enclosure is itself a registered electrode, so its own
+ * basis solution has the enclosure at 1 V and nothing is grounded at all -
+ * and superposition still holds exactly. The real conditions are:
+ *
+ *   1. the set of Dirichlet-frozen nodes is identical in every basis solve
+ *      (the geometry must not change between them), and
+ *   2. those frozen nodes are PARTITIONED by the electrodes - every frozen
+ *      node is owned by exactly one electrode.
+ *
+ * If a frozen node were owned by no electrode, `solveBasis` would hold it at
+ * zero in every basis solution and no combination could ever reproduce its
+ * intended potential. The assertion below enforces condition 2, because the
+ * relaxation silently freezes the domain rim whether or not anything was
+ * painted there - so an unpainted rim would otherwise impose an invisible
+ * grounded box that no voltage setting could override.
  *
  * @returns {{basis: Float64Array[], reports: object[]}}
  */
@@ -197,6 +267,8 @@ export function solveBasis(grid, opts = {}) {
   const n = grid.nz * grid.nr;
   const basis = [];
   const reports = [];
+
+  assertFrozenNodesAreOwned(grid);
 
   for (let e = 0; e < grid.electrodeCount; e++) {
     const phi = new Float64Array(n);

@@ -15,7 +15,7 @@
  */
 
 import { buildEinzelLens } from './geometries/einzel.js';
-import { parallelBeam, axialCrossing } from './ion.js';
+import { makeIon, parallelBeam, focalCrossing } from './ion.js';
 import { flyIon, kineticEnergy } from './integrator.js';
 import { joulesToEV, mToMm } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
@@ -131,11 +131,24 @@ function applyVoltages() {
     exit: outer,
   });
   stats.adjustMs = performance.now() - t0;
+
+  // The domain end faces are part of the grounded housing, so they act as
+  // solid 0 V plates across the aperture. That is harmless while the outer
+  // cylinders are also at 0 V, but biasing them puts a real potential
+  // difference across the entry and exit drifts and invents a field of
+  // several kV/m where the actual instrument has none. The ion, meanwhile,
+  // flies through those faces as if they were open. Flag the inconsistency
+  // rather than pretending the result means something.
+  stats.voltageWarning =
+    outer !== 0
+      ? `Entrance/exit biased to ${outer} V against grounded end faces: the ` +
+        'drift regions carry a spurious accelerating field. See PHYSICS.md §2.1.'
+      : null;
 }
 
 /** Fly the beam through the current field. */
 function flyBeam() {
-  const { field } = model;
+  const { field, geometry } = model;
   const spec = {
     mass: readNumber(inputs.mass, 100),
     charge: readNumber(inputs.charge, 1),
@@ -168,35 +181,68 @@ function flyBeam() {
   const t0 = performance.now();
   trajectories = rays.map((ion) => {
     const result = flyIon(field, ion, opts);
-    return {
-      ...result,
-      start: ion,
-      focus: ion.x === 0 ? null : axialCrossing(result.points),
-    };
+    return { ...result, start: ion, focus: focalCrossing(result.points) };
   });
   stats.flyMs = performance.now() - t0;
 
-  // Aggregate diagnostics.
+  const lensCentre = (geometry.bounds.z3 + geometry.bounds.z4) / 2; // mm
+  const fromCentre = (zMetres) => mToMm(zMetres) - lensCentre;
+
+  // Only a forward exit is transmission. A reflected ion leaves through the
+  // entrance face, which is a real and interesting result, but it is not the
+  // beam getting through.
   const transmitted = trajectories.filter((t) => t.stop === 'exited');
   stats.transmitted = transmitted.length;
+  stats.reflected = trajectories.filter((t) => t.stop === 'reflected').length;
+  stats.struck = trajectories.filter((t) => t.stop === 'electrode').length;
   stats.total = trajectories.length;
   stats.drift = Math.max(0, ...trajectories.map((t) => t.energyDrift));
 
-  const foci = trajectories.map((t) => t.focus).filter((f) => f !== null);
-  const lensCentre =
-    (model.geometry.bounds.z3 + model.geometry.bounds.z4) / 2; // mm
-  stats.focus =
-    foci.length > 0 ? foci.reduce((a, b) => a + b, 0) / foci.length : null;
-  stats.focalLength =
-    stats.focus !== null ? mToMm(stats.focus) - lensCentre : null;
+  // The paraxial focus comes from a dedicated probe ray close to the axis,
+  // not from an average over the drawn rays. Averaging mixes the marginal and
+  // paraxial foci, so the reported "focal length" would shift with the beam
+  // radius and the ray count - neither of which is a property of the lens.
+  const probe = flyIon(
+    field,
+    makeIon({ ...spec, x: 0.01 * geometry.boreRadius }),
+    opts
+  );
+  const probeFocus = focalCrossing(probe.points);
+  stats.paraxial =
+    probe.stop === 'exited' && probeFocus
+      ? { mm: fromCentre(probeFocus.z), extrapolated: probeFocus.extrapolated }
+      : null;
 
-  // Energy in and out, for the einzel lens's defining no-net-work property.
+  // Spherical aberration: how far short of the paraxial focus the outermost
+  // transmitted ray crosses. Negative means under-corrected, which is what
+  // every round electrostatic lens does.
+  const marginal = transmitted
+    .filter((t) => t.focus)
+    .sort((a, b) => Math.abs(b.start.x) - Math.abs(a.start.x))[0];
+  stats.aberration =
+    marginal && stats.paraxial
+      ? fromCentre(marginal.focus.z) - stats.paraxial.mm
+      : null;
+
+  // The einzel lens's defining property is that it does no net work, so the
+  // figure that matters is the WORST departure across the beam, not one
+  // arbitrary ray's.
   if (transmitted.length > 0) {
-    const t = transmitted[transmitted.length - 1];
-    stats.keIn = joulesToEV(kineticEnergy(t.points[0]));
-    stats.keOut = joulesToEV(kineticEnergy(t.points[t.points.length - 1]));
+    let worst = 0;
+    let atIn = 0;
+    for (const t of transmitted) {
+      const kIn = joulesToEV(kineticEnergy(t.points[0]));
+      const kOut = joulesToEV(kineticEnergy(t.points[t.points.length - 1]));
+      if (Math.abs(kOut - kIn) > Math.abs(worst)) {
+        worst = kOut - kIn;
+        atIn = kIn;
+      }
+    }
+    stats.keIn = atIn;
+    stats.worstWork = worst;
   } else {
-    stats.keIn = stats.keOut = null;
+    stats.keIn = null;
+    stats.worstWork = null;
   }
 }
 
@@ -520,48 +566,71 @@ function drawReadout() {
     return;
   }
 
+  // Measured from a probe ray near the axis, so it is a property of the lens
+  // rather than of the drawn beam.
   const focal =
-    stats.focalLength === null
-      ? stat('Focal length', '—', '', 'no ray crosses the axis inside the domain')
+    stats.paraxial === null
+      ? stat(
+          'Paraxial focus',
+          '—',
+          '',
+          stats.reflected > 0
+            ? 'beam is reflected — this is an ion mirror, not a lens'
+            : 'probe ray does not converge'
+        )
       : stat(
-          'Focal length',
-          stats.focalLength.toFixed(1),
+          'Paraxial focus',
+          stats.paraxial.mm.toFixed(1),
           'mm',
-          'mean axis crossing, from lens centre'
+          'from lens centre' +
+            (stats.paraxial.extrapolated ? ' · extrapolated beyond the grid' : '')
+        );
+
+  const aberration =
+    stats.aberration === null
+      ? stat('Spherical aberration', '—', '', 'needs a transmitted off-axis ray')
+      : stat(
+          'Spherical aberration',
+          stats.aberration.toFixed(2),
+          'mm',
+          `outermost ray crosses ${Math.abs(stats.aberration).toFixed(2)} mm ` +
+            (stats.aberration < 0 ? 'short (under-corrected)' : 'long')
         );
 
   // The einzel lens's defining property: entrance and exit are at the same
   // potential, so a transmitted ion must leave with the energy it arrived
-  // with. Any visible discrepancy is numerical error worth knowing about.
+  // with. Reported as the worst case across the beam.
   const energy =
     stats.keIn === null
-      ? stat('Energy out', '—', '', 'no ion transmitted')
+      ? stat('Net work', '—', '', 'nothing transmitted')
       : stat(
-          'Energy out',
-          stats.keOut.toFixed(2),
+          'Net work',
+          stats.worstWork.toFixed(3),
           'eV',
-          `in ${stats.keIn.toFixed(2)} eV · net work ${(
-            stats.keOut - stats.keIn
-          ).toFixed(3)} eV`,
-          Math.abs(stats.keOut - stats.keIn) > 0.01 * stats.keIn
+          `worst of ${stats.transmitted} transmitted, on ${stats.keIn.toFixed(0)} eV in`,
+          Math.abs(stats.worstWork) > 0.01 * stats.keIn
         );
+
+  const fate = [
+    `${stats.transmitted} through`,
+    stats.reflected ? `${stats.reflected} reflected` : null,
+    stats.struck ? `${stats.struck} on metal` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   const driftPct = stats.drift * 100;
 
   readoutEl.innerHTML = [
     focal,
+    aberration,
     energy,
-    stat(
-      'Transmitted',
-      `${stats.transmitted}/${stats.total}`,
-      '',
-      'rays leaving the domain without striking metal'
-    ),
+    stat('Transmitted', `${stats.transmitted}/${stats.total}`, '', fate),
     stat(
       'Energy drift',
       driftPct < 0.01 ? '<0.01' : driftPct.toFixed(2),
       '%',
-      'worst deviation of ½mv² + qφ along a flight',
+      'worst ½mv² + qφ deviation · grid quality, not step size',
       stats.drift > 0.02
     ),
     stat(
@@ -572,6 +641,9 @@ function drawReadout() {
     ),
   ].join('');
 
+  if (stats.voltageWarning) {
+    readoutEl.innerHTML += stat('Model warning', '!', '', stats.voltageWarning, true);
+  }
   if (stats.warnings?.length) {
     readoutEl.innerHTML += stat('Geometry warning', '!', '', stats.warnings[0], true);
   }
