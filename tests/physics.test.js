@@ -46,6 +46,7 @@ import {
   stepVerlet,
   flyIon,
   flyBeam,
+  createFlight,
   totalEnergy,
   kineticEnergy,
 } from '../src/integrator.js';
@@ -53,6 +54,7 @@ import {
   currentShares,
   spaceChargeField,
   lineChargeDensity,
+  coulombField,
 } from '../src/spacecharge.js';
 import { makeIon, parallelBeam, axialCrossing, focalCrossing } from '../src/ion.js';
 import { buildEinzelLens } from '../src/geometries/einzel.js';
@@ -793,6 +795,106 @@ describe('Space charge', () => {
   });
 });
 
+describe('Discrete Coulomb repulsion', () => {
+  const e = ELEMENTARY_CHARGE;
+  const k = 1 / (4 * Math.PI * VACUUM_PERMITTIVITY);
+
+  it('reproduces Coulomb\'s law for two charges', () => {
+    // E = q / (4 pi eps0 d^2), pointing away from the other charge. Checked
+    // against the closed form rather than against itself.
+    const d = 1e-3;
+    const { Ex, Ez } = coulombField([0, d], [0, 0], [e, e], 1, 0);
+    const expected = (k * e) / (d * d);
+
+    assertRelClose(Ex[0], -expected, 1e-12, 'left charge pushed left');
+    assertRelClose(Ex[1], expected, 1e-12, 'right charge pushed right');
+    assertClose(Ez[0], 0, 1e-30, 'no axial component for a transverse pair');
+  });
+
+  it('falls off as the inverse square of separation', () => {
+    const at = (d) => coulombField([0, d], [0, 0], [e, e], 1, 0).Ex[1];
+    assertRelClose(at(2e-3), at(1e-3) / 4, 1e-12, 'doubling d quarters E');
+    assertRelClose(at(3e-3), at(1e-3) / 9, 1e-12, 'tripling d gives one ninth');
+  });
+
+  it('obeys Newton\'s third law', () => {
+    // Equal and opposite forces. With unequal charges the FIELDS differ, so
+    // the check has to be on q E, which is the force.
+    const { Ex } = coulombField([0, 1e-3], [0, 0], [e, 3 * e], 1, 0);
+    assertRelClose(e * Ex[0], -(3 * e) * Ex[1], 1e-12, 'forces must balance');
+  });
+
+  it('superposes linearly over many charges', () => {
+    // The field from three charges must equal the sum of the three pairwise
+    // fields computed separately.
+    const xs = [0, 1e-3, 2.5e-3];
+    const zs = [0, 0.5e-3, -1e-3];
+    const qs = [e, e, e];
+    const all = coulombField(xs, zs, qs, 1, 0);
+
+    const a = coulombField([xs[0], xs[1]], [zs[0], zs[1]], [qs[0], qs[1]], 1, 0);
+    const b = coulombField([xs[0], xs[2]], [zs[0], zs[2]], [qs[0], qs[2]], 1, 0);
+
+    assertRelClose(all.Ex[0], a.Ex[0] + b.Ex[0], 1e-12, 'superposition in x');
+    assertRelClose(all.Ez[0], a.Ez[0] + b.Ez[0], 1e-12, 'superposition in z');
+  });
+
+  it('scales linearly with the macro-weight', () => {
+    // A particle standing for w real ions carries charge wq and mass wm, so
+    // q/m is unchanged and only the mutual field scales - linearly in w.
+    const a = coulombField([0, 1e-3], [0, 0], [e, e], 1, 0).Ex[1];
+    const b = coulombField([0, 1e-3], [0, 0], [e, e], 1e6, 0).Ex[1];
+    assertRelClose(b, 1e6 * a, 1e-12, 'weight scales the field linearly');
+  });
+
+  it('shows why weighting is needed at all', () => {
+    // Nine unweighted elementary charges over millimetres produce a field of
+    // order 1e-3 V/m, against electrode fields of order 1e4. Getting no
+    // visible repulsion from a handful of real ions is the correct answer,
+    // not a defect - this pins that expectation.
+    const { Ex } = coulombField([0, 3e-3], [0, 0], [e, e], 1, 0);
+    assert(
+      Math.abs(Ex[1]) < 1e-3,
+      `two real ions 3 mm apart should barely interact, got ${Ex[1]} V/m`
+    );
+  });
+
+  it('exerts no force on an isolated particle', () => {
+    const { Ex, Ez } = coulombField([1e-3], [0], [e], 1e6, 0);
+    assertClose(Ex[0], 0, 0, 'a lone particle has nothing to push against');
+    assertClose(Ez[0], 0, 0, 'a lone particle has nothing to push against');
+  });
+
+  it('bounds the force at close approach when softened', () => {
+    // Without softening the force diverges and a finite time step would fling
+    // the pair apart with energy from nowhere. With softening it stays finite
+    // and, crucially, still matches Coulomb at long range.
+    const eps = 1e-4;
+    const close = coulombField([0, 1e-9], [0, 0], [e, e], 1, eps).Ex[1];
+    assert(Number.isFinite(close), 'softened force must stay finite');
+    const bound = (k * e) / (eps * eps);
+    assert(
+      Math.abs(close) <= bound,
+      `softened force ${close} exceeds its own bound ${bound}`
+    );
+
+    const far = coulombField([0, 5e-3], [0, 0], [e, e], 1, eps).Ex[1];
+    const unsoftened = (k * e) / (5e-3 * 5e-3);
+    assertRelClose(far, unsoftened, 1e-3, 'softening must not alter long range');
+  });
+
+  it('attracts opposite charges', () => {
+    // The sign convention has to work for a negative ion too, or an anion
+    // beam would implode.
+    const { Ex } = coulombField([0, 1e-3], [0, 0], [e, -e], 1, 0);
+    // Particle 1 is negative and sits to the right of a positive charge, so
+    // the FIELD there points right (away from the positive charge) while the
+    // force qE on it points left, back towards the positive charge.
+    assert(Ex[1] > 0, 'field from a positive charge points away from it');
+    assert(-e * Ex[1] < 0, 'force on the negative ion must point inward');
+  });
+});
+
 describe('Space charge in flight', () => {
   const built = buildEinzelLens({ gridStep: 0.5 });
   const { field } = built;
@@ -903,6 +1005,112 @@ describe('Space charge in flight', () => {
       assert(lo.points.length === hi.points.length, `pair ${i} differs in length`);
       const a = lo.points[lo.points.length - 1];
       const b = hi.points[hi.points.length - 1];
+      assertClose(a.x, -b.x, 1e-15, `pair ${i} transverse mirror`);
+      assertClose(a.z, b.z, 1e-15, `pair ${i} axial mirror`);
+    }
+  });
+
+  it('gives the same trajectory however the flight is chunked', () => {
+    // The live display advances the flight a few steps per animation frame.
+    // That must not change the physics: the time step is chosen from each
+    // ion's own state, never from wall-clock time, so a fast machine drawing
+    // 200 steps per frame and a slow one drawing 7 must agree exactly.
+    //
+    // This is the test that makes a live simulation trustworthy rather than
+    // merely animated.
+    const run = (chunk) => {
+      const flight = createFlight(field, beam(), {
+        cfl: 0.05,
+        repulsion: 'coulomb',
+        ionsPerParticle: 1e7,
+      });
+      while (!flight.done) flight.advance(chunk);
+      return flight;
+    };
+
+    const a = run(7);
+    const b = run(200);
+    const c = run(Infinity);
+
+    assert(a.steps === b.steps && b.steps === c.steps, 'step counts must match');
+    for (let i = 0; i < a.tracks.length; i++) {
+      const pa = a.tracks[i].state;
+      const pb = b.tracks[i].state;
+      const pc = c.tracks[i].state;
+      assertClose(pb.x, pa.x, 0, `ion ${i} x, chunk 7 vs 200`);
+      assertClose(pb.z, pa.z, 0, `ion ${i} z, chunk 7 vs 200`);
+      assertClose(pc.x, pa.x, 0, `ion ${i} x, chunk 7 vs unbounded`);
+      assertClose(pc.t, pa.t, 0, `ion ${i} time, chunk 7 vs unbounded`);
+      assert(a.tracks[i].stop === b.tracks[i].stop, `ion ${i} stop reason`);
+    }
+  });
+
+  it('pushes discrete ions apart', () => {
+    // The whole point of the discrete model: ions must end further apart than
+    // they would with no interaction at all.
+    const spread = (opts) => {
+      const { tracks } = flyBeam(field, beam(), { cfl: 0.05, ...opts });
+      const ends = tracks
+        .filter((t) => t.stop === 'exited')
+        .map((t) => Math.abs(t.points[t.points.length - 1].x));
+      return Math.max(...ends);
+    };
+
+    const free = spread({ repulsion: 'none' });
+    const repelled = spread({ repulsion: 'coulomb', ionsPerParticle: 1e7 });
+    assert(
+      repelled > free,
+      `Coulomb repulsion must widen the beam: ${(free * 1e3).toFixed(3)} mm -> ` +
+        `${(repelled * 1e3).toFixed(3)} mm`
+    );
+  });
+
+  it('barely moves the beam at unit weight, and moves it in proportion', () => {
+    // Nine real elementary charges are not zero, they are small, and the test
+    // should say which. Two ions 3 mm apart give E = 1.6e-4 V/m, hence
+    // a = 154 m/s^2, hence about a nanometre of deflection over a 2.8 us
+    // flight. Demanding exactly no motion would be demanding the wrong answer.
+    //
+    // What must hold is that the deflection is physically negligible, and
+    // that it scales with the macro-weight - which is the property the whole
+    // weighting scheme rests on.
+    const endsWith = (opts) =>
+      flyBeam(field, beam(), { cfl: 0.05, ...opts }).tracks.map((t) => t.state.x);
+
+    const free = endsWith({ repulsion: 'none' });
+    const unit = endsWith({ repulsion: 'coulomb', ionsPerParticle: 1 });
+    const scaled = endsWith({ repulsion: 'coulomb', ionsPerParticle: 1e3 });
+
+    for (let i = 0; i < free.length; i++) {
+      const dUnit = Math.abs(unit[i] - free[i]);
+      const dScaled = Math.abs(scaled[i] - free[i]);
+
+      assert(
+        dUnit < 1e-7,
+        `ion ${i} moved ${(dUnit * 1e9).toFixed(1)} nm at unit weight, which is ` +
+          'far more than a handful of elementary charges can do'
+      );
+
+      // Deflection is linear in the weight while it stays a small
+      // perturbation, so a thousandfold weight gives a thousandfold shift.
+      if (dUnit > 1e-12) {
+        assertRelClose(dScaled / dUnit, 1e3, 0.05, `ion ${i} weight scaling`);
+      }
+    }
+  });
+
+  it('stays mirror symmetric under discrete repulsion', () => {
+    // The launch is symmetric about the axis, and Coulomb forces between a
+    // symmetric set of charges preserve that symmetry exactly.
+    const { tracks } = flyBeam(field, beam(), {
+      cfl: 0.05,
+      repulsion: 'coulomb',
+      ionsPerParticle: 1e7,
+    });
+    const n = tracks.length;
+    for (let i = 0; i < (n - 1) / 2; i++) {
+      const a = tracks[i].state;
+      const b = tracks[n - 1 - i].state;
       assertClose(a.x, -b.x, 1e-15, `pair ${i} transverse mirror`);
       assertClose(a.z, b.z, 1e-15, `pair ${i} axial mirror`);
     }

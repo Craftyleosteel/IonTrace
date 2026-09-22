@@ -16,7 +16,7 @@
 
 import { buildEinzelLens } from './geometries/einzel.js';
 import { makeIon, parallelBeam, focalCrossing } from './ion.js';
-import { flyBeam, flyIon, kineticEnergy } from './integrator.js';
+import { createFlight, flyIon, kineticEnergy } from './integrator.js';
 import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
 
@@ -44,7 +44,9 @@ const inputs = {
   gridStep: el('gridStep'),
   method: el('method'),
   cfl: el('cfl'),
+  repulsion: el('repulsion'),
   beamCurrent: el('beamCurrent'),
+  ionsPerParticle: el('ionsPerParticle'),
   showField: el('showField'),
   showContours: el('showContours'),
 };
@@ -117,14 +119,17 @@ let trajectories = [];
 let stats = {};
 
 /**
- * Animation state.
+ * The in-progress flight, advanced a chunk of steps per animation frame.
  *
- * `head` is a sample index, and because flyBeam advances every ion on a
- * shared time step, the same index is the same INSTANT for every ray. The
- * moving dots are therefore a real snapshot of where the bunch is, not a
- * drawing convenience.
+ * Because every ion shares a time step, all the markers on screen are the
+ * same INSTANT - a real snapshot of where the bunch is, not a drawing
+ * convenience.
  */
-let animation = { head: Infinity, total: 0, running: false, frame: 0 };
+let flight = null;
+let flightSpec = null;
+let flightOpts = null;
+let flightStarted = 0;
+let animation = { running: false, frame: 0, perFrame: 40 };
 
 /** True when the drawn trajectories no longer match the current settings. */
 let stale = false;
@@ -172,9 +177,16 @@ function applyVoltages() {
       : null;
 }
 
-/** Fly the beam through the current field. */
-function runFlight() {
-  const { field, geometry } = model;
+/**
+ * Build the beam and create a flight, without running it.
+ *
+ * The flight is then advanced a chunk at a time by the animation loop, so the
+ * ions are integrated as they are drawn rather than replayed from a finished
+ * path. Chunking cannot change the result: the time step comes from each
+ * ion's own state, never from the frame rate.
+ */
+function startFlight() {
+  const { field } = model;
   const spec = {
     mass: readNumber(inputs.mass, 100),
     charge: readNumber(inputs.charge, 1),
@@ -189,19 +201,30 @@ function runFlight() {
     rays = parallelBeam({ ...spec, count, maxOffset });
   } catch (err) {
     trajectories = [];
+    flight = null;
     stats.error = err.message;
     return;
   }
   stats.error = null;
+  stats.flown = false;
 
+  const repulsion = inputs.repulsion.value;
   // Slider is in microamps; the physics is in amperes.
   const beamCurrent = readNumber(inputs.beamCurrent, 0) * 1e-6;
-  stats.beamCurrent = beamCurrent;
+  // Slider is a base-10 exponent, because the useful range spans eight orders.
+  const ionsPerParticle = 10 ** readNumber(inputs.ionsPerParticle, 7);
+
+  stats.repulsion = repulsion;
+  stats.beamCurrent = repulsion === 'beam' ? beamCurrent : 0;
+  stats.ionsPerParticle = repulsion === 'coulomb' ? ionsPerParticle : 0;
+  stats.particles = rays.length;
 
   const opts = {
     method: inputs.method.value,
     cfl: readNumber(inputs.cfl, 0.05),
+    repulsion,
     beamCurrent,
+    ionsPerParticle,
     // Integrate at full resolution but keep every fourth point for drawing.
     // The energy diagnostic is evaluated on every step regardless, so this
     // costs nothing physically; it only avoids stroking tens of thousands of
@@ -209,17 +232,24 @@ function runFlight() {
     recordEvery: 4,
   };
 
-  const t0 = performance.now();
-  // The whole beam flies together. With space charge on it has to: the force
-  // on each ion depends on where the others are at that instant, so they
-  // cannot be taken one at a time.
-  const { tracks } = flyBeam(field, rays, opts);
-  trajectories = tracks.map((t, i) => ({
-    ...t,
-    start: rays[i],
-    focus: focalCrossing(t.points),
-  }));
-  stats.flyMs = performance.now() - t0;
+  flightSpec = spec;
+  flightOpts = opts;
+  flightStarted = performance.now();
+  flight = createFlight(field, rays, opts);
+  trajectories = flight.tracks;
+  for (let i = 0; i < trajectories.length; i++) {
+    trajectories[i].start = rays[i];
+    trajectories[i].focus = null;
+  }
+}
+
+/** Summarise a finished flight. */
+function finishFlight() {
+  const { field, geometry } = model;
+  const spec = flightSpec;
+  stats.flyMs = performance.now() - flightStarted;
+
+  for (const t of trajectories) t.focus = focalCrossing(t.points);
 
   const lensCentre = (geometry.bounds.z3 + geometry.bounds.z4) / 2; // mm
   const fromCentre = (zMetres) => mToMm(zMetres) - lensCentre;
@@ -246,7 +276,8 @@ function runFlight() {
   // since at 1 % of the bore it encloses almost no current and would feel
   // almost no self-field.
   const probe = flyIon(field, makeIon({ ...spec, x: 0.01 * geometry.boreRadius }), {
-    ...opts,
+    ...flightOpts,
+    repulsion: 'none',
     beamCurrent: 0,
   });
   const probeFocus = focalCrossing(probe.points);
@@ -314,6 +345,8 @@ function runFlight() {
     stats.keIn = null;
     stats.worstWork = null;
   }
+
+  stats.flown = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -530,8 +563,9 @@ function drawTrajectories(width, height, T) {
   // it is drawn faintly rather than removed: the shape is still useful
   // context while a slider is moving, but it must not read as the answer.
   const dim = stale ? 0.28 : 1;
-  const head = animation.head;
 
+  // Trails: every point integrated so far. During a live flight these grow
+  // step by step, so the picture is the solver's actual progress.
   for (const pass of ['halo', 'line']) {
     ctx.save();
     ctx.strokeStyle = pass === 'halo' ? halo : trajColour;
@@ -541,10 +575,9 @@ function drawTrajectories(width, height, T) {
     ctx.lineCap = 'round';
 
     for (const traj of trajectories) {
-      const last = Math.min(traj.points.length, head);
-      if (last < 2) continue;
+      if (traj.points.length < 2) continue;
       ctx.beginPath();
-      for (let n = 0; n < last; n++) {
+      for (let n = 0; n < traj.points.length; n++) {
         const p = traj.points[n];
         const x = T.sx(p.z);
         const y = T.sy(p.x);
@@ -556,20 +589,18 @@ function drawTrajectories(width, height, T) {
     ctx.restore();
   }
 
-  // The bunch itself, while it is still in flight. Every ray shares a time
-  // base, so these dots are all the same instant - a real snapshot of where
-  // the ions are, which is the thing a "fly" button is for.
+  // The ions themselves. Every one shares a time step, so these are all the
+  // same instant - a real snapshot of the bunch, which is the thing that
+  // makes the repulsion legible: you can see them pushing each other apart.
   if (animation.running) {
     ctx.save();
     ctx.fillStyle = trajColour;
     ctx.strokeStyle = halo;
     ctx.lineWidth = 1.5;
     for (const traj of trajectories) {
-      const n = Math.min(traj.points.length, head) - 1;
-      if (n < 0 || n >= traj.points.length) continue;
-      // Only ions still flying at this instant get a marker.
-      if (head > traj.points.length) continue;
-      const p = traj.points[n];
+      // Only ions still in flight; one that has landed is drawn below.
+      if (!traj.active) continue;
+      const p = traj.state;
       ctx.beginPath();
       ctx.arc(T.sx(p.z), T.sy(p.x), 3.5, 0, Math.PI * 2);
       ctx.fill();
@@ -584,8 +615,7 @@ function drawTrajectories(width, height, T) {
   ctx.globalAlpha = dim;
   ctx.fillStyle = cssVar('--electrode-edge');
   for (const traj of trajectories) {
-    if (traj.stop !== 'electrode') continue;
-    if (head < traj.points.length) continue;
+    if (traj.stop !== 'electrode' || traj.active) continue;
     const p = traj.points[traj.points.length - 1];
     ctx.beginPath();
     ctx.arc(T.sx(p.z), T.sy(p.x), 3, 0, Math.PI * 2);
@@ -664,6 +694,21 @@ function drawReadout() {
     return;
   }
 
+  // Field and geometry changes redraw the scene without flying, so there may
+  // be no flight to summarise yet. Reporting numbers from a flight that has
+  // not happened - or has not finished - would be worse than reporting none.
+  if (!stats.flown) {
+    readoutEl.innerHTML = stat(
+      'Beam',
+      animation.running ? 'flying…' : 'not flown',
+      '',
+      animation.running
+        ? 'integrating the ions now'
+        : 'press Fly to launch the beam'
+    );
+    return;
+  }
+
   // Measured from a probe ray near the axis, so it is a property of the lens
   // rather than of the drawn beam.
   const focal =
@@ -704,7 +749,7 @@ function drawReadout() {
   // lens's no-net-work property is a property of the LENS, and it only holds
   // for a beam whose ions do not interact. Flagging it as a discrepancy in
   // that case would be flagging correct physics.
-  const loaded = stats.beamCurrent > 0;
+  const loaded = stats.repulsion && stats.repulsion !== 'none';
   const energy =
     stats.keIn === null
       ? stat('Net work', '—', '', 'nothing transmitted')
@@ -750,15 +795,22 @@ function drawReadout() {
 
   readoutEl.innerHTML = [
     focal,
-    stats.beamCurrent > 0 ? waist : aberration,
+    loaded ? waist : aberration,
     energy,
     stat('Transmitted', `${stats.transmitted}/${stats.total}`, '', fate),
+    // With repulsion on this number stops being a numerical diagnostic. The
+    // tracked quantity is ½mv² + qφ for the ELECTRODE field only; the ions'
+    // mutual potential energy is not in it, and that energy is converted into
+    // kinetic energy as the beam expands. A large "drift" is then the physics
+    // working, not the integrator failing, so it is not flagged.
     stat(
       'Energy drift',
       driftPct < 0.01 ? '<0.01' : driftPct.toFixed(2),
       '%',
-      'worst ½mv² + qφ deviation · grid quality, not step size',
-      stats.drift > 0.02
+      loaded
+        ? 'expected · ion–ion potential energy is not counted in ½mv² + qφ'
+        : 'worst ½mv² + qφ deviation · grid quality, not step size',
+      !loaded && stats.drift > 0.02
     ),
     stat(
       'Field solve',
@@ -852,53 +904,79 @@ function markStale() {
  */
 function fly() {
   cancelAnimationFrame(animation.frame);
+  animation.running = false;
 
-  flyButton.disabled = true;
-  statusEl.classList.add('busy');
+  try {
+    if (!model) rebuild();
+    applyVoltages();
+    startFlight();
+  } catch (err) {
+    readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
+    console.error(err);
+    render();
+    return;
+  }
 
-  requestAnimationFrame(() => {
-    try {
-      if (!model) rebuild();
-      applyVoltages();
-      runFlight();
+  stale = false;
+  flyButton.classList.remove('stale');
 
-      stale = false;
-      flyButton.classList.remove('stale');
+  if (!flight) {
+    render();
+    drawReadout();
+    return;
+  }
 
-      const total = Math.max(...trajectories.map((t) => t.points.length), 0);
-      animation = { head: 0, total, running: total > 0, frame: 0 };
+  // Pace the display, not the physics. An ion crosses the domain in roughly
+  // zLength / (cfl * h) steps, so spreading that over a couple of seconds of
+  // frames gives a watchable flight. Getting this estimate wrong changes only
+  // how long the animation takes - never where the ions go.
+  const { grid } = model;
+  const estimate = grid.zLength / (readNumber(inputs.cfl, 0.05) * grid.step);
+  animation.perFrame = Math.max(1, Math.round(estimate / 120));
+  animation.running = true;
 
-      drawReadout();
-      animate();
-    } catch (err) {
-      readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
-      console.error(err);
-      render();
-    } finally {
-      flyButton.disabled = false;
-      statusEl.classList.remove('busy');
-    }
-  });
+  flyButton.textContent = '';
+  setFlyLabel('Flying…', 'ions in flight');
+  tick();
 }
 
-/** Reveal the computed flight over roughly a second and a half. */
-function animate() {
-  const FRAMES = 90;
-  const perFrame = Math.max(1, Math.ceil(animation.total / FRAMES));
+/**
+ * Advance the flight by a chunk and draw it, once per frame.
+ *
+ * The ions are genuinely being integrated here, not replayed: what is on
+ * screen at any moment is the state the solver has actually reached. The
+ * chunk size is a display choice and has no effect on the trajectory, which
+ * is what makes a live simulation trustworthy rather than merely animated.
+ */
+function tick() {
+  if (!flight) return;
 
-  const tick = () => {
-    animation.head += perFrame;
-    if (animation.head >= animation.total) {
-      animation.head = Infinity;
-      animation.running = false;
-      render();
-      return;
-    }
-    render();
-    animation.frame = requestAnimationFrame(tick);
-  };
+  try {
+    flight.advance(animation.perFrame);
+  } catch (err) {
+    animation.running = false;
+    readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
+    console.error(err);
+    return;
+  }
+
+  render();
+
+  if (flight.done) {
+    animation.running = false;
+    finishFlight();
+    drawReadout();
+    setFlyLabel('Fly ions', 'launch the beam');
+    return;
+  }
 
   animation.frame = requestAnimationFrame(tick);
+}
+
+function setFlyLabel(label, hint) {
+  flyButton.innerHTML =
+    `<span class="fly-label">${label}</span>` +
+    `<span class="fly-hint">${hint}</span>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -911,6 +989,11 @@ const OUTPUTS = {
   rays: (v) => v,
   beamRadius: (v) => parseFloat(v).toFixed(1),
   beamCurrent: (v) => parseFloat(v).toFixed(1),
+  // Slider is a base-10 exponent; show the value it stands for.
+  ionsPerParticle: (v) => {
+    const n = 10 ** parseFloat(v);
+    return n < 10 ? n.toFixed(1) : n.toExponential(1).replace('e+', 'e');
+  },
   boreRadius: (v) => parseFloat(v).toFixed(1),
   centreLength: (v) => v,
   cfl: (v) => parseFloat(v).toFixed(2),
@@ -920,6 +1003,14 @@ function syncOutputs() {
   for (const [id, fmt] of Object.entries(OUTPUTS)) {
     const out = el(`${id}Out`);
     if (out) out.textContent = fmt(inputs[id].value);
+  }
+
+  // Each repulsion model is driven by a different physical quantity, so only
+  // the one in use is shown. Leaving a beam current visible while the Coulomb
+  // model ignores it would invite the reader to believe it did something.
+  const model = inputs.repulsion.value;
+  for (const node of document.querySelectorAll('[data-model]')) {
+    node.hidden = node.dataset.model !== model;
   }
 }
 

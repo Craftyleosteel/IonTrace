@@ -85,14 +85,39 @@
         </section>
 
         <section class="group">
-          <h2>Space charge</h2>
+          <h2>Repulsion</h2>
           <p class="hint">
-            The beam repels itself. Set the current to zero to switch it off
-            entirely. Above roughly 10&nbsp;µA here the repulsion beats the
-            lens and the beam forms a waist instead of a point focus.
+            <strong>Coulomb</strong> treats each trajectory as one ion, feeling
+            every other ion directly — a countable bunch.
+            <strong>Beam</strong> treats each as a <em>ring</em> of charge and
+            uses Gauss's law on the enclosed current — a continuous beam.
           </p>
 
           <label class="field">
+            <span class="field-label">Model</span>
+            <select id="repulsion">
+              <option value="coulomb" selected>Coulomb — discrete ions</option>
+              <option value="beam">Beam — continuous current</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+
+          <label class="field" data-model="coulomb">
+            <span class="field-label">
+              Ions per particle<span class="unit">real ions</span>
+            </span>
+            <input id="ionsPerParticle" type="range" min="0" max="8" step="0.1" value="6" />
+            <output id="ionsPerParticleOut">1e6</output>
+          </label>
+
+          <p class="hint" data-model="coulomb">
+            Each drawn particle stands for this many real ions. At 1 the
+            repulsion between a handful of elementary charges is far too small
+            to see — which is the correct answer, and why particle codes
+            weight.
+          </p>
+
+          <label class="field" data-model="beam">
             <span class="field-label">Beam current<span class="unit">µA</span></span>
             <input id="beamCurrent" type="range" min="0" max="50" step="0.5" value="5" />
             <output id="beamCurrentOut">5.0</output>

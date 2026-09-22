@@ -27,7 +27,12 @@
  */
 
 import { PLANAR } from './grid.js';
-import { currentShares, spaceChargeField, lineChargeDensity } from './spacecharge.js';
+import {
+  currentShares,
+  spaceChargeField,
+  lineChargeDensity,
+  coulombField,
+} from './spacecharge.js';
 
 /**
  * @typedef {object} IonState
@@ -301,43 +306,54 @@ export function flyIon(field, ion, opts = {}) {
 }
 
 /**
- * Fly a whole beam, with the ions interacting through their own space charge.
+ * Create a beam flight that can be advanced a chunk at a time.
  *
  * Unlike `flyIon`, which takes one ion to its end before starting the next,
  * this advances every ion together on a SHARED time step. It has to: the
- * self-field on any ion depends on where all the others are at that instant,
- * so a beam whose members are at different times has no defined space charge.
- * The shared step is the smallest any active ion asks for, so the fastest ion
- * sets the pace for everyone.
+ * force on any ion depends on where all the others are at that instant, so a
+ * beam whose members sit at different times has no defined mutual force. Ions
+ * that terminate stop contributing, which is correct - an ion that has struck
+ * metal or left the modelled region is no longer part of the beam.
  *
- * With `beamCurrent` of zero the self-field term vanishes identically and each
- * trajectory is the same as `flyIon` would produce - verified by test, since
- * a space-charge model that perturbs the answer when switched off is worse
- * than none.
+ * Two repulsion models, because they answer different questions:
  *
- * Ions that terminate stop contributing to the space charge, which is correct:
- * an ion that has struck an electrode or left the modelled region is no longer
- * part of the beam.
+ *   'beam'     Each trajectory is a RING of charge and the field follows from
+ *              Gauss's law on the enclosed current. Correct for a continuous
+ *              beam; driven by `beamCurrent`.
+ *   'coulomb'  Each trajectory is one point charge feeling every other one
+ *              directly. Correct for a countable bunch or cloud; driven by
+ *              `ionsPerParticle`, the number of real ions each simulated
+ *              particle stands for.
+ *   'none'     No self-interaction.
+ *
+ * With repulsion off, trajectories are bit-identical to `flyIon` - verified by
+ * test, since a self-field model that perturbs the answer when switched off is
+ * worse than none.
  *
  * @param {import('./field.js').Field} field
  * @param {IonState[]} ions
  * @param {object} [opts]
- * @param {number} [opts.beamCurrent] Total beam current in amperes. 0 disables.
+ * @param {'none'|'beam'|'coulomb'} [opts.repulsion]
+ * @param {number} [opts.beamCurrent]     Beam current in amperes ('beam').
+ * @param {number} [opts.ionsPerParticle] Macro-weight ('coulomb').
+ * @param {number} [opts.softening]       Plummer softening length, metres.
  * @param {'rk4'|'verlet'} [opts.method]
  * @param {number} [opts.cfl]
  * @param {number} [opts.maxSteps]
  * @param {number} [opts.recordEvery]
- * @returns {{tracks: object[], steps: number}} One track per input ion, in
- *          the order given, each shaped like a `flyIon` result.
+ * @returns {{tracks: object[], steps: number, done: boolean,
+ *            advance: (budget?: number) => object}}
  */
-export function flyBeam(field, ions, opts = {}) {
+export function createFlight(field, ions, opts = {}) {
   const step = INTEGRATORS[opts.method ?? 'rk4'];
   if (!step) throw new Error(`Unknown integrator "${opts.method}"`);
 
   const cfl = opts.cfl ?? DEFAULT_CFL;
   const maxSteps = opts.maxSteps ?? 200000;
   const recordEvery = opts.recordEvery ?? 1;
+  const repulsion = opts.repulsion ?? (opts.beamCurrent ? 'beam' : 'none');
   const beamCurrent = opts.beamCurrent ?? 0;
+  const ionsPerParticle = opts.ionsPerParticle ?? 1;
 
   const { grid } = field;
   const zMin = grid.z0;
@@ -346,8 +362,8 @@ export function flyBeam(field, ions, opts = {}) {
   const planar = grid.symmetry === PLANAR;
   const transverse = (x) => (planar ? x : Math.abs(x));
 
-  // Each ion's share of the beam current is fixed at launch from its starting
-  // radius and is conserved for the rest of the flight.
+  // Ring model only: each ion's share of the beam current is fixed at launch
+  // from its starting radius and conserved thereafter.
   const shares = currentShares(ions.map((ion) => Math.abs(ion.x)));
 
   const tracks = ions.map((ion, index) => {
@@ -365,26 +381,97 @@ export function flyBeam(field, ions, opts = {}) {
     };
   });
 
-  // Softening radius: inside one grid step of the axis the ring model has no
-  // resolution anyway, and 1/r would dominate the answer with discretisation
+  // Ring model: inside one grid step of the axis the ring sampling has no
+  // resolution anyway, and 1/r would otherwise be dominated by discretisation
   // noise.
-  const softening = grid.step / 2;
+  const ringSoftening = grid.step / 2;
+  // Discrete model: bounds the 1/r^2 force during a close pass, which a finite
+  // time step would otherwise turn into energy from nowhere.
+  const coulombSoftening = opts.softening ?? grid.step;
 
-  let n = 0;
-  for (; n < maxSteps; n++) {
-    const live = tracks.filter((t) => t.active);
-    if (live.length === 0) break;
+  const flight = {
+    tracks,
+    steps: 0,
+    done: false,
+    advance,
+  };
 
-    // One step for everyone, so the beam stays synchronised.
-    let dt = Infinity;
-    for (const t of live) {
-      dt = Math.min(dt, suggestTimeStep(field, t.state, cfl));
+  /**
+   * Advance the whole beam by at most `budget` steps.
+   *
+   * Splitting the flight into chunks is what lets the UI draw it live. It
+   * changes nothing about the result: the time step is chosen from each ion's
+   * own state, never from wall-clock time, so the trajectory is identical
+   * whether it is run in one call or a hundred, on a fast machine or a slow
+   * one.
+   */
+  function advance(budget = Infinity) {
+    let taken = 0;
+    while (taken < budget && flight.steps < maxSteps) {
+      const live = tracks.filter((t) => t.active);
+      if (live.length === 0) break;
+
+      // One step for everyone, so the beam stays synchronised. It has to be:
+      // the force between ions depends on where they all are at the same
+      // instant, and a beam whose members sit at different times has no
+      // defined mutual force at all.
+      let dt = Infinity;
+      for (const t of live) {
+        dt = Math.min(dt, suggestTimeStep(field, t.state, cfl));
+      }
+      if (!Number.isFinite(dt) || dt <= 0) break;
+
+      const extras = selfFields(live);
+
+      for (let k = 0; k < live.length; k++) {
+        const t = live[k];
+        const next = step(field, t.state, dt, extras[k]);
+        const r = transverse(next.x);
+
+        if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
+          t.state = next;
+          t.stop = 'electrode';
+          t.active = false;
+        } else if (next.z > zMax) {
+          t.state = next;
+          t.stop = 'exited';
+          t.active = false;
+        } else if (next.z < zMin) {
+          t.state = next;
+          t.stop = 'reflected';
+          t.active = false;
+        } else {
+          t.state = next;
+          const drift = Math.abs(totalEnergy(field, next) - t.E0) / t.scale;
+          if (drift > t.energyDrift) t.energyDrift = drift;
+        }
+
+        if (!t.active || flight.steps % recordEvery === 0) t.points.push(t.state);
+      }
+
+      flight.steps++;
+      taken++;
     }
-    if (!Number.isFinite(dt) || dt <= 0) break;
 
-    // Self-field from the beam's present configuration.
-    let selfField = null;
-    if (beamCurrent !== 0) {
+    if (flight.steps >= maxSteps || tracks.every((t) => !t.active)) finish();
+    return flight;
+  }
+
+  /** Self-field on each live ion, as a constant vector for this step. */
+  function selfFields(live) {
+    if (repulsion === 'coulomb' && ionsPerParticle !== 0 && live.length > 1) {
+      // Every particle is a point charge and feels every other one directly.
+      const { Ex, Ez } = coulombField(
+        live.map((t) => t.state.x),
+        live.map((t) => t.state.z),
+        live.map((t) => t.state.charge),
+        ionsPerParticle,
+        coulombSoftening
+      );
+      return live.map((_, k) => (Ex[k] === 0 && Ez[k] === 0 ? null : { Ex: Ex[k], Ez: Ez[k] }));
+    }
+
+    if (repulsion === 'beam' && beamCurrent !== 0) {
       const radii = live.map((t) => Math.abs(t.state.x));
       const liveShares = live.map((t) => shares[t.index]);
       // The density is set by how fast the beam is moving HERE: a decelerated
@@ -394,53 +481,41 @@ export function flyBeam(field, ions, opts = {}) {
         live.reduce((s, t) => s + Math.abs(t.state.vz), 0) / live.length;
       const lambda = lineChargeDensity(beamCurrent, meanVz);
       const sign = Math.sign(live[0].state.charge) || 1;
-      selfField = spaceChargeField(radii, liveShares, lambda * sign, softening);
+      const Er = spaceChargeField(radii, liveShares, lambda * sign, ringSoftening);
+      return live.map((t, k) => {
+        if (Er[k] === 0) return null;
+        const x = t.state.x;
+        // Resolve the radial self-field onto the signed transverse axis.
+        return {
+          Ex: planar ? Er[k] : Er[k] * (Math.abs(x) > 0 ? Math.sign(x) : 0),
+          Ez: 0,
+        };
+      });
     }
 
-    for (let k = 0; k < live.length; k++) {
-      const t = live[k];
-      const Er = selfField ? selfField[k] : 0;
-      const x = t.state.x;
-      // Resolve the radial self-field onto the signed transverse axis.
-      const extra =
-        Er === 0
-          ? null
-          : { Ex: planar ? Er : Er * (Math.abs(x) > 0 ? Math.sign(x) : 0), Ez: 0 };
+    return live.map(() => null);
+  }
 
-      const next = step(field, t.state, dt, extra);
-      const r = transverse(next.x);
-
-      if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
-        t.state = next;
-        t.stop = 'electrode';
-        t.active = false;
-      } else if (next.z > zMax) {
-        t.state = next;
-        t.stop = 'exited';
-        t.active = false;
-      } else if (next.z < zMin) {
-        t.state = next;
-        t.stop = 'reflected';
-        t.active = false;
-      } else {
-        t.state = next;
-        const drift = Math.abs(totalEnergy(field, next) - t.E0) / t.scale;
-        if (drift > t.energyDrift) t.energyDrift = drift;
-      }
-
-      if (!t.active || n % recordEvery === 0) t.points.push(t.state);
+  function finish() {
+    if (flight.done) return;
+    for (const t of tracks) {
+      if (t.points[t.points.length - 1] !== t.state) t.points.push(t.state);
+      delete t.active;
+      delete t.index;
+      delete t.E0;
+      delete t.scale;
     }
+    flight.done = true;
   }
 
-  for (const t of tracks) {
-    if (t.points[t.points.length - 1] !== t.state) t.points.push(t.state);
-    delete t.active;
-    delete t.index;
-    delete t.E0;
-    delete t.scale;
-  }
+  return flight;
+}
 
-  return { tracks, steps: n };
+/** Run a beam flight to completion. Thin wrapper over `createFlight`. */
+export function flyBeam(field, ions, opts = {}) {
+  const flight = createFlight(field, ions, opts);
+  while (!flight.done) flight.advance(2000);
+  return { tracks: flight.tracks, steps: flight.steps };
 }
 
 /**

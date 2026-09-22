@@ -464,16 +464,66 @@ that ratio and ordering tests are not.
 
 ## 7. Space charge
 
-The beam repels itself. This is the one term from §5 that **is** modelled.
+The beam repels itself. This is the one term from §5 that **is** modelled, and
+there are **two models**, because they answer different questions.
 
-### 7.1 Why it is not pairwise Coulomb
+| Model | A trajectory is… | Driven by | Use for |
+|---|---|---|---|
+| `coulomb` | one ion, feeling every other directly | ions per particle | a countable bunch or cloud |
+| `beam` | a **ring** of charge | beam current | a continuous beam |
+| `none` | non-interacting | — | lens characterisation |
 
-A trajectory drawn in the meridional plane is not one ion. Under rotational
-symmetry it is the cross-section of a **ring** of charge at radius $r$,
-carrying its share of the beam current all the way round the azimuth.
-Computing $q_1q_2/4\pi\varepsilon_0 d^2$ between two such rays would be the
-force between two point charges, which is not the force between two rings, and
-would break the symmetry the whole field solve rests on.
+Picking the wrong one is a physics error, not a preference. §7.1 explains why.
+
+### 7.0 Discrete Coulomb
+
+Each particle is a point charge:
+
+$$\mathbf{E}_i = \frac{1}{4\pi\varepsilon_0}\sum_{j\neq i}
+\frac{w\,q_j\,(\mathbf{r}_i-\mathbf{r}_j)}{|\mathbf{r}_i-\mathbf{r}_j|^3}$$
+
+**Macro-weighting.** $w$ is how many real ions each simulated particle stands
+for. At $w=1$ the calculation is literally $N$ ions, and for any $N$ you can
+draw on screen the repulsion is far too small to see — nine elementary charges
+spread over millimetres give a field of order $10^{-3}$ V/m against electrode
+fields of $10^{4}$. That is the correct answer, not a defect, and it is why
+particle codes weight. A macroparticle of weight $w$ has charge $wq$ and mass
+$wm$, so $q/m$ and the electrode force are unchanged; only the mutual force
+scales, linearly in $w$. The $w$ real ions inside one macroparticle do not
+repel each other — the standard particle-in-cell approximation.
+
+**Softening.** The $1/r^2$ force diverges as two particles approach, and with a
+finite time step a close pass would fling them apart with energy from nowhere.
+Plummer softening replaces $|d|^3$ with $(|d|^2+\epsilon^2)^{3/2}$, bounding the
+force at short range while leaving the long range untouched. It is a real
+approximation: close encounters, and therefore collisional relaxation of the
+bunch, are suppressed.
+
+Cost is $O(N^2)$ — trivial at the particle counts a browser will draw, and the
+reason this does not scale to a real PIC simulation.
+
+**The energy diagnostic does not apply.** IonTrace tracks
+$\tfrac{1}{2}mv^2 + q\phi$ for the *electrode* field only. The ions' mutual
+potential energy is not in it, and that energy is genuinely converted into
+kinetic energy as the bunch expands, so a large reported "drift" with repulsion
+on is the physics working rather than the integrator failing. A conserved total
+for the interacting system — which would have to include
+$\sum_{i<j} k\,w\,q_iq_j/d_{ij}$ and be evaluated for the system rather than
+per ion — is not implemented. With repulsion on, the drift figure carries no
+information about numerical quality.
+
+### 7.1 Why the beam model is not pairwise Coulomb
+
+For a **continuous** beam, a trajectory drawn in the meridional plane is not
+one ion. Under rotational symmetry it is the cross-section of a **ring** of
+charge at radius $r$, carrying its share of the beam current all the way round
+the azimuth. Computing $q_1q_2/4\pi\varepsilon_0 d^2$ between two such rays
+would be the force between two point charges, which is not the force between
+two rings, and would break the symmetry the whole field solve rests on.
+
+This is the distinction between the two models. Use `coulomb` when the
+trajectories really are individual ions you could count; use `beam` when each
+one stands for a continuous stream of them.
 
 The correct treatment for a long axisymmetric beam is Gauss's law. On a
 cylinder of radius $r$ and length $L$ about the axis, $\mathbf{E}$ is purely

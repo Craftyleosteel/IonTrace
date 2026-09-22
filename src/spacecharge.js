@@ -62,6 +62,86 @@
 
 import { VACUUM_PERMITTIVITY } from './constants.js';
 
+/** Coulomb constant 1 / (4 pi eps0), in V m / C. */
+const COULOMB_K = 1 / (4 * Math.PI * VACUUM_PERMITTIVITY);
+
+/**
+ * Pairwise Coulomb field at each particle from every other particle.
+ *
+ * This is the DISCRETE alternative to the ring model below: each simulated
+ * particle is a point charge and feels every other one directly,
+ *
+ *     E_i = (1 / 4 pi eps0) SUM_{j != i}  w q_j (r_i - r_j) / |r_i - r_j|^3
+ *
+ * Use it for a bunch, a cloud, or any case where the ions are genuinely
+ * countable. Use the ring model for a continuous beam, where a trajectory
+ * stands for a whole ring of charge rather than one ion.
+ *
+ * Macro-weighting
+ * ---------------
+ * `weight` is how many real ions each simulated particle stands for. With
+ * weight 1 the calculation is literally N ions and the repulsion is, for any
+ * N you can draw on screen, far too small to see - nine elementary charges
+ * spread over millimetres produce a field of order 1e-3 V/m against electrode
+ * fields of 1e4. That is the correct answer, not a defect, and it is why
+ * particle codes weight.
+ *
+ * A macroparticle of weight w has charge wq and mass wm, so q/m is unchanged
+ * and the electrode force is unaffected; only the mutual force scales, and it
+ * scales linearly in w. The w real ions inside one macroparticle do not repel
+ * each other in this model, which is the standard particle-in-cell
+ * approximation.
+ *
+ * Softening
+ * ---------
+ * The 1/r^2 force diverges as two particles approach, and with a finite time
+ * step a close pass would fling them apart with energy that came from nowhere.
+ * `softening` replaces |d|^3 with (|d|^2 + eps^2)^{3/2} - Plummer softening -
+ * which bounds the force at short range. It is a real approximation: close
+ * encounters, and therefore collisional relaxation of the bunch, are
+ * suppressed. It does not affect the long-range behaviour that drives beam
+ * expansion.
+ *
+ * Cost is O(N^2). For the particle counts a browser will draw that is nothing,
+ * but it is the reason this does not scale to a real PIC simulation.
+ *
+ * @param {number[]} xs        Transverse positions, metres.
+ * @param {number[]} zs        Axial positions, metres.
+ * @param {number[]} charges   Charge of each particle, coulombs.
+ * @param {number} weight      Real ions represented per particle.
+ * @param {number} softening   Plummer softening length, metres.
+ * @returns {{Ex: number[], Ez: number[]}} Field at each particle, V/m.
+ */
+export function coulombField(xs, zs, charges, weight = 1, softening = 0) {
+  const n = xs.length;
+  const Ex = new Array(n).fill(0);
+  const Ez = new Array(n).fill(0);
+  if (n < 2 || weight === 0) return { Ex, Ez };
+
+  const eps2 = softening * softening;
+
+  for (let i = 0; i < n; i++) {
+    let ex = 0;
+    let ez = 0;
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const dx = xs[i] - xs[j];
+      const dz = zs[i] - zs[j];
+      const d2 = dx * dx + dz * dz + eps2;
+      if (d2 <= 0) continue;
+      // 1 / d^3, via d^2 and its square root.
+      const inv = 1 / (d2 * Math.sqrt(d2));
+      const c = COULOMB_K * weight * charges[j] * inv;
+      ex += c * dx;
+      ez += c * dz;
+    }
+    Ex[i] = ex;
+    Ez[i] = ez;
+  }
+
+  return { Ex, Ez };
+}
+
 /** 1 / (2 pi eps0), the recurring factor in the cylindrical Gauss result. */
 const INV_TWO_PI_EPS0 = 1 / (2 * Math.PI * VACUUM_PERMITTIVITY);
 
