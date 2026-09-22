@@ -178,7 +178,10 @@
               collisions, space charge between ions, image charges, surface
               roughness and relativistic correction. Each omission is listed with
               its consequences in
-              <a href="docs/PHYSICS.md">docs/PHYSICS.md</a>. Results are only
+              <a href="https://github.com/Craftyleosteel/IonTrace/blob/main/docs/PHYSICS.md"
+                >docs/PHYSICS.md</a
+              >, along with the known limitations of what <em>is</em> modelled.
+              Results are only
               trustworthy in the regime where those terms are negligible: dilute,
               non-relativistic beams in good vacuum.
             </p>
@@ -187,10 +190,19 @@
       </section>
     </main>
 
+    <!--
+      The physics reference points at GitHub rather than at the file in this
+      repository. GitHub Pages serves a .md file as text/markdown, which a
+      browser downloads instead of rendering; GitHub's own view renders both
+      the prose and the LaTeX. The test runner is a real page, so it stays
+      relative and works from any fork or local server.
+    -->
     <footer class="colophon">
-      <a href="docs/PHYSICS.md">Physics reference</a>
+      <a href="https://github.com/Craftyleosteel/IonTrace/blob/main/docs/PHYSICS.md">
+        Physics reference
+      </a>
       <a href="tests/index.html">Run the physics tests</a>
-      <a href="https://github.com/">Source</a>
+      <a href="https://github.com/Craftyleosteel/IonTrace">Source</a>
     </footer>
 
     <script type="module" src="src/main.js"></script>

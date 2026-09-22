@@ -1,0 +1,69 @@
+# IonTrace CI and deployment.
+#
+# The physics tests gate the deployment. The site is only published if the
+# suite passes, so a change that breaks a conservation law, a symmetry, or a
+# closed-form limit cannot reach the public page. For a simulator whose failure
+# mode is a wrong trajectory that looks entirely plausible, that gate is the
+# point of having CI at all.
+#
+# No build step and no dependencies: the tests run the same ES modules the
+# browser loads, and the site is published as plain static files.
+
+name: tests and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow one deployment at a time; never cancel one midway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: physics tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No install step: the project has no dependencies by design.
+      - name: Run the physics suite
+        run: node tests/run-node.js
+
+  deploy:
+    name: deploy to Pages
+    # Publishing unvalidated physics is the thing this repository is trying to
+    # avoid, so deployment waits for the suite.
+    needs: test
+    if: "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      # The whole repository is the site. .nojekyll disables Jekyll so every
+      # file is served exactly as committed.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
