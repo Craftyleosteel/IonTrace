@@ -154,7 +154,7 @@ empirically against $1/\sqrt{r^2+z^2}$, a smooth harmonic function the stencil
 *cannot* reproduce exactly, so a genuine discretisation error appears and can
 be measured.
 
-That qualifier matters, and §7 gives the measured rate for the actual lens,
+That qualifier matters, and §8 gives the measured rate for the actual lens,
 which is closer to 1.5 than to 2. The limiter is not the stencil.
 
 ### 3.2 Relaxation and fast adjust
@@ -162,7 +162,13 @@ which is closer to 1.5 than to 2. The limiter is not the stencil.
 The linear system is solved by successive over-relaxation with
 
 $$\omega_{\text{opt}} = \frac{2}{1 + \sqrt{1 - \rho^2}}, \qquad
-\rho = \frac{\cos(\pi/n_z) + \cos(\pi/n_r)}{2}$$
+\rho = \frac{\cos\!\big(\pi/(n_z-1)\big) + \cos\!\big(\pi/(n_r-1)\big)}{2}$$
+
+The denominators are node *spacings*, not node counts. This is an estimate in
+any case: it is derived for an empty rectangle and ignores interior
+electrodes, and on the shipped geometry it costs roughly 30 % more sweeps than
+an empirically optimal $\omega$. That is a speed matter only — the converged
+solution is identical.
 
 Because Laplace's equation is linear and all boundary conditions are Dirichlet,
 the solution for arbitrary applied voltages is a superposition of per-electrode
@@ -387,7 +393,7 @@ trustworthy where the corresponding term is negligible.
 |---|---|---|
 | Magnetic force | $q\,\mathbf{v}\times\mathbf{B}$ | Any magnetic sector, ICR cell, or fringe field from a nearby magnet. |
 | Buffer-gas collisions | drag + stochastic kicks | Any trap or guide with He/N₂ at > ~10⁻⁴ mbar. Dominates ion motion in collisional cooling. |
-| Space charge | ion–ion Coulomb | Dense clouds and high beam currents. Causes emittance growth and, in traps, frequency shifts. |
+| Space charge — **now modelled**, see §7 | ion–ion Coulomb | — |
 | RF / time-dependent fields | $\phi(\mathbf{r}, t)$ | Every Paul trap, quadrupole filter and ion funnel. This build solves a static field only. |
 | Image charge | induced surface charge | Very close electrode approach; small for typical bore radii. |
 | Relativistic correction | $\gamma$ | Reported by `relativisticError`; warned on above 0.1 %, which for an electron is **341 eV** ($\beta = 0.037$). A 10 keV electron is already 2.9 % off. Ions are safe: a 1 keV, 100 u ion is off by $1.6\times10^{-8}$. |
@@ -456,7 +462,103 @@ that ratio and ordering tests are not.
 
 ---
 
-## 7. Known limitations of this version
+## 7. Space charge
+
+The beam repels itself. This is the one term from §5 that **is** modelled.
+
+### 7.1 Why it is not pairwise Coulomb
+
+A trajectory drawn in the meridional plane is not one ion. Under rotational
+symmetry it is the cross-section of a **ring** of charge at radius $r$,
+carrying its share of the beam current all the way round the azimuth.
+Computing $q_1q_2/4\pi\varepsilon_0 d^2$ between two such rays would be the
+force between two point charges, which is not the force between two rings, and
+would break the symmetry the whole field solve rests on.
+
+The correct treatment for a long axisymmetric beam is Gauss's law. On a
+cylinder of radius $r$ and length $L$ about the axis, $\mathbf{E}$ is purely
+radial on the curved surface and the flat ends contribute nothing, so
+
+$$E_r(r)\,2\pi r L = \frac{\lambda_{\text{enc}}(r)\,L}{\varepsilon_0}
+\qquad\Longrightarrow\qquad
+E_r(r) = \frac{\lambda_{\text{enc}}(r)}{2\pi\varepsilon_0 r}$$
+
+Only charge **inside** $r$ matters. A uniform shell outside contributes exactly
+nothing — the cylindrical shell theorem, which the test suite checks directly.
+
+For a uniform beam of radius $R$ this gives a field rising linearly from the
+axis, $E_r = \lambda r / 2\pi\varepsilon_0 R^2$, and that closed form is what
+the implementation is validated against.
+
+### 7.2 Driven by current, not by ray count
+
+$$\lambda = \frac{I}{v_z}$$
+
+A slow beam is a dense one, which is why space charge bites hardest where an
+optic decelerates the beam. The input is therefore a **beam current** — a real
+instrument parameter — and not the number of rays, which is a display setting
+with no physics in it. Doubling the drawn rays must not double the repulsion,
+and does not.
+
+Each ray carries a fixed share $w_i$ of the current, set at launch from the
+assumed initial current density (uniform, the only profile offered) in
+proportion to the annulus it represents. The enclosed fraction for ray $i$ is
+the sum of the shares of every ray currently inside it plus **half its own** —
+a ring exerts no net force on itself, and the half places the ray in the middle
+of its annulus.
+
+Rays are re-sorted by radius every step rather than assumed laminar, so the
+model stays valid after the beam crosses over, where the ordering genuinely
+changes. **Rays at equal radius are one ring**: a beam launched over signed
+offsets produces each radius twice, and treating those as two rings would
+double the beam's current.
+
+### 7.3 Lockstep integration
+
+With space charge the ions can no longer be flown one at a time. The force on
+each depends on where all the others are *at that instant*, so `flyBeam`
+advances the whole beam on a shared time step — the smallest any active ion
+asks for. An ion that strikes metal or leaves the domain stops contributing,
+which is correct: it is no longer part of the beam.
+
+The self-field is **frozen across each step** rather than re-evaluated at each
+Runge–Kutta stage, because the other ions have no defined position at an
+intermediate stage. This is the standard particle-in-cell treatment and it
+costs accuracy: the space-charge part of the motion is effectively second order
+even though the electrode part remains fourth.
+
+### 7.4 What the beam does
+
+Two regimes, both real:
+
+- **Weak space charge.** The crossover survives and moves downstream as
+  current rises, because the repulsion opposes the lens.
+- **Strong space charge.** There is **no point focus at all**. The self-field
+  goes as $1/r$, so as the beam converges the repulsion diverges. The beam
+  reaches a minimum radius — a waist — and expands again, and that waist grows
+  with current. A tool that insisted on reporting a focal length here would be
+  reporting something that does not exist, so the readout switches to the
+  waist instead.
+
+Note also that with space charge on, the einzel lens's **no-net-work property
+no longer holds**, and that is correct rather than a numerical failure: the
+beam's own field does real work on its ions as it expands, converting the
+bunch's electrostatic energy into transverse kinetic energy.
+
+### 7.5 What space charge still neglects
+
+| Neglected | Consequence |
+|---|---|
+| The beam's own magnetic field | Moving charges attract magnetically; the self-force is reduced by $(1-\beta^2)$. For keV ions $\beta\sim10^{-4}$, so this is a part in $10^8$ — genuinely ignorable. |
+| Image charges in the electrodes | Surrounding metal partially shields the space charge. IonTrace's defocusing is therefore an **overestimate** for a beam that fills the bore. |
+| Longitudinal space charge | The long-beam approximation assumes the beam is much longer than it is wide — true for a continuous beam, false for a short bunch. **Bunches are not modelled.** |
+| Non-uniform current density | Only a uniform profile is offered. A peaked profile concentrates current at small radius and defocuses more strongly. |
+| Self-consistent Poisson | The beam field is added analytically to the solved electrode field rather than Poisson being re-solved with $\rho$. Exact for the free-space part; this is what drops the image charges above. |
+| Virtual cathode formation | $\lambda = I/v_z$ diverges as the beam is brought to rest. The implementation caps it, and a capped result means "outside the model's range", not an answer. |
+
+---
+
+## 8. Known limitations of this version
 
 **1. The lens does not converge at second order, and the reason is not
 staircasing.** Measured Richardson orders for `buildEinzelLens` at

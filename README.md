@@ -21,8 +21,20 @@ m\ddot{\mathbf{r}} = q\mathbf{E}, \qquad \mathbf{E} = -\nabla\phi$$
 Geometry is axisymmetric, so the solve is two-dimensional in $(z, r)$ and
 rotation supplies the third dimension exactly — not as an approximation.
 
-**Not included:** magnetic forces, buffer-gas collisions, space charge,
-RF/time-dependent fields, relativistic correction. Each omission and its
+**Space charge is included.** The beam repels itself, driven by a beam
+*current* rather than by how many rays you happen to draw. Note that a ray
+here is not a point charge — under rotational symmetry it is a **ring** of
+charge at radius $r$, so the force follows from Gauss's law on the enclosed
+current, not from pairwise Coulomb:
+
+$$E_r(r) = \frac{\lambda_{\text{enc}}(r)}{2\pi\varepsilon_0 r},
+\qquad \lambda = \frac{I}{v_z}$$
+
+Because the force on each ion depends on where the others are at that instant,
+the whole beam is integrated in lockstep on a shared time step.
+
+**Not included:** magnetic forces, buffer-gas collisions, RF/time-dependent
+fields, image charges, relativistic correction. Each omission and its
 consequences are listed in [docs/PHYSICS.md](docs/PHYSICS.md).
 
 ## Architecture
@@ -84,6 +96,7 @@ output:
 | Conductor surfaces | full surface field recovered, not half |
 | Absolute scale | mm→m pinned to literal metres; painted geometry matches the spec |
 | Integrators | analytic simple harmonic motion; orders 4 and 2 confirmed |
+| Space charge | closed-form uniform-beam field; cylindrical shell theorem; zero at zero current |
 | Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection reported as reflection, focus independent of ion mass |
 
 The lens tests check properties the *real device* has, so they fail for

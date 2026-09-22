@@ -27,6 +27,7 @@
  */
 
 import { PLANAR } from './grid.js';
+import { currentShares, spaceChargeField, lineChargeDensity } from './spacecharge.js';
 
 /**
  * @typedef {object} IonState
@@ -39,9 +40,23 @@ import { PLANAR } from './grid.js';
  * @property {number} t       elapsed time, s
  */
 
-/** Acceleration a = (q/m) E at the ion's current position. */
-export function accelerationAt(field, qOverM, x, z) {
+/**
+ * Acceleration a = (q/m) E at the ion's current position.
+ *
+ * `extra` adds a field that does not come from the electrode solve - at
+ * present the beam's own space charge. It is supplied by the caller as a
+ * constant vector for the whole step rather than re-evaluated at each RK4
+ * stage, because the self-field depends on where every OTHER ion is, and
+ * those have no defined position at an intermediate stage. Freezing the
+ * self-force across a step is the standard particle-in-cell treatment. It
+ * costs accuracy: the space-charge part of the motion is effectively second
+ * order even though the electrode part stays fourth.
+ */
+export function accelerationAt(field, qOverM, x, z, extra) {
   const { Ex, Ez } = field.fieldAtCartesian(x, z);
+  if (extra) {
+    return { ax: qOverM * (Ex + extra.Ex), az: qOverM * (Ez + extra.Ez) };
+  }
   return { ax: qOverM * Ex, az: qOverM * Ez };
 }
 
@@ -52,14 +67,14 @@ export function accelerationAt(field, qOverM, x, z) {
  * (vx, vz, q Ex / m, q Ez / m). Because the acceleration depends only on
  * position, each stage needs exactly one field evaluation.
  */
-export function stepRK4(field, ion, dt) {
+export function stepRK4(field, ion, dt, extra) {
   const qm = ion.charge / ion.mass;
   const { x, z, vx, vz } = ion;
 
-  const a1 = accelerationAt(field, qm, x, z);
+  const a1 = accelerationAt(field, qm, x, z, extra);
   const k1 = { dx: vx, dz: vz, dvx: a1.ax, dvz: a1.az };
 
-  const a2 = accelerationAt(field, qm, x + 0.5 * dt * k1.dx, z + 0.5 * dt * k1.dz);
+  const a2 = accelerationAt(field, qm, x + 0.5 * dt * k1.dx, z + 0.5 * dt * k1.dz, extra);
   const k2 = {
     dx: vx + 0.5 * dt * k1.dvx,
     dz: vz + 0.5 * dt * k1.dvz,
@@ -67,7 +82,7 @@ export function stepRK4(field, ion, dt) {
     dvz: a2.az,
   };
 
-  const a3 = accelerationAt(field, qm, x + 0.5 * dt * k2.dx, z + 0.5 * dt * k2.dz);
+  const a3 = accelerationAt(field, qm, x + 0.5 * dt * k2.dx, z + 0.5 * dt * k2.dz, extra);
   const k3 = {
     dx: vx + 0.5 * dt * k2.dvx,
     dz: vz + 0.5 * dt * k2.dvz,
@@ -75,7 +90,7 @@ export function stepRK4(field, ion, dt) {
     dvz: a3.az,
   };
 
-  const a4 = accelerationAt(field, qm, x + dt * k3.dx, z + dt * k3.dz);
+  const a4 = accelerationAt(field, qm, x + dt * k3.dx, z + dt * k3.dz, extra);
   const k4 = {
     dx: vx + dt * k3.dvx,
     dz: vz + dt * k3.dvz,
@@ -104,14 +119,14 @@ export function stepRK4(field, ion, dt) {
  * next step's old one only if the caller loops; here it is recomputed, which
  * is simpler and still cheap).
  */
-export function stepVerlet(field, ion, dt) {
+export function stepVerlet(field, ion, dt, extra) {
   const qm = ion.charge / ion.mass;
-  const a0 = accelerationAt(field, qm, ion.x, ion.z);
+  const a0 = accelerationAt(field, qm, ion.x, ion.z, extra);
 
   const x = ion.x + ion.vx * dt + 0.5 * a0.ax * dt * dt;
   const z = ion.z + ion.vz * dt + 0.5 * a0.az * dt * dt;
 
-  const a1 = accelerationAt(field, qm, x, z);
+  const a1 = accelerationAt(field, qm, x, z, extra);
 
   return {
     ...ion,
@@ -283,6 +298,149 @@ export function flyIon(field, ion, opts = {}) {
   if (points[points.length - 1] !== current) points.push(current);
 
   return { points, stop, energyDrift: worstDrift };
+}
+
+/**
+ * Fly a whole beam, with the ions interacting through their own space charge.
+ *
+ * Unlike `flyIon`, which takes one ion to its end before starting the next,
+ * this advances every ion together on a SHARED time step. It has to: the
+ * self-field on any ion depends on where all the others are at that instant,
+ * so a beam whose members are at different times has no defined space charge.
+ * The shared step is the smallest any active ion asks for, so the fastest ion
+ * sets the pace for everyone.
+ *
+ * With `beamCurrent` of zero the self-field term vanishes identically and each
+ * trajectory is the same as `flyIon` would produce - verified by test, since
+ * a space-charge model that perturbs the answer when switched off is worse
+ * than none.
+ *
+ * Ions that terminate stop contributing to the space charge, which is correct:
+ * an ion that has struck an electrode or left the modelled region is no longer
+ * part of the beam.
+ *
+ * @param {import('./field.js').Field} field
+ * @param {IonState[]} ions
+ * @param {object} [opts]
+ * @param {number} [opts.beamCurrent] Total beam current in amperes. 0 disables.
+ * @param {'rk4'|'verlet'} [opts.method]
+ * @param {number} [opts.cfl]
+ * @param {number} [opts.maxSteps]
+ * @param {number} [opts.recordEvery]
+ * @returns {{tracks: object[], steps: number}} One track per input ion, in
+ *          the order given, each shaped like a `flyIon` result.
+ */
+export function flyBeam(field, ions, opts = {}) {
+  const step = INTEGRATORS[opts.method ?? 'rk4'];
+  if (!step) throw new Error(`Unknown integrator "${opts.method}"`);
+
+  const cfl = opts.cfl ?? DEFAULT_CFL;
+  const maxSteps = opts.maxSteps ?? 200000;
+  const recordEvery = opts.recordEvery ?? 1;
+  const beamCurrent = opts.beamCurrent ?? 0;
+
+  const { grid } = field;
+  const zMin = grid.z0;
+  const zMax = grid.z0 + grid.zLength;
+  const rMax = grid.rLength;
+  const planar = grid.symmetry === PLANAR;
+  const transverse = (x) => (planar ? x : Math.abs(x));
+
+  // Each ion's share of the beam current is fixed at launch from its starting
+  // radius and is conserved for the rest of the flight.
+  const shares = currentShares(ions.map((ion) => Math.abs(ion.x)));
+
+  const tracks = ions.map((ion, index) => {
+    const state = { ...ion };
+    const E0 = totalEnergy(field, state);
+    return {
+      state,
+      points: [state],
+      stop: 'step-limit',
+      active: true,
+      index,
+      E0,
+      scale: Math.abs(E0) > 0 ? Math.abs(E0) : kineticEnergy(state) || 1,
+      energyDrift: 0,
+    };
+  });
+
+  // Softening radius: inside one grid step of the axis the ring model has no
+  // resolution anyway, and 1/r would dominate the answer with discretisation
+  // noise.
+  const softening = grid.step / 2;
+
+  let n = 0;
+  for (; n < maxSteps; n++) {
+    const live = tracks.filter((t) => t.active);
+    if (live.length === 0) break;
+
+    // One step for everyone, so the beam stays synchronised.
+    let dt = Infinity;
+    for (const t of live) {
+      dt = Math.min(dt, suggestTimeStep(field, t.state, cfl));
+    }
+    if (!Number.isFinite(dt) || dt <= 0) break;
+
+    // Self-field from the beam's present configuration.
+    let selfField = null;
+    if (beamCurrent !== 0) {
+      const radii = live.map((t) => Math.abs(t.state.x));
+      const liveShares = live.map((t) => shares[t.index]);
+      // The density is set by how fast the beam is moving HERE: a decelerated
+      // beam is a denser one, which is why space charge bites hardest in the
+      // slow part of an optic.
+      const meanVz =
+        live.reduce((s, t) => s + Math.abs(t.state.vz), 0) / live.length;
+      const lambda = lineChargeDensity(beamCurrent, meanVz);
+      const sign = Math.sign(live[0].state.charge) || 1;
+      selfField = spaceChargeField(radii, liveShares, lambda * sign, softening);
+    }
+
+    for (let k = 0; k < live.length; k++) {
+      const t = live[k];
+      const Er = selfField ? selfField[k] : 0;
+      const x = t.state.x;
+      // Resolve the radial self-field onto the signed transverse axis.
+      const extra =
+        Er === 0
+          ? null
+          : { Ex: planar ? Er : Er * (Math.abs(x) > 0 ? Math.sign(x) : 0), Ez: 0 };
+
+      const next = step(field, t.state, dt, extra);
+      const r = transverse(next.x);
+
+      if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
+        t.state = next;
+        t.stop = 'electrode';
+        t.active = false;
+      } else if (next.z > zMax) {
+        t.state = next;
+        t.stop = 'exited';
+        t.active = false;
+      } else if (next.z < zMin) {
+        t.state = next;
+        t.stop = 'reflected';
+        t.active = false;
+      } else {
+        t.state = next;
+        const drift = Math.abs(totalEnergy(field, next) - t.E0) / t.scale;
+        if (drift > t.energyDrift) t.energyDrift = drift;
+      }
+
+      if (!t.active || n % recordEvery === 0) t.points.push(t.state);
+    }
+  }
+
+  for (const t of tracks) {
+    if (t.points[t.points.length - 1] !== t.state) t.points.push(t.state);
+    delete t.active;
+    delete t.index;
+    delete t.E0;
+    delete t.scale;
+  }
+
+  return { tracks, steps: n };
 }
 
 /**

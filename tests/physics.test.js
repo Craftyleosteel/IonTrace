@@ -29,6 +29,7 @@ import {
   ELEMENTARY_CHARGE,
   ATOMIC_MASS_UNIT,
   ELECTRON_MASS,
+  VACUUM_PERMITTIVITY,
   speedFromKineticEnergy,
   relativisticError,
   eVToJoules,
@@ -44,9 +45,15 @@ import {
   stepRK4,
   stepVerlet,
   flyIon,
+  flyBeam,
   totalEnergy,
   kineticEnergy,
 } from '../src/integrator.js';
+import {
+  currentShares,
+  spaceChargeField,
+  lineChargeDensity,
+} from '../src/spacecharge.js';
 import { makeIon, parallelBeam, axialCrossing, focalCrossing } from '../src/ion.js';
 import { buildEinzelLens } from '../src/geometries/einzel.js';
 
@@ -632,6 +639,291 @@ describe('Axial crossing', () => {
   it('does not extrapolate a focus for a diverging ray', () => {
     const exit = { x: 2e-3, z: 0.1, vx: +1e3, vz: 1e5, t: 0 };
     assert(focalCrossing([exit, exit]) === null, 'diverging ray has no focus ahead');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* space charge                                                        */
+/* ------------------------------------------------------------------ */
+
+describe('Space charge', () => {
+  /** Rays evenly sampling a uniform-density beam of radius R. */
+  const sampleBeam = (R, n) =>
+    Array.from({ length: n + 1 }, (_, i) => (i * R) / n);
+
+  it('carries current shares that sum to one', () => {
+    const shares = currentShares(sampleBeam(4e-3, 12));
+    const total = shares.reduce((a, b) => a + b, 0);
+    assertRelClose(total, 1, 1e-12, 'current shares must partition the beam');
+  });
+
+  it('weights shares by annulus area, not by ray count', () => {
+    // A ray at radius r stands for the annulus halfway to each neighbour, so
+    // its share is (r_out^2 - r_in^2) / R^2. Treating every ray as an equal
+    // slice would put far too much charge near the axis and overstate the
+    // defocusing. Checked against the closed form rather than an arbitrary
+    // ratio.
+    const R = 4e-3;
+    const n = 10;
+    const radii = sampleBeam(R, n);
+    const shares = currentShares(radii);
+    const d = R / n;
+
+    for (let i = 0; i <= n; i++) {
+      const inner = i === 0 ? 0 : radii[i] - d / 2;
+      const outer = i === n ? R : radii[i] + d / 2;
+      const expected = (outer * outer - inner * inner) / (R * R);
+      assertRelClose(shares[i], expected, 1e-12, `share of ray ${i}`);
+    }
+  });
+
+  it('treats a ray and its mirror image as one ring', () => {
+    // parallelBeam launches signed offsets, so every non-zero radius appears
+    // twice - the two halves of a single ring in the meridional plane. They
+    // must split one annulus between them, not claim one each, or the beam
+    // carries twice the current it was given.
+    const signed = [-3e-3, -1.5e-3, 0, 1.5e-3, 3e-3];
+    const shares = currentShares(signed.map(Math.abs));
+    const unique = currentShares([0, 1.5e-3, 3e-3]);
+
+    assertRelClose(shares[0] + shares[4], unique[2], 1e-12, 'outer ring total');
+    assertRelClose(shares[1] + shares[3], unique[1], 1e-12, 'middle ring total');
+    assertRelClose(shares[0], shares[4], 1e-12, 'mirrored halves share equally');
+
+    // And they must feel an identical field, or the beam is not symmetric.
+    const E = spaceChargeField(signed.map(Math.abs), shares, 1e-9);
+    assertRelClose(E[0], E[4], 1e-12, 'mirrored halves feel the same field');
+    assertRelClose(E[1], E[3], 1e-12, 'mirrored halves feel the same field');
+  });
+
+  it('reproduces the analytic field of a uniform cylindrical beam', () => {
+    // Gauss's law on a uniform beam of radius R and line density lambda gives
+    //
+    //     E_r(r) = lambda r / (2 pi eps0 R^2)   for r <= R
+    //
+    // i.e. the field rises LINEARLY from the axis to the beam edge. This is
+    // the single most important check on the model: it is a closed-form
+    // result the ring sampling has to reproduce.
+    const R = 4e-3;
+    const n = 40;
+    const radii = sampleBeam(R, n);
+    const shares = currentShares(radii);
+    const lambda = 1e-9; // C/m
+
+    const E = spaceChargeField(radii, shares, lambda);
+    const k = 1 / (2 * Math.PI * VACUUM_PERMITTIVITY);
+
+    // Skip the innermost rays: within a couple of ring spacings of the axis
+    // the discrete annuli cannot resolve the 1/r, and the model is documented
+    // as unreliable there.
+    for (let i = 5; i <= n; i++) {
+      const expected = (lambda * radii[i] * k) / (R * R);
+      assertRelClose(E[i], expected, 0.05, `E_r at r = ${radii[i] * 1e3} mm`);
+    }
+  });
+
+  it('converges towards the analytic field as rays are added', () => {
+    const R = 4e-3;
+    const lambda = 1e-9;
+    const k = 1 / (2 * Math.PI * VACUUM_PERMITTIVITY);
+
+    const errorAt = (n) => {
+      const radii = sampleBeam(R, n);
+      const E = spaceChargeField(radii, currentShares(radii), lambda);
+      // Compare at the beam edge, where the sampling is best resolved.
+      const expected = (lambda * R * k) / (R * R);
+      return Math.abs(E[n] - expected) / expected;
+    };
+
+    assert(
+      errorAt(40) < errorAt(10),
+      `refining the ray sampling must improve the field ` +
+        `(${errorAt(10).toExponential(2)} -> ${errorAt(40).toExponential(2)})`
+    );
+  });
+
+  it('gives exactly zero field on the axis', () => {
+    // By symmetry there is no direction for a radial field to point in at
+    // r = 0, exactly as for the electrode field.
+    const radii = sampleBeam(4e-3, 10);
+    const E = spaceChargeField(radii, currentShares(radii), 1e-9);
+    assertClose(E[0], 0, 0, 'space-charge field on the axis');
+  });
+
+  it('shields the interior from charge outside it', () => {
+    // The cylindrical shell theorem: a uniform shell of charge exerts no net
+    // force on anything inside it. Adding current at large radius must not
+    // change the field felt at small radius.
+    const inner = [1e-3, 2e-3];
+    const withOuter = [1e-3, 2e-3, 8e-3];
+    const lambda = 1e-9;
+
+    // Give the inner two rays identical absolute shares in both cases, so the
+    // only difference is the presence of the outer ring.
+    const sharesA = [0.25, 0.75];
+    const sharesB = [0.25, 0.75, 4.0]; // outer ring carries far more
+
+    const a = spaceChargeField(inner, sharesA, lambda);
+    const b = spaceChargeField(withOuter, sharesB, lambda);
+
+    assertRelClose(b[0], a[0], 1e-12, 'inner ray must not feel the outer shell');
+    assertRelClose(b[1], a[1], 1e-12, 'middle ray must not feel the outer shell');
+  });
+
+  it('scales linearly with beam current', () => {
+    const radii = sampleBeam(4e-3, 10);
+    const shares = currentShares(radii);
+    const a = spaceChargeField(radii, shares, 1e-9);
+    const b = spaceChargeField(radii, shares, 3e-9);
+    for (let i = 1; i < radii.length; i++) {
+      assertRelClose(b[i], 3 * a[i], 1e-12, `tripling lambda at ray ${i}`);
+    }
+  });
+
+  it('makes a slower beam denser', () => {
+    // lambda = I / v: the same current at half the speed is twice the charge
+    // per unit length. This is why space charge bites hardest where an optic
+    // decelerates the beam.
+    assertRelClose(
+      lineChargeDensity(1e-6, 1000),
+      2 * lineChargeDensity(1e-6, 2000),
+      1e-12,
+      'halving the speed doubles the line density'
+    );
+  });
+});
+
+describe('Space charge in flight', () => {
+  const built = buildEinzelLens({ gridStep: 0.5 });
+  const { field } = built;
+  field.setVoltages({ housing: 0, entrance: 0, centre: -2000, exit: 0 });
+  const SPEC = { mass: 100, charge: 1, energy: 1000, z: 0.5 };
+  const beam = () => parallelBeam({ ...SPEC, count: 9, maxOffset: 3 });
+
+  it('changes nothing at all when the current is zero', () => {
+    // A self-field model that perturbs the answer when switched off is worse
+    // than no model, so this is checked against flyIon to machine precision
+    // rather than to a tolerance.
+    const single = flyIon(field, makeIon({ ...SPEC, x: 3 }), { cfl: 0.05 });
+    const { tracks } = flyBeam(field, [makeIon({ ...SPEC, x: 3 })], {
+      cfl: 0.05,
+      beamCurrent: 0,
+    });
+    const a = single.points[single.points.length - 1];
+    const b = tracks[0].points[tracks[0].points.length - 1];
+    assertClose(b.x, a.x, 1e-18, 'final x with space charge disabled');
+    assertClose(b.z, a.z, 1e-18, 'final z with space charge disabled');
+    assert(tracks[0].stop === single.stop, 'stop reason must match flyIon');
+  });
+
+  it('pushes the focus downstream as the current rises', () => {
+    // Space charge is repulsive for a single-species beam, so it always
+    // opposes the lens and the crossover must move DOWNSTREAM. If any current
+    // pulled it upstream, the sign of the self-field would be wrong.
+    //
+    // Kept in the weak-space-charge regime where a crossover still exists;
+    // the strong regime is the next test.
+    const focusAt = (beamCurrent) => {
+      const { tracks } = flyBeam(field, beam(), { cfl: 0.05, beamCurrent });
+      return focalCrossing(tracks[tracks.length - 1].points);
+    };
+
+    let previous = -Infinity;
+    for (const I of [0, 1e-6, 3e-6]) {
+      const f = focusAt(I);
+      assert(f !== null, `no crossover at ${I} A, where one is still expected`);
+      assert(
+        f.z > previous,
+        `focus moved upstream at ${I} A: ` +
+          `${(previous * 1e3).toFixed(1)} mm -> ${(f.z * 1e3).toFixed(1)} mm`
+      );
+      previous = f.z;
+    }
+  });
+
+  it('replaces the point focus with a finite waist at high current', () => {
+    // This is the defining behaviour of a space-charge-dominated beam and it
+    // is not a numerical artefact. The self-field goes as 1/r, so as the beam
+    // converges the repulsion diverges: it cannot be brought to a point. The
+    // beam reaches a minimum radius - a waist - and expands again, and that
+    // waist grows with current.
+    //
+    // A test that insisted on a crossover at every current would be asserting
+    // physics that is simply false.
+    const waistOf = (beamCurrent) => {
+      const { tracks } = flyBeam(field, beam(), { cfl: 0.05, beamCurrent });
+      const outer = tracks[tracks.length - 1];
+      let waist = Infinity;
+      for (const p of outer.points) {
+        // Downstream of the last electrode, so this is the beam's own waist
+        // and not something happening inside the lens.
+        if (p.z < mmToM(83)) continue;
+        waist = Math.min(waist, Math.abs(p.x));
+      }
+      return { waist, crossover: focalCrossing(outer.points) };
+    };
+
+    let previous = -Infinity;
+    for (const I of [1e-5, 2e-5, 5e-5]) {
+      const { waist, crossover } = waistOf(I);
+      assert(
+        crossover === null,
+        `expected no point focus at ${I} A, but one was reported`
+      );
+      assert(
+        waist > 1e-5,
+        `expected a finite waist at ${I} A, got ${(waist * 1e3).toFixed(4)} mm`
+      );
+      assert(
+        waist > previous,
+        `waist must grow with current: ${(previous * 1e3).toFixed(3)} mm -> ` +
+          `${(waist * 1e3).toFixed(3)} mm at ${I} A`
+      );
+      previous = waist;
+    }
+  });
+
+  it('keeps an on-axis ion on the axis', () => {
+    // The self-field vanishes on the axis by symmetry, so space charge must
+    // not deflect the central ray.
+    const { tracks } = flyBeam(field, beam(), { cfl: 0.05, beamCurrent: 2e-5 });
+    const centre = tracks[(tracks.length - 1) / 2];
+    assertClose(centre.start?.x ?? centre.points[0].x, 0, 1e-18, 'centre ray starts on axis');
+    for (const p of centre.points) {
+      assertClose(p.x, 0, 1e-15, `centre ray strayed to x = ${p.x}`);
+    }
+  });
+
+  it('stays mirror symmetric under space charge', () => {
+    const { tracks } = flyBeam(field, beam(), { cfl: 0.05, beamCurrent: 2e-5 });
+    const n = tracks.length;
+    for (let i = 0; i < (n - 1) / 2; i++) {
+      const lo = tracks[i];
+      const hi = tracks[n - 1 - i];
+      assert(lo.points.length === hi.points.length, `pair ${i} differs in length`);
+      const a = lo.points[lo.points.length - 1];
+      const b = hi.points[hi.points.length - 1];
+      assertClose(a.x, -b.x, 1e-15, `pair ${i} transverse mirror`);
+      assertClose(a.z, b.z, 1e-15, `pair ${i} axial mirror`);
+    }
+  });
+
+  it('flies every ion on a common time base', () => {
+    // The self-field is only defined for a beam whose members are at the same
+    // instant, so lockstep is a correctness requirement, not an optimisation.
+    const { tracks } = flyBeam(field, beam(), { cfl: 0.05, beamCurrent: 1e-5 });
+    const reference = tracks[0];
+    for (const t of tracks) {
+      const steps = Math.min(t.points.length, reference.points.length);
+      for (let n = 0; n < steps; n++) {
+        assertClose(
+          t.points[n].t,
+          reference.points[n].t,
+          1e-18,
+          `ion times diverged at sample ${n}`
+        );
+      }
+    }
   });
 });
 

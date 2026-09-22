@@ -16,8 +16,8 @@
 
 import { buildEinzelLens } from './geometries/einzel.js';
 import { makeIon, parallelBeam, focalCrossing } from './ion.js';
-import { flyIon, kineticEnergy } from './integrator.js';
-import { joulesToEV, mToMm } from './constants.js';
+import { flyBeam, flyIon, kineticEnergy } from './integrator.js';
+import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
 
 /* ------------------------------------------------------------------ */
@@ -44,12 +44,25 @@ const inputs = {
   gridStep: el('gridStep'),
   method: el('method'),
   cfl: el('cfl'),
+  beamCurrent: el('beamCurrent'),
   showField: el('showField'),
   showContours: el('showContours'),
 };
 
+const flyButton = el('fly');
+
 /** Controls whose change invalidates the solved field. */
 const GEOMETRY_INPUTS = ['boreRadius', 'centreLength', 'gridStep'];
+
+/**
+ * Controls that change only how the scene is drawn.
+ *
+ * Everything else changes the physics, which makes any trajectory already on
+ * screen stale: it was flown through a different field, or by a different
+ * beam. Those are marked rather than silently redrawn, because a trajectory
+ * that does not correspond to the settings beside it is simply wrong.
+ */
+const DISPLAY_INPUTS = ['showField', 'showContours'];
 
 /* ------------------------------------------------------------------ */
 /* colour                                                              */
@@ -103,6 +116,19 @@ let model = null; // { grid, field, geometry }
 let trajectories = [];
 let stats = {};
 
+/**
+ * Animation state.
+ *
+ * `head` is a sample index, and because flyBeam advances every ion on a
+ * shared time step, the same index is the same INSTANT for every ray. The
+ * moving dots are therefore a real snapshot of where the bunch is, not a
+ * drawing convenience.
+ */
+let animation = { head: Infinity, total: 0, running: false, frame: 0 };
+
+/** True when the drawn trajectories no longer match the current settings. */
+let stale = false;
+
 function readNumber(input, fallback) {
   const v = parseFloat(input.value);
   return Number.isFinite(v) ? v : fallback;
@@ -147,7 +173,7 @@ function applyVoltages() {
 }
 
 /** Fly the beam through the current field. */
-function flyBeam() {
+function runFlight() {
   const { field, geometry } = model;
   const spec = {
     mass: readNumber(inputs.mass, 100),
@@ -168,9 +194,14 @@ function flyBeam() {
   }
   stats.error = null;
 
+  // Slider is in microamps; the physics is in amperes.
+  const beamCurrent = readNumber(inputs.beamCurrent, 0) * 1e-6;
+  stats.beamCurrent = beamCurrent;
+
   const opts = {
     method: inputs.method.value,
     cfl: readNumber(inputs.cfl, 0.05),
+    beamCurrent,
     // Integrate at full resolution but keep every fourth point for drawing.
     // The energy diagnostic is evaluated on every step regardless, so this
     // costs nothing physically; it only avoids stroking tens of thousands of
@@ -179,10 +210,15 @@ function flyBeam() {
   };
 
   const t0 = performance.now();
-  trajectories = rays.map((ion) => {
-    const result = flyIon(field, ion, opts);
-    return { ...result, start: ion, focus: focalCrossing(result.points) };
-  });
+  // The whole beam flies together. With space charge on it has to: the force
+  // on each ion depends on where the others are at that instant, so they
+  // cannot be taken one at a time.
+  const { tracks } = flyBeam(field, rays, opts);
+  trajectories = tracks.map((t, i) => ({
+    ...t,
+    start: rays[i],
+    focus: focalCrossing(t.points),
+  }));
   stats.flyMs = performance.now() - t0;
 
   const lensCentre = (geometry.bounds.z3 + geometry.bounds.z4) / 2; // mm
@@ -202,16 +238,50 @@ function flyBeam() {
   // not from an average over the drawn rays. Averaging mixes the marginal and
   // paraxial foci, so the reported "focal length" would shift with the beam
   // radius and the ray count - neither of which is a property of the lens.
-  const probe = flyIon(
-    field,
-    makeIon({ ...spec, x: 0.01 * geometry.boreRadius }),
-    opts
-  );
+  //
+  // The probe flies WITHOUT space charge, deliberately. This number is a
+  // property of the optics, so it should not move when the beam current is
+  // turned up; what the loaded beam actually does is reported separately
+  // below. A probe ray flown inside the beam would also be unrepresentative,
+  // since at 1 % of the bore it encloses almost no current and would feel
+  // almost no self-field.
+  const probe = flyIon(field, makeIon({ ...spec, x: 0.01 * geometry.boreRadius }), {
+    ...opts,
+    beamCurrent: 0,
+  });
   const probeFocus = focalCrossing(probe.points);
   stats.paraxial =
     probe.stop === 'exited' && probeFocus
       ? { mm: fromCentre(probeFocus.z), extrapolated: probeFocus.extrapolated }
       : null;
+
+  // What the loaded beam actually does. Space charge goes as 1/r, so a
+  // sufficiently dense beam can never be brought to a point: it reaches a
+  // minimum radius and expands again. Reporting a focal length in that regime
+  // would be reporting something that does not exist.
+  const outermost = transmitted
+    .slice()
+    .sort((a, b) => Math.abs(b.start.x) - Math.abs(a.start.x))[0];
+  stats.waist = null;
+  if (outermost) {
+    const lensEnd = mmToM(geometry.bounds.z6);
+    let waist = Infinity;
+    let waistZ = 0;
+    for (const p of outermost.points) {
+      if (p.z < lensEnd) continue;
+      if (Math.abs(p.x) < waist) {
+        waist = Math.abs(p.x);
+        waistZ = p.z;
+      }
+    }
+    if (Number.isFinite(waist)) {
+      stats.waist = {
+        radiusMm: mToMm(waist),
+        atMm: fromCentre(waistZ),
+        crossed: outermost.focus !== null && !outermost.focus.extrapolated,
+      };
+    }
+  }
 
   // Spherical aberration: how far short of the paraxial focus the outermost
   // transmitted ray crosses. Negative means under-corrected, which is what
@@ -456,27 +526,53 @@ function drawTrajectories(width, height, T) {
   const trajColour = cssVar('--traj');
   const halo = cssVar('--surface-1');
 
+  // A stale path was flown through a different field or a different beam, so
+  // it is drawn faintly rather than removed: the shape is still useful
+  // context while a slider is moving, but it must not read as the answer.
+  const dim = stale ? 0.28 : 1;
+  const head = animation.head;
+
   for (const pass of ['halo', 'line']) {
     ctx.save();
     ctx.strokeStyle = pass === 'halo' ? halo : trajColour;
     ctx.lineWidth = pass === 'halo' ? 4 : 2;
-    ctx.globalAlpha = pass === 'halo' ? 0.55 : 1;
+    ctx.globalAlpha = (pass === 'halo' ? 0.55 : 1) * dim;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
     for (const traj of trajectories) {
+      const last = Math.min(traj.points.length, head);
+      if (last < 2) continue;
       ctx.beginPath();
-      let started = false;
-      for (const p of traj.points) {
+      for (let n = 0; n < last; n++) {
+        const p = traj.points[n];
         const x = T.sx(p.z);
         const y = T.sy(p.x);
-        if (!started) {
-          ctx.moveTo(x, y);
-          started = true;
-        } else {
-          ctx.lineTo(x, y);
-        }
+        if (n === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // The bunch itself, while it is still in flight. Every ray shares a time
+  // base, so these dots are all the same instant - a real snapshot of where
+  // the ions are, which is the thing a "fly" button is for.
+  if (animation.running) {
+    ctx.save();
+    ctx.fillStyle = trajColour;
+    ctx.strokeStyle = halo;
+    ctx.lineWidth = 1.5;
+    for (const traj of trajectories) {
+      const n = Math.min(traj.points.length, head) - 1;
+      if (n < 0 || n >= traj.points.length) continue;
+      // Only ions still flying at this instant get a marker.
+      if (head > traj.points.length) continue;
+      const p = traj.points[n];
+      ctx.beginPath();
+      ctx.arc(T.sx(p.z), T.sy(p.x), 3.5, 0, Math.PI * 2);
+      ctx.fill();
       ctx.stroke();
     }
     ctx.restore();
@@ -485,9 +581,11 @@ function drawTrajectories(width, height, T) {
   // Mark where a ray ended on metal. A strike is a real result, not a failure
   // to render, so it gets an explicit symbol rather than a line that stops.
   ctx.save();
+  ctx.globalAlpha = dim;
   ctx.fillStyle = cssVar('--electrode-edge');
   for (const traj of trajectories) {
     if (traj.stop !== 'electrode') continue;
+    if (head < traj.points.length) continue;
     const p = traj.points[traj.points.length - 1];
     ctx.beginPath();
     ctx.arc(T.sx(p.z), T.sy(p.x), 3, 0, Math.PI * 2);
@@ -600,6 +698,13 @@ function drawReadout() {
   // The einzel lens's defining property: entrance and exit are at the same
   // potential, so a transmitted ion must leave with the energy it arrived
   // with. Reported as the worst case across the beam.
+  // With space charge on, a non-zero net work is CORRECT, not an error: the
+  // beam's own field does real work on its ions as it expands, converting the
+  // bunch's electrostatic energy into transverse kinetic energy. The einzel
+  // lens's no-net-work property is a property of the LENS, and it only holds
+  // for a beam whose ions do not interact. Flagging it as a discrepancy in
+  // that case would be flagging correct physics.
+  const loaded = stats.beamCurrent > 0;
   const energy =
     stats.keIn === null
       ? stat('Net work', '—', '', 'nothing transmitted')
@@ -607,9 +712,31 @@ function drawReadout() {
           'Net work',
           stats.worstWork.toFixed(3),
           'eV',
-          `worst of ${stats.transmitted} transmitted, on ${stats.keIn.toFixed(0)} eV in`,
-          Math.abs(stats.worstWork) > 0.01 * stats.keIn
+          loaded
+            ? `on ${stats.keIn.toFixed(0)} eV in · expected: the beam's own field does work`
+            : `worst of ${stats.transmitted} transmitted, on ${stats.keIn.toFixed(0)} eV in · an einzel lens should do none`,
+          !loaded && Math.abs(stats.worstWork) > 0.01 * stats.keIn
         );
+
+  // What the loaded beam does, which is not the same as what the lens does
+  // once space charge is on.
+  const waist =
+    stats.waist === null
+      ? stat('Beam waist', '—', '', 'no transmitted ray to measure')
+      : stats.waist.crossed
+        ? stat(
+            'Beam waist',
+            'crossover',
+            '',
+            `outer ray reaches the axis at ${stats.waist.atMm.toFixed(1)} mm`
+          )
+        : stat(
+            'Beam waist',
+            stats.waist.radiusMm.toFixed(2),
+            'mm',
+            `at ${stats.waist.atMm.toFixed(1)} mm · space charge prevents a point focus`,
+            true
+          );
 
   const fate = [
     `${stats.transmitted} through`,
@@ -623,7 +750,7 @@ function drawReadout() {
 
   readoutEl.innerHTML = [
     focal,
-    aberration,
+    stats.beamCurrent > 0 ? waist : aberration,
     energy,
     stat('Transmitted', `${stats.transmitted}/${stats.total}`, '', fate),
     stat(
@@ -694,7 +821,6 @@ function runUpdate() {
   try {
     if (doResolve) rebuild();
     applyVoltages();
-    flyBeam();
     render();
     drawReadout();
   } catch (err) {
@@ -706,6 +832,76 @@ function runUpdate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* flying                                                              */
+/* ------------------------------------------------------------------ */
+
+/** Mark the drawn trajectories as no longer matching the settings. */
+function markStale() {
+  if (trajectories.length === 0) return;
+  stale = true;
+  flyButton.classList.add('stale');
+}
+
+/**
+ * Launch the beam.
+ *
+ * The flight is computed in full first and then revealed frame by frame. The
+ * alternative - integrating one step per frame - would tie the physics time
+ * step to the display refresh rate, which is a good way to get a different
+ * trajectory on a different monitor.
+ */
+function fly() {
+  cancelAnimationFrame(animation.frame);
+
+  flyButton.disabled = true;
+  statusEl.classList.add('busy');
+
+  requestAnimationFrame(() => {
+    try {
+      if (!model) rebuild();
+      applyVoltages();
+      runFlight();
+
+      stale = false;
+      flyButton.classList.remove('stale');
+
+      const total = Math.max(...trajectories.map((t) => t.points.length), 0);
+      animation = { head: 0, total, running: total > 0, frame: 0 };
+
+      drawReadout();
+      animate();
+    } catch (err) {
+      readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
+      console.error(err);
+      render();
+    } finally {
+      flyButton.disabled = false;
+      statusEl.classList.remove('busy');
+    }
+  });
+}
+
+/** Reveal the computed flight over roughly a second and a half. */
+function animate() {
+  const FRAMES = 90;
+  const perFrame = Math.max(1, Math.ceil(animation.total / FRAMES));
+
+  const tick = () => {
+    animation.head += perFrame;
+    if (animation.head >= animation.total) {
+      animation.head = Infinity;
+      animation.running = false;
+      render();
+      return;
+    }
+    render();
+    animation.frame = requestAnimationFrame(tick);
+  };
+
+  animation.frame = requestAnimationFrame(tick);
+}
+
+/* ------------------------------------------------------------------ */
 /* wiring                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -714,6 +910,7 @@ const OUTPUTS = {
   vOuter: (v) => v,
   rays: (v) => v,
   beamRadius: (v) => parseFloat(v).toFixed(1),
+  beamCurrent: (v) => parseFloat(v).toFixed(1),
   boreRadius: (v) => parseFloat(v).toFixed(1),
   centreLength: (v) => v,
   cfl: (v) => parseFloat(v).toFixed(2),
@@ -728,12 +925,28 @@ function syncOutputs() {
 
 for (const [id, input] of Object.entries(inputs)) {
   const needsResolve = GEOMETRY_INPUTS.includes(id);
+  const displayOnly = DISPLAY_INPUTS.includes(id);
   const event = input.type === 'range' ? 'input' : 'change';
   input.addEventListener(event, () => {
     syncOutputs();
+    // Anything that is not purely cosmetic invalidates the flight already on
+    // screen. It stays visible, dimmed, until the beam is flown again.
+    if (!displayOnly) markStale();
     update(needsResolve);
   });
 }
+
+flyButton.addEventListener('click', fly);
+
+// Space is the obvious key for "go", but only when the user is not part-way
+// through typing a number into one of the fields.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== ' ' && e.key !== 'Enter') return;
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'BUTTON') return;
+  e.preventDefault();
+  fly();
+});
 
 let resizeTimer;
 window.addEventListener('resize', () => {
@@ -746,3 +959,6 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ren
 
 syncOutputs();
 update(true);
+// Fly once on load so the page is not empty, and so the button's effect is
+// obvious before it is pressed.
+fly();
