@@ -27,12 +27,14 @@ jobs:
   test:
     name: physics tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
 
       # No install step: the project has no dependencies by design.
       - name: Run the physics suite
@@ -46,7 +48,10 @@ jobs:
     if: "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
     runs-on: ubuntu-latest
 
+    # Naming any permission sets every unnamed one to none, so contents: read
+    # has to be spelled out or the checkout below has no rights.
     permissions:
+      contents: read
       pages: write
       id-token: write
 
@@ -55,15 +60,28 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/configure-pages@v5
+      # enablement: true switches the repository's Pages source to GitHub
+      # Actions through the API, so a fresh clone or a fork deploys without
+      # anyone having to find the setting first. Without it the action fails
+      # with "Get Pages site failed" whenever Pages is unset or still in
+      # deploy-from-a-branch mode.
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
 
-      # The whole repository is the site. .nojekyll disables Jekyll so every
-      # file is served exactly as committed.
-      - uses: actions/upload-pages-artifact@v3
+      # The whole repository is the site, including tests/ so the physics
+      # suite is runnable from the live page.
+      #
+      # Hidden files are left out, which is the behaviour wanted here: it
+      # keeps .git and .github off the public site. .nojekyll is not needed in
+      # the artifact because Actions-deployed Pages serves it verbatim and
+      # never runs Jekyll; the file stays in the repository so that branch
+      # deploys, which do run Jekyll, still behave.
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: '.'
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
