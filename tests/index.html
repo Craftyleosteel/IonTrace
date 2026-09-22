@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>IonTrace physics tests</title>
+    <link rel="stylesheet" href="../css/style.css" />
+    <style>
+      .runner {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .suite {
+        margin: 20px 0 6px;
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+      .case {
+        display: grid;
+        grid-template-columns: 52px 1fr auto;
+        gap: 10px;
+        align-items: baseline;
+        padding: 5px 10px;
+        border-radius: 6px;
+        font-size: 13px;
+      }
+      .case + .case {
+        border-top: 1px solid var(--border);
+      }
+      .tag {
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 650;
+        letter-spacing: 0.04em;
+      }
+      .pass .tag {
+        color: #0ca30c;
+      }
+      .fail .tag {
+        color: #d03b3b;
+      }
+      .fail {
+        background: color-mix(in srgb, #d03b3b 8%, transparent);
+      }
+      .ms {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .detail {
+        grid-column: 2 / -1;
+        margin: 6px 0 2px;
+        padding: 8px 10px;
+        white-space: pre-wrap;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        line-height: 1.5;
+        color: var(--text-secondary);
+        background: var(--surface-2);
+        border-radius: 6px;
+      }
+      .summary {
+        margin-top: 24px;
+        padding: 14px 16px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--surface-1);
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .summary.ok {
+        color: #0ca30c;
+      }
+      .summary.bad {
+        color: #d03b3b;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <h1>Physics tests</h1>
+        <p class="tagline">
+          Each layer is checked against something outside itself: constants
+          against CODATA, the Laplace solver against closed-form harmonic
+          functions, the integrators against an analytically solvable field, and
+          the lens against conservation laws and symmetries.
+        </p>
+      </div>
+    </header>
+
+    <main class="runner">
+      <div id="results"></div>
+      <div id="summary" class="summary">Running…</div>
+      <p style="margin-top: 20px">
+        <a href="../index.html">&larr; Back to the simulator</a>
+      </p>
+    </main>
+
+    <script type="module">
+      import { run } from './harness.js';
+      import './physics.test.js';
+
+      const results = document.getElementById('results');
+      const summary = document.getElementById('summary');
+
+      const esc = (s) =>
+        String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+
+      run((e) => {
+        if (e.type === 'suite') {
+          const h = document.createElement('div');
+          h.className = 'suite';
+          h.textContent = e.name;
+          results.append(h);
+        } else if (e.type === 'pass' || e.type === 'fail') {
+          const row = document.createElement('div');
+          row.className = `case ${e.type}`;
+          row.innerHTML =
+            `<span class="tag">${e.type === 'pass' ? 'PASS' : 'FAIL'}</span>` +
+            `<span>${esc(e.name)}</span>` +
+            `<span class="ms">${e.ms.toFixed(0)} ms</span>` +
+            (e.type === 'fail' ? `<div class="detail">${esc(e.message)}</div>` : '');
+          results.append(row);
+        } else if (e.type === 'done') {
+          summary.textContent = `${e.passed} passed, ${e.failed} failed`;
+          summary.className = `summary ${e.failed ? 'bad' : 'ok'}`;
+        }
+      });
+    </script>
+  </body>
+</html>

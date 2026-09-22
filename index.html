@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>IonTrace - ion trajectory simulation</title>
+    <meta
+      name="description"
+      content="Open source electrostatic ion trajectory simulation. Solves Laplace's equation on a potential array and integrates Newton's second law."
+    />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <h1>IonTrace</h1>
+        <p class="tagline">
+          Electrostatic ion optics in the browser. Laplace solved on a potential
+          array, trajectories integrated from <em>m</em>&thinsp;<em>a</em> =
+          <em>q</em>&thinsp;<em>E</em>.
+        </p>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- ---------------------------------------------------------- -->
+      <!-- controls                                                    -->
+      <!-- ---------------------------------------------------------- -->
+      <aside class="controls" aria-label="Simulation parameters">
+        <section class="group">
+          <h2>Electrode voltages</h2>
+          <p class="hint">
+            Free to change. Each electrode's field was solved once at 1&nbsp;V;
+            new voltages are a weighted sum of those solutions, so nothing is
+            re-solved.
+          </p>
+
+          <label class="field">
+            <span class="field-label">Centre electrode<span class="unit">V</span></span>
+            <input id="vCentre" type="range" min="-4000" max="4000" step="50" value="-2000" />
+            <output id="vCentreOut">-2000</output>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Entrance &amp; exit<span class="unit">V</span></span>
+            <input id="vOuter" type="range" min="-1000" max="1000" step="50" value="0" />
+            <output id="vOuterOut">0</output>
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Ion beam</h2>
+
+          <label class="field">
+            <span class="field-label">Mass<span class="unit">u</span></span>
+            <input id="mass" type="number" min="0.1" step="1" value="100" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Charge<span class="unit">e</span></span>
+            <input id="charge" type="number" step="1" value="1" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Kinetic energy<span class="unit">eV</span></span>
+            <input id="energy" type="number" min="0.1" step="100" value="1000" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Rays</span>
+            <input id="rays" type="range" min="1" max="21" step="2" value="9" />
+            <output id="raysOut">9</output>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Beam radius<span class="unit">mm</span></span>
+            <input id="beamRadius" type="range" min="0.5" max="5.5" step="0.5" value="4" />
+            <output id="beamRadiusOut">4.0</output>
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Lens geometry</h2>
+          <p class="hint">
+            Changing these rebuilds the potential array and re-solves Laplace's
+            equation for every electrode.
+          </p>
+
+          <label class="field">
+            <span class="field-label">Bore radius<span class="unit">mm</span></span>
+            <input id="boreRadius" type="range" min="3" max="10" step="0.5" value="6" />
+            <output id="boreRadiusOut">6.0</output>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Centre length<span class="unit">mm</span></span>
+            <input id="centreLength" type="range" min="5" max="40" step="1" value="20" />
+            <output id="centreLengthOut">20</output>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Grid step<span class="unit">mm</span></span>
+            <select id="gridStep">
+              <option value="1">1.0 — fast</option>
+              <option value="0.5" selected>0.5 — default</option>
+              <option value="0.25">0.25 — fine</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Integration</h2>
+
+          <label class="field">
+            <span class="field-label">Method</span>
+            <select id="method">
+              <option value="rk4" selected>Runge–Kutta 4</option>
+              <option value="verlet">Velocity Verlet</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Step fraction</span>
+            <input id="cfl" type="range" min="0.01" max="0.3" step="0.01" value="0.05" />
+            <output id="cflOut">0.05</output>
+          </label>
+        </section>
+
+        <section class="group">
+          <h2>Display</h2>
+          <label class="check">
+            <input id="showField" type="checkbox" checked />
+            <span>Potential map</span>
+          </label>
+          <label class="check">
+            <input id="showContours" type="checkbox" checked />
+            <span>Equipotentials</span>
+          </label>
+        </section>
+      </aside>
+
+      <!-- ---------------------------------------------------------- -->
+      <!-- viewport                                                    -->
+      <!-- ---------------------------------------------------------- -->
+      <section class="viewport">
+        <div class="canvas-frame">
+          <canvas id="scene" role="img"
+            aria-label="Cross-section of a three-cylinder einzel lens with ion trajectories overlaid on the electrostatic potential."></canvas>
+          <p id="status" class="status" role="status">Solving…</p>
+        </div>
+
+        <div class="legend" aria-hidden="false">
+          <span class="key"><i class="swatch swatch-traj"></i>Ion trajectory</span>
+          <span class="key"><i class="swatch swatch-electrode"></i>Electrode</span>
+          <span class="key ramp">
+            <i class="swatch swatch-neg"></i>negative
+            <i class="swatch swatch-zero"></i>0&nbsp;V
+            <i class="swatch swatch-pos"></i>positive
+          </span>
+        </div>
+
+        <div class="readout" id="readout"></div>
+
+        <details class="notes">
+          <summary>What this model does and does not include</summary>
+          <div class="notes-body">
+            <p>
+              Motion follows <em>m</em>&thinsp;d²<em>r</em>/d<em>t</em>² =
+              <em>q</em>&thinsp;<em>E</em>(<em>r</em>) with
+              <em>E</em> = −∇<em>φ</em>, where <em>φ</em> solves Laplace's
+              equation in the charge-free space between electrodes. Geometry is
+              axisymmetric, so the solve is two-dimensional in
+              (<em>z</em>,&nbsp;<em>r</em>) and rotation supplies the third
+              dimension exactly.
+            </p>
+            <p>
+              Deliberately absent from this build: magnetic forces, buffer-gas
+              collisions, space charge between ions, image charges, surface
+              roughness and relativistic correction. Each omission is listed with
+              its consequences in
+              <a href="docs/PHYSICS.md">docs/PHYSICS.md</a>. Results are only
+              trustworthy in the regime where those terms are negligible: dilute,
+              non-relativistic beams in good vacuum.
+            </p>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <footer class="colophon">
+      <a href="docs/PHYSICS.md">Physics reference</a>
+      <a href="tests/index.html">Run the physics tests</a>
+      <a href="https://github.com/">Source</a>
+    </footer>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "iontrace",
+  "version": "0.1.0",
+  "description": "Open source ion trajectory simulation in the browser",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "scripts": {
+    "test": "node tests/run-node.js"
+  },
+  "comment": "IonTrace has no build step and no runtime dependencies. This file exists only to declare ES module semantics so the physics tests can also run under Node; the site itself is plain static files.",
+  "dependencies": {},
+  "devDependencies": {}
+}

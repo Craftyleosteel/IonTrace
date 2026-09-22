@@ -1,0 +1,15 @@
+# IonTrace has no build step and no dependencies; nothing here should ever
+# appear in a clean checkout. Listed anyway so a stray local install or editor
+# artefact cannot be committed by accident.
+
+node_modules/
+package-lock.json
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+*.swp
