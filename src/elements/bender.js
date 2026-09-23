@@ -302,23 +302,30 @@ export function createBender(params = {}, solverOpts = {}) {
     ),
 
     /**
-     * Two ways out, which is what makes this element a junction.
+     * THREE ways out, which is what makes this element a junction.
      *
-     * A quadrupole deflector at its matched voltage turns the beam through a
-     * right angle. Turned off, the beam goes straight through the box and out
-     * the far side. That is not a modelling convenience - it is how these
-     * things are used, as a switch that sends a beam down one of two lines
-     * without moving any hardware.
+     * The box has an aperture on each of its four faces, because the
+     * electrodes stop short of both axes in both directions. One is the
+     * entrance. The other three are all reachable, and which one the beam
+     * takes is decided by the voltage alone:
      *
-     * So the element has two exits and a column can have hardware bolted to
-     * both. Which one the ions actually take is decided by the field, not by
-     * the topology: set the voltage and fly, and the beam goes where the
-     * physics sends it. A branch with nothing attached is simply an open port
-     * the beam may leave through.
+     *     +V   bent one way      out the -x face
+     *      0   straight through  out the +z face
+     *     -V   bent the other    out the +x face
      *
-     * The straight path is 2a long - in at one face of the box, out at the
-     * opposite one - while the bent path is the quarter arc of radius a. They
-     * are different distances, which is why each exit carries its own.
+     * That is not a modelling convenience, it is what these devices are for: a
+     * switch that sends a beam down one of three lines without moving any
+     * hardware. Reversing the polarity mirrors the whole problem in x, so the
+     * counter-bend is the same physics at the same matched magnitude - there
+     * is no second voltage to find.
+     *
+     * A column can therefore have hardware bolted to all three, and the beam
+     * goes where the field sends it. A port with nothing attached is simply an
+     * opening the beam may leave through.
+     *
+     * The straight path is 2a long - in at one face, out at the opposite one -
+     * while each bent path is a quarter arc of radius a. Different distances,
+     * so each exit carries its own.
      */
     exits: [
       {
@@ -342,6 +349,22 @@ export function createBender(params = {}, solverOpts = {}) {
         label: 'Straight through',
         length: 2 * a,
         transform: translation(0, 0, 2 * a),
+      },
+      {
+        port: 'counter',
+        label: 'Bent the other way',
+        length,
+        // The mirror image of the bend arc, which is exactly what reversing
+        // the polarity produces.
+        path: (f) => {
+          const t = (f * Math.PI) / 2;
+          const [x, y] = outOfBend(a - a * Math.cos(t), 0);
+          return [x, y, a * Math.sin(t)];
+        },
+        transform: compose(
+          compose(rollFrame(roll), compose(translation(a, 0, a), yawFrame(-Math.PI / 2))),
+          inverse(rollFrame(roll))
+        ),
       },
     ],
 

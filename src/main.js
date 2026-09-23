@@ -958,12 +958,26 @@ const BENDER_WINDOW = 0.1;
  * kind of answer: it is the deflector doing nothing rather than doing
  * something in a direction.
  */
+/*
+  The four directions, as a roll and a polarity.
+
+  Two independent things aim a deflector, and the pairing is what makes the
+  buttons work. The ROLL says which plane it bends in - horizontal or vertical
+  - and the SIGN of the voltage says which of the two ways within that plane.
+  So Left and Right are the same hardware orientation at opposite polarity,
+  and they leave through DIFFERENT PORTS: a column can have a line bolted to
+  both and switch between them without anything moving. Up and Down are the
+  same pair, rolled a quarter turn.
+*/
 const BEND_DIRECTIONS = [
-  { deg: 0, label: 'Left', glyph: '←' },
-  { deg: 90, label: 'Down', glyph: '↓' },
-  { deg: 180, label: 'Right', glyph: '→' },
-  { deg: 270, label: 'Up', glyph: '↑' },
+  { label: 'Left', glyph: '←', deg: 0, sign: 1 },
+  { label: 'Down', glyph: '↓', deg: 90, sign: 1 },
+  { label: 'Right', glyph: '→', deg: 0, sign: -1 },
+  { label: 'Up', glyph: '↑', deg: 90, sign: -1 },
 ];
+
+/** The compass bearing a roll and a polarity send the beam on. */
+const bearingOf = (deg, sign) => ((((deg + (sign < 0 ? 180 : 0)) % 360) + 360) % 360);
 
 /** Where the beam is actually going, given the voltage and the roll. */
 function bendState(e) {
@@ -976,18 +990,23 @@ function bendState(e) {
   return {
     matched,
     bending,
-    deg: ((e.params.bendPlane % 360) + 360) % 360,
+    // Compared as a bearing rather than as a roll, because a roll of 180 at
+    // one polarity and a roll of 0 at the other put the beam in exactly the
+    // same place - and a button that fails to light up for a setting it would
+    // have produced is worse than no button.
+    bearing: bearingOf(e.params.bendPlane, set < 0 ? -1 : 1),
   };
 }
 
 function bendDirectionRow(e) {
   if (e.typeKey !== 'bender') return '';
-  const { deg, bending } = bendState(e);
+  const { bearing, bending } = bendState(e);
   const buttons = BEND_DIRECTIONS.map(
-    (d) =>
-      `<button class="dir ${bending && Math.abs(deg - d.deg) < 0.5 ? 'sel' : ''}"
-               data-act="send" data-index="${d.deg}"
-               title="Send the beam ${d.label.toLowerCase()} — rolls the deflector and sets the matched voltage">
+    (d, i) =>
+      `<button class="dir ${
+        bending && bearingOf(d.deg, d.sign) === bearing ? 'sel' : ''
+      }" data-act="send" data-index="${i}"
+               title="Send the beam ${d.label.toLowerCase()} — sets the bend plane and the matched voltage of the right polarity">
          <span class="dir-glyph">${d.glyph}</span>${escapeHtml(d.label)}
        </button>`
   ).join('');
@@ -2369,8 +2388,8 @@ function handleAction(act, index) {
       return true;
     }
     case 'send': {
-      // `index` carries a roll angle here, not an element index; -1 means
-      // "switch it off and let the beam through".
+      // `index` picks a direction here, not an element; -1 means "switch it
+      // off and let the beam through".
       const i = selectedIndex();
       const e = beamline.elements[i];
       if (e?.typeKey !== 'bender') return true;
@@ -2378,12 +2397,13 @@ function handleAction(act, index) {
       if (index < 0) {
         setParam(i, 'voltage', 0);
       } else {
-        // Roll first, then power it: both are fast adjusts, but the readout
+        const d = BEND_DIRECTIONS[index];
+        // Plane first, then polarity: both are fast adjusts, but the readout
         // in between should never show a bend aimed at the old direction.
-        setParam(i, 'bendPlane', index);
+        setParam(i, 'bendPlane', d.deg);
         const spec = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
         const { step } = fieldRange(spec, e.params, beamSpec());
-        setParam(i, 'voltage', Math.round(matched / step) * step);
+        setParam(i, 'voltage', d.sign * Math.round(matched / step) * step);
       }
       renderInspector();
       return true;

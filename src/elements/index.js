@@ -121,7 +121,7 @@ export const ELEMENT_TYPES = {
       // an arbitrary angle costs nothing and needs no re-solve — there was
       // never a reason for the quarter-turn steps beyond the slider that used
       // to set it.
-      { key: 'bendPlane', label: 'Rotation about the beam', unit: '°', min: -360, max: 360, step: 5, rebuild: false, help: '0° turns the beam left, 90° turns it down, 180° right, 270° up — and anything in between bends into a plane at that angle. The element is unchanged; it is simply rolled.' },
+      { key: 'bendPlane', label: 'Bend plane', unit: '°', min: -360, max: 360, step: 5, rebuild: false, help: 'Which plane the bending happens in: 0° horizontal, 90° vertical, anything between at that angle. Which of the two ways WITHIN that plane the beam goes is set by the sign of the voltage, and the two are separate exits — so one deflector can feed a line on each.' },
       { key: 'apertureRadius', label: 'Aperture radius r₀', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (r₀/a)², so this and the two below set the operating voltage between them.' },
       { key: 'electrodeThickness', label: 'Electrode thickness', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true },
       { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. r₀ plus these two is the half-width a.' },

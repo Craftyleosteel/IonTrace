@@ -1173,14 +1173,94 @@ describe('Branching columns', () => {
     return { bl, sw };
   }
 
-  it('gives a deflector two exits and a plain element one', () => {
+  it('gives a deflector three exits and a plain element one', () => {
+    // The box has an aperture on each of its four faces, because the
+    // electrodes stop short of both axes in both directions. One is the
+    // entrance; the other three are all reachable, and the voltage alone picks
+    // which - positive bends one way, negative the other, zero goes straight.
     const b = createElement('bender', { voltage: V() });
-    assert(exitsOf(b).length === 2, 'a deflector is a junction');
+    assert(exitsOf(b).length === 3, `a deflector has three ways out, got ${exitsOf(b).length}`);
     assert(
-      exitsOf(b).map((x) => x.port).join(',') === 'bend,straight',
+      exitsOf(b).map((x) => x.port).join(',') === 'bend,straight,counter',
       'bent first, because that is the reason it is in the line'
     );
-    assert(exitsOf(createElement('drift', {})).length === 1, 'a drift is not');
+    assert(exitsOf(createElement('drift', {})).length === 1, 'a drift has one');
+  });
+
+  it('points the two bends opposite ways in the same plane', () => {
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V() }),
+    ]);
+    const sw = bl.elements[1];
+    const dirOf = (port) => {
+      const exit = exitsOf(sw).find((x) => x.port === port);
+      return forwardOf(compose(sw.nominalFrame, exit.transform));
+    };
+    const a = dirOf('bend');
+    const c = dirOf('counter');
+    const s = dirOf('straight');
+
+    assertClose(a[0], -1, 1e-12, 'one bend goes -x');
+    assertClose(c[0], 1, 1e-12, 'the other goes +x');
+    assertClose(s[2], 1, 1e-12, 'and straight carries on down the axis');
+    // Exactly opposed, which is what "the other way" has to mean.
+    const dot = a[0] * c[0] + a[1] * c[1] + a[2] * c[2];
+    assertClose(dot, -1, 1e-12, 'the two bends are exactly opposed');
+  });
+
+  it('rolls both bends together', () => {
+    // The roll sets the PLANE; the polarity picks the direction within it. A
+    // quarter turn should take the pair from left/right to down/up.
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V(), bendPlane: 90 }),
+    ]);
+    const sw = bl.elements[1];
+    const dirOf = (port) =>
+      forwardOf(compose(sw.nominalFrame, exitsOf(sw).find((x) => x.port === port).transform));
+    assertClose(dirOf('bend')[1], -1, 1e-12, 'one bend goes -y');
+    assertClose(dirOf('counter')[1], 1, 1e-12, 'the other goes +y');
+    assertClose(dirOf('straight')[2], 1, 1e-12, 'straight is unaffected by the roll');
+  });
+
+  it('sends the beam to whichever port the polarity chooses', () => {
+    // The point of a three-way switch: one knob, three destinations, no
+    // hardware moved. Reversing the polarity mirrors the whole problem in x,
+    // so the counter-bend needs no second matched voltage to be found.
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V() }),
+    ]);
+    const sw = bl.elements[1];
+    const ends = {};
+    for (const x of exitsOf(sw)) {
+      ends[x.port] = bl.add(createElement('drift', { length: 35, bore: 5 }), bl.elements.length, {
+        parent: sw,
+        port: x.port,
+      });
+    }
+
+    const destination = (volts) => {
+      sw.setVoltage(volts);
+      const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 9, radius: 1 }), {
+        cfl: 0.05,
+        maxSteps: 400000,
+      });
+      const tally = {};
+      for (const t of tracks) {
+        if (t.stop !== 'exited') continue;
+        const p = t.points[t.points.length - 1];
+        const e = bl.endNearest(p.x, p.y ?? 0, p.z);
+        const port = Object.keys(ends).find((k) => ends[k] === e?.element) ?? '?';
+        tally[port] = (tally[port] ?? 0) + 1;
+      }
+      return tally;
+    };
+
+    assert(destination(V())?.bend === 9, 'a positive matched voltage bends one way');
+    assert(destination(0)?.straight === 9, 'zero goes straight through');
+    assert(destination(-V())?.counter === 9, 'a negative one bends the other way');
   });
 
   it('places each branch where its own exit points', () => {
@@ -1204,12 +1284,13 @@ describe('Branching columns', () => {
       createElement('bender', { voltage: V() }),
     ]);
     const ends = bl.openEnds();
-    assert(ends.length === 2, `a bare deflector has two open ends, got ${ends.length}`);
+    assert(ends.length === 3, `a bare deflector has three open ends, got ${ends.length}`);
+    // `switched()` builds lines on two of the three, so the third stays open.
     const { bl: full } = switched();
-    assert(full.openEnds().length === 2, 'and so does one with a line on each');
+    assert(full.openEnds().length === 3, 'two lines and one bare port is still three ends');
     assert(
-      full.openEnds().every((e) => e.element.typeKey === 'drift'),
-      'though now they are at the ends of those lines'
+      full.openEnds().filter((e) => e.element.typeKey === 'drift').length === 2,
+      'two of them now sit at the ends of those lines'
     );
   });
 
