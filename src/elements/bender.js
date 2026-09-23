@@ -319,6 +319,13 @@ export function createBender(params = {}, solverOpts = {}) {
         port: 'bend',
         label: 'Bent',
         length,
+        // The quarter arc, so the drawn path curves through the box rather
+        // than cutting the corner.
+        path: (f) => {
+          const t = (f * Math.PI) / 2;
+          const [x, y] = outOfBend(-a + a * Math.cos(t), 0);
+          return [x, y, a * Math.sin(t)];
+        },
         transform: compose(
           compose(rollFrame(roll), compose(translation(-a, 0, a), yawFrame(Math.PI / 2))),
           inverse(rollFrame(roll))

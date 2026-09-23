@@ -666,16 +666,41 @@ export class Beamline {
     return out;
   }
 
-  /** The reference path through the column, as points in global space. */
-  centreLine(perElement = 12) {
-    const pts = [];
-    for (const e of this.elements) {
-      const n = e.curved ? perElement : 1;
-      for (let k = 0; k <= n; k++) {
-        pts.push(toGlobal(e.frame, e.pathPoint ? e.pathPoint(k / n) : [0, 0, (k / n) * e.length]));
+  /**
+   * The reference path, as one polyline per route from the source to an open
+   * end.
+   *
+   * Separate polylines, because a branching column has no single path and
+   * drawing one flat list of points joins the end of one branch to the start
+   * of the next with a line that is not there. Routes that share a trunk draw
+   * it twice, which costs nothing and keeps this simple.
+   *
+   * Which curve an element contributes depends on the exit being taken: a
+   * deflector's bent path is a quarter arc, its straight path a chord.
+   */
+  centreLines(perElement = 12) {
+    const lines = [];
+    const walk = (e, acc) => {
+      for (const exit of exitsOf(e)) {
+        const n = exit.path ? perElement : 1;
+        const seg = [];
+        for (let k = 0; k <= n; k++) {
+          const f = k / n;
+          seg.push(toGlobal(e.frame, exit.path ? exit.path(f) : [0, 0, f * exit.length]));
+        }
+        const line = acc.concat(seg);
+        const child = this.childAt(e, exit.port);
+        if (child) walk(child, line);
+        else lines.push(line);
       }
-    }
-    return pts;
+    };
+    for (const r of this.roots()) walk(r, []);
+    return lines;
+  }
+
+  /** Every reference-path point, flattened. For bounds, which needs no order. */
+  centreLine(perElement = 12) {
+    return this.centreLines(perElement).flat();
   }
 
   /** Bounds of everything drawn, in all three global axes. */

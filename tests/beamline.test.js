@@ -58,6 +58,7 @@ import {
   joulesToEV,
   ELEMENTARY_CHARGE,
   ATOMIC_MASS_UNIT,
+  VACUUM_PERMITTIVITY,
 } from '../src/constants.js';
 
 /* ------------------------------------------------------------------ */
@@ -1065,6 +1066,88 @@ describe('Elements as placed from the toolbar', () => {
     const ion = { mass: 100, charge: 1, energy: 50 }; // matched near 40 V
     const r = fieldRange(field, { ...ELEMENT_TYPES.bender.defaults, voltage: 5000 }, ion);
     assert(r.max >= 5000, `range should reach the 5000 V already set, stops at ${r.max}`);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* space charge in a drift                                             */
+/* ------------------------------------------------------------------ */
+
+describe('A beam expanding under its own charge', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+  const R0 = 2.0; // mm
+  const LEN = 100; // mm
+  const speed = Math.sqrt(
+    (2 * SPEC.energy * ELEMENTARY_CHARGE) / (SPEC.mass * ATOMIC_MASS_UNIT)
+  );
+
+  /**
+   * The envelope equation for a uniform cylindrical beam,
+   *
+   *     r'' = K / r,   K = q I / (2 pi eps0 m v^3),
+   *
+   * marched from a waist. Derived here rather than taken from the simulator,
+   * so it is an independent prediction of how far the beam should have spread
+   * and not a restatement of what the code already does.
+   */
+  function envelope(I, lenMm) {
+    const K =
+      (SPEC.charge * ELEMENTARY_CHARGE * I) /
+      (2 * Math.PI * VACUUM_PERMITTIVITY * SPEC.mass * ATOMIC_MASS_UNIT * speed ** 3);
+    let r = mmToM(R0);
+    let rp = 0;
+    const dz = 1e-6;
+    for (let z = 0; z < mmToM(lenMm); z += dz) {
+      rp += (K / r) * dz;
+      r += rp * dz;
+    }
+    return r;
+  }
+
+  /** Widest ion at the end of a plain drift, bore wide enough to touch nothing. */
+  function widthAfter(opts) {
+    const bl = new Beamline([createElement('drift', { length: LEN, bore: 60 })]);
+    const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 41, radius: R0 }), {
+      cfl: 0.02,
+      maxSteps: 800000,
+      ...opts,
+    });
+    let r = 0;
+    for (const t of tracks) {
+      const p = t.points[t.points.length - 1];
+      r = Math.max(r, Math.hypot(p.x, p.y ?? 0));
+    }
+    return r;
+  }
+
+  it('spreads by the amount the envelope equation predicts', () => {
+    // The commonest surprise in the simulator is a beam that sails down a
+    // drift without widening, and the answer is that repulsion defaults to
+    // off. This pins down that it is off by CHOICE and not by omission: with
+    // it on, the spreading is right to a fraction of a per cent.
+    for (const uA of [0.2, 0.5, 1, 2]) {
+      const got = widthAfter({ repulsion: 'beam', beamCurrent: uA * 1e-6 });
+      assertRelClose(
+        got,
+        envelope(uA * 1e-6, LEN),
+        0.02,
+        `${uA} uA over ${LEN} mm of drift`
+      );
+      assert(got > mmToM(R0) * 2, 'and it really has expanded');
+    }
+  });
+
+  it('does nothing at all when it is off', () => {
+    // Off has to mean off. A collimated beam in a field-free tube must arrive
+    // exactly as wide as it started.
+    assertRelClose(widthAfter({}), widthAfter({ repulsion: 'none' }), 1e-12, 'same either way');
+    assertRelClose(widthAfter({}), mmToM(R0), 0.01, 'and unchanged from launch');
+  });
+
+  it('spreads more with more current', () => {
+    const a = widthAfter({ repulsion: 'beam', beamCurrent: 0.5e-6 });
+    const b = widthAfter({ repulsion: 'beam', beamCurrent: 2e-6 });
+    assert(b > a, `2 uA should spread further than 0.5: ${mToMm(a)} vs ${mToMm(b)} mm`);
   });
 });
 

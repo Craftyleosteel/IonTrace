@@ -74,8 +74,15 @@ case where the field and the trajectory share a plane, which is exactly why its
 axes couple. None of these is an approximation of a 3D solve; each is a
 symmetry being used.
 
-**Space charge is included.** The beam repels itself, driven by a beam
-*current* rather than by how many rays you happen to draw. Note that a ray
+**Space charge is included, and off by default.** Most ion-optics work is
+single-particle and repulsion costs a lockstep integration, so it is a switch
+rather than an assumption — but it is the commonest surprise in the simulator,
+because a beam that sails down a metre of drift without widening looks like a
+bug. It is in the **Physics** panel. Switched on, the spreading matches the
+envelope equation $r'' = K/r$ to better than 1 %.
+
+The beam repels itself driven by a beam *current* rather than by how many rays
+you happen to draw. Note that a ray
 here is not a point charge — under rotational symmetry it is a **ring** of
 charge at radius $r$, so the force follows from Gauss's law on the enclosed
 current, not from pairwise Coulomb:
@@ -175,7 +182,7 @@ output:
 | Conductor surfaces | full surface field recovered, not half |
 | Absolute scale | mm→m pinned to literal metres; painted geometry matches the spec |
 | Integrators | analytic simple harmonic motion; orders 4 and 2 confirmed |
-| Space charge | closed-form uniform-beam field; cylindrical shell theorem; zero at zero current |
+| Space charge | closed-form uniform-beam field; cylindrical shell theorem; zero at zero current; beam expansion in a drift matches the envelope equation $r''=K/r$ to under 1 % |
 | Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection reported as reflection, focus independent of ion mass |
 | Quadrupole | closed-form $(x^2-y^2)/r_0^2$ potential; four-fold symmetry; Mathieu $a$, $q$ and their scalings; stable ion transmits and unstable one is lost |
 | Quadrupole deflector | solved potential is bilinear $\phi \propto XZ$; matched voltage derived from $\cot s = \tanh s$ and confirmed by integrating the coupled equations; measured transmission window |

@@ -59,6 +59,10 @@ const viewFly = el('viewFly');
 const fullscreenBtn = el('fullscreen');
 const fringeToggle = el('fringe');
 const fringeNote = el('fringeNote');
+const repulsionNote = el('repulsionNote');
+const flowEl = el('flow');
+const tabList = el('tabList');
+const tabFlow = el('tabFlow');
 
 const inputs = {
   mass: el('mass'),
@@ -582,6 +586,151 @@ function renderTrack() {
        </li>`);
 
   autoAlignBtn.hidden = !beamline.misaligned;
+  renderFlow();
+}
+
+/* ------------------------------------------------------------------ */
+/* flow chart                                                          */
+/* ------------------------------------------------------------------ */
+
+const FLOW = { w: 150, h: 46, gapX: 46, gapY: 16, pad: 14 };
+
+/**
+ * Lay the column out as a tidy tree.
+ *
+ * Column is depth from the source, so the beam runs left to right. Row is
+ * assigned by walking the leaves in order and giving each the next lane; a
+ * node with children sits at the mean of theirs, which keeps a junction
+ * centred between the two lines leaving it instead of stuck on one of them.
+ */
+function flowLayout() {
+  const pos = new Map();
+  let lane = 0;
+
+  const place = (e, col) => {
+    const kids = exitsOf(e)
+      .map((x) => beamline.childAt(e, x.port))
+      .filter(Boolean);
+    let row;
+    if (kids.length === 0) {
+      row = lane++;
+    } else {
+      const rows = kids.map((k) => place(k, col + 1));
+      row = rows.reduce((a, b) => a + b, 0) / rows.length;
+    }
+    pos.set(e, { col, row });
+    return row;
+  };
+
+  for (const r of beamline.roots()) place(r, 1);
+  // The source occupies column zero, level with whatever it feeds.
+  const first = beamline.roots()[0];
+  return { pos, sourceRow: first ? pos.get(first).row : 0, lanes: Math.max(lane, 1) };
+}
+
+const flowX = (col) => FLOW.pad + col * (FLOW.w + FLOW.gapX);
+const flowY = (row) => FLOW.pad + row * (FLOW.h + FLOW.gapY);
+
+/** An elbow from the right edge of one box to the left edge of another. */
+function flowLink(x1, y1, x2, y2) {
+  const mid = x1 + FLOW.gapX / 2;
+  return `M${x1} ${y1} H${mid} V${y2} H${x2}`;
+}
+
+function renderFlow() {
+  if (flowEl.hidden) return;
+  const { pos, sourceRow, lanes } = flowLayout();
+  const cols = Math.max(2, ...[...pos.values()].map((p) => p.col + 1));
+  const width = flowX(cols) + FLOW.pad;
+  const height = flowY(lanes) + FLOW.pad;
+  const idx = selectedIndex();
+
+  const parts = [];
+
+  // The source, and its link into the first element.
+  const sy = flowY(sourceRow) + FLOW.h / 2;
+  parts.push(
+    `<g class="node source ${selection?.kind === 'source' ? 'sel' : ''}" data-act="source">
+       <rect x="${flowX(0)}" y="${flowY(sourceRow)}" width="${FLOW.w}" height="${FLOW.h}" rx="8"/>
+       <text x="${flowX(0) + 12}" y="${flowY(sourceRow) + 19}">Ion source</text>
+       <text class="sub" x="${flowX(0) + 12}" y="${flowY(sourceRow) + 34}">${escapeHtml(
+         summariseBeam()
+       )}</text>
+     </g>`
+  );
+  const root = beamline.roots()[0];
+  if (root) {
+    const p = pos.get(root);
+    parts.push(
+      `<path class="link" d="${flowLink(
+        flowX(0) + FLOW.w,
+        sy,
+        flowX(p.col),
+        flowY(p.row) + FLOW.h / 2
+      )}"/>`
+    );
+  }
+
+  for (const e of beamline.elements) {
+    const p = pos.get(e);
+    if (!p) continue;
+    const x = flowX(p.col);
+    const y = flowY(p.row);
+    const i = beamline.elements.indexOf(e);
+
+    for (const exit of exitsOf(e)) {
+      const child = beamline.childAt(e, exit.port);
+      const junction = exitsOf(e).length > 1;
+      if (child) {
+        const c = pos.get(child);
+        parts.push(
+          `<path class="link" d="${flowLink(
+            x + FLOW.w,
+            y + FLOW.h / 2,
+            flowX(c.col),
+            flowY(c.row) + FLOW.h / 2
+          )}"/>`
+        );
+        if (junction) {
+          parts.push(
+            `<text class="port" x="${x + FLOW.w + 6}" y="${
+              flowY(c.row) + FLOW.h / 2 - 5
+            }">${escapeHtml(exit.label)}</text>`
+          );
+        }
+      } else {
+        // An unused exit, drawn as a socket you can start a line on.
+        const row = junction && exit.port !== exitsOf(e)[0].port ? p.row + 0.5 : p.row;
+        const ex = x + FLOW.w + FLOW.gapX / 2;
+        const ey = flowY(row) + FLOW.h / 2;
+        parts.push(
+          `<path class="link open" d="${flowLink(x + FLOW.w, y + FLOW.h / 2, ex, ey)}"/>`,
+          `<g class="socket ${
+            pendingPort?.parent === e && pendingPort?.port === exit.port ? 'armed' : ''
+          }" data-act="port" data-index="${i}" data-port="${exit.port}">
+             <rect x="${ex}" y="${ey - 13}" width="${FLOW.w * 0.62}" height="26" rx="13"/>
+             <text x="${ex + 12}" y="${ey + 4}">+ ${escapeHtml(
+               junction ? exit.label.toLowerCase() : 'add'
+             )}</text>
+           </g>`
+        );
+      }
+    }
+
+    parts.push(
+      `<g class="node ${i === idx ? 'sel' : ''} node-${e.typeKey}"
+          data-act="select" data-index="${i}">
+         <rect x="${x}" y="${y}" width="${FLOW.w}" height="${FLOW.h}" rx="8"/>
+         <text x="${x + 12}" y="${y + 19}">${escapeHtml(e.label)}</text>
+         <text class="sub" x="${x + 12}" y="${y + 34}">${escapeHtml(summarise(e))}</text>
+       </g>`
+    );
+  }
+
+  flowEl.innerHTML =
+    `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">` +
+    parts.join('') +
+    '</svg>';
 }
 
 function summariseBeam() {
@@ -793,11 +942,21 @@ function alignmentRows(e) {
 const BENDER_WINDOW = 0.1;
 
 /**
- * The four directions a bend is usually wanted in, as buttons.
+ * Where a deflector sends the beam.
  *
- * The roll angle is continuous and any value works, but "turn it left" should
- * not require knowing that left is zero degrees. The angle control stays for
- * everything in between.
+ * Two things decide that, and asking someone to set them separately is asking
+ * them to know the convention: the roll says which plane the bend happens in,
+ * and the VOLTAGE says whether it happens at all. Off, the beam goes straight
+ * through the box and out the far side. So "send it left" means roll to zero
+ * AND put the electrodes on their matched voltage, and "straight on" means
+ * zero volts whatever the roll.
+ *
+ * One click does both. The angle box stays for a bend that is not one of the
+ * four square directions, and the voltage box for tuning it by hand.
+ *
+ * The straight option is listed last and set apart, because it is a different
+ * kind of answer: it is the deflector doing nothing rather than doing
+ * something in a direction.
  */
 const BEND_DIRECTIONS = [
   { deg: 0, label: 'Left', glyph: '←' },
@@ -806,18 +965,38 @@ const BEND_DIRECTIONS = [
   { deg: 270, label: 'Up', glyph: '↑' },
 ];
 
+/** Where the beam is actually going, given the voltage and the roll. */
+function bendState(e) {
+  const matched = e.matchedVoltage(
+    readNumber(inputs.energy, 50),
+    Math.abs(readNumber(inputs.charge, 1)) || 1
+  );
+  const set = e.params.voltage;
+  const bending = matched !== 0 && Math.abs(set / matched) > 0.5;
+  return {
+    matched,
+    bending,
+    deg: ((e.params.bendPlane % 360) + 360) % 360,
+  };
+}
+
 function bendDirectionRow(e) {
   if (e.typeKey !== 'bender') return '';
-  const now = ((e.params.bendPlane % 360) + 360) % 360;
+  const { deg, bending } = bendState(e);
   const buttons = BEND_DIRECTIONS.map(
     (d) =>
-      `<button class="dir ${Math.abs(now - d.deg) < 0.5 ? 'sel' : ''}"
-               data-act="bend" data-index="${d.deg}"
-               title="Bend ${d.label.toLowerCase()} (${d.deg}°)">
+      `<button class="dir ${bending && Math.abs(deg - d.deg) < 0.5 ? 'sel' : ''}"
+               data-act="send" data-index="${d.deg}"
+               title="Send the beam ${d.label.toLowerCase()} — rolls the deflector and sets the matched voltage">
          <span class="dir-glyph">${d.glyph}</span>${escapeHtml(d.label)}
        </button>`
   ).join('');
-  return `<div class="dirs">${buttons}</div>`;
+  return `
+    <div class="dirs">${buttons}</div>
+    <button class="dir dir-wide ${bending ? '' : 'sel'}" data-act="send" data-index="-1"
+            title="Switch the deflector off — the beam passes straight through">
+      <span class="dir-glyph">⇢</span>Straight through
+    </button>`;
 }
 
 function benderReadout(e) {
@@ -1459,19 +1638,23 @@ function drawElectrodes(T) {
 
 /** The reference orbit, which is a curve as soon as a bender is in the line. */
 function drawReferencePath(T) {
-  const pts = beamline.centreLine();
-  if (pts.length < 2) return;
   ctx.save();
   ctx.strokeStyle = cssVar('--axis');
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  pts.forEach((p, i) => {
-    const [px, py] = T.project(p);
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.stroke();
+  // One stroke per route. Drawn as a single polyline, the jump from the end of
+  // one branch back to the start of the next appears as a line that is not
+  // there - and on a switched column it cuts straight across the diagram.
+  for (const pts of beamline.centreLines()) {
+    if (pts.length < 2) continue;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const [px, py] = T.project(p);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -2075,6 +2258,7 @@ function syncOutputs() {
     const out = el(`${id}Out`);
     if (out) out.textContent = fmt(inputs[id].value);
   }
+  describeRepulsion();
   const model = inputs.repulsion.value;
   for (const node of document.querySelectorAll('[data-model]')) {
     node.hidden = node.dataset.model !== model;
@@ -2140,11 +2324,24 @@ function handleAction(act, index) {
       setParam(selectedIndex(), 'voltage', Math.round(V / step) * step);
       return true;
     }
-    case 'bend': {
-      // `index` carries the roll angle here, not an element index.
+    case 'send': {
+      // `index` carries a roll angle here, not an element index; -1 means
+      // "switch it off and let the beam through".
       const i = selectedIndex();
-      if (beamline.elements[i]?.typeKey !== 'bender') return true;
-      setParam(i, 'bendPlane', index);
+      const e = beamline.elements[i];
+      if (e?.typeKey !== 'bender') return true;
+      const { matched } = bendState(e);
+      if (index < 0) {
+        setParam(i, 'voltage', 0);
+      } else {
+        // Roll first, then power it: both are fast adjusts, but the readout
+        // in between should never show a bend aimed at the old direction.
+        setParam(i, 'bendPlane', index);
+        const spec = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
+        const { step } = fieldRange(spec, e.params, beamSpec());
+        setParam(i, 'voltage', Math.round(matched / step) * step);
+      }
+      renderInspector();
       return true;
     }
     case 'tune': {
@@ -2173,7 +2370,7 @@ let pendingPort = null;
 
 function armPort(next) {
   pendingPort = next;
-  for (const b of trackEl.querySelectorAll('button[data-act="port"]')) {
+  for (const b of document.querySelectorAll('[data-act="port"]')) {
     const mine =
       next &&
       beamline.elements[Number(b.dataset.index)] === next.parent &&
@@ -2182,17 +2379,42 @@ function armPort(next) {
   }
 }
 
-trackEl.addEventListener('click', (e) => {
-  const port = e.target.closest('button[data-act="port"]');
+/**
+ * A click in either view of the beamline.
+ *
+ * The list and the flow chart show the same tree and answer to the same
+ * gestures, so they share one handler rather than growing two that drift
+ * apart. `[data-act]` is on a <button> in one and a <g> in the other, which is
+ * the only difference that reaches here.
+ */
+function onStructureClick(e) {
+  const port = e.target.closest('[data-act="port"]');
   if (port) {
     const parent = beamline.elements[Number(port.dataset.index)] ?? null;
     const already = pendingPort?.parent === parent && pendingPort?.port === port.dataset.port;
     armPort(already ? null : { parent, port: port.dataset.port });
     return;
   }
-  const button = e.target.closest('button[data-act]');
-  if (button) handleAction(button.dataset.act, Number(button.dataset.index));
-});
+  const hit = e.target.closest('[data-act]');
+  if (hit) handleAction(hit.dataset.act, Number(hit.dataset.index));
+}
+
+trackEl.addEventListener('click', onStructureClick);
+flowEl.addEventListener('click', onStructureClick);
+
+/** Which view of the beamline is showing. */
+function showFlow(on) {
+  flowEl.hidden = !on;
+  trackEl.hidden = on;
+  tabFlow.classList.toggle('sel', on);
+  tabList.classList.toggle('sel', !on);
+  tabFlow.setAttribute('aria-selected', String(on));
+  tabList.setAttribute('aria-selected', String(!on));
+  renderTrack();
+}
+
+tabList.addEventListener('click', () => showFlow(false));
+tabFlow.addEventListener('click', () => showFlow(true));
 
 inspectorEl.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-act]');
@@ -2264,6 +2486,28 @@ function applyFringe() {
   markStale();
   render();
   drawReadout();
+}
+
+/**
+ * What the repulsion setting is doing, said plainly.
+ *
+ * Off is a real choice and a reasonable default - most ion-optics work is
+ * single-particle, and repulsion costs a lockstep integration - but it is not
+ * a neutral one, and a beam that sails down a metre of drift without widening
+ * is otherwise just puzzling.
+ */
+function describeRepulsion() {
+  const model = inputs.repulsion.value;
+  repulsionNote.textContent =
+    model === 'none'
+      ? 'Ions do not see each other, so a beam keeps its width down a field-free ' +
+        'drift for ever. Real beams do not: switch this on to let them push apart.'
+      : model === 'beam'
+        ? 'Each ray is a ring of charge and the force comes from Gauss’s law on the ' +
+          'current it encloses, so the spreading is set by the current rather than ' +
+          'by how many rays are drawn.'
+        : 'Every ion pushes on every other by Coulomb’s law, each standing in for ' +
+          'the number of real ions below.';
 }
 
 function describeFringe() {

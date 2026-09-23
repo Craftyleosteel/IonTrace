@@ -624,6 +624,125 @@ input[type="range"]:focus-visible {
 /* Which way a bender turns the beam. The angle is continuous; these are the
    four anyone actually asks for. */
 /* ------------------------------------------------------------------ */
+/* view tabs and flow chart                                            */
+/* ------------------------------------------------------------------ */
+
+.tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border-radius: 999px;
+}
+
+.tab {
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.tab.sel {
+  color: var(--text-primary);
+  background: var(--surface-1);
+  border-color: var(--border);
+}
+
+/*
+  The flow chart. A branching column is a shape, and a shape is easier to read
+  drawn than indented - two lines leaving a deflector sit side by side here
+  rather than one above the other.
+*/
+.flow {
+  overflow-x: auto;
+  padding: 4px 0 2px;
+}
+
+.flow svg {
+  display: block;
+}
+
+.flow .node rect {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.flow .node { cursor: pointer; }
+
+.flow .node:hover rect {
+  stroke: var(--accent);
+}
+
+.flow .node.sel rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+  fill: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+}
+
+.flow .node text {
+  font-family: var(--font);
+  font-size: 12.5px;
+  fill: var(--text-primary);
+}
+
+.flow .node text.sub {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  fill: var(--text-muted);
+}
+
+.flow .link {
+  fill: none;
+  stroke: var(--gridline);
+  stroke-width: 2;
+}
+
+.flow .link.open {
+  stroke-dasharray: 3 3;
+}
+
+.flow text.port {
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  fill: var(--text-muted);
+}
+
+.flow .socket { cursor: pointer; }
+
+.flow .socket rect {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.flow .socket text {
+  font-family: var(--font);
+  font-size: 11.5px;
+  fill: var(--text-muted);
+}
+
+.flow .socket:hover rect,
+.flow .socket.armed rect {
+  stroke: var(--accent);
+  stroke-dasharray: none;
+}
+
+.flow .socket:hover text,
+.flow .socket.armed text {
+  fill: var(--text-primary);
+}
+
+/* ------------------------------------------------------------------ */
 /* branching track                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -713,6 +832,16 @@ input[type="range"]:focus-visible {
 .dir-glyph {
   font-size: 15px;
   line-height: 1;
+}
+
+/* "Straight through" is a different kind of answer from the four directions -
+   the deflector doing nothing rather than doing something somewhere - so it
+   sits on its own row. */
+.dir-wide {
+  flex-direction: row;
+  gap: 7px;
+  width: 100%;
+  margin-top: 4px;
 }
 
 .back {
