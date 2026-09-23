@@ -1059,24 +1059,46 @@ tried first, for the cost of one flight: 0 of 9 became 9 of 9.
 flight of nine ions runs about 8,400 integrator steps, which produce 377,000
 field evaluations and **603,000 element lookups** — four field queries per ion
 per step plus a strike test, each of which was scanning the whole column and
-calling both `contains` and `strikes` on every element it passed. Three changes,
+calling both `contains` and `strikes` on every element it passed. Five changes,
 measured on a lens-and-deflector search from zero volts (12.2 s originally):
 
 | Change | Why it is free | After |
 |---|---|---|
 | Element lookup remembers the last element it found | Almost every query is about a point a fraction of a millimetre from the previous one, or another ion in the same beam. The hint is re-checked before it is trusted, and trajectories come out identical to the last bit. | 9.4 s |
 | Settings already flown are not re-flown | Coordinate descent re-samples its own bracket centre at every level and re-walks ranges on a second pass. The flight is deterministic, so the answer is. Cut 141 evaluations to 96. | 6.7 s |
-| The scan ranks at a coarser time step | Its job is to rank settings, not measure one, and ranking survives a much coarser integration. The winner is re-scored at full fidelity before anything is reported or refined. | **3.2 s** |
+| The scan ranks at a coarser time step | Its job is to rank settings, not measure one, and ranking survives a much coarser integration. The winner is re-scored at full fidelity before anything is reported or refined. | 3.2 s |
+| Points inside a clear aperture skip the strike test | Three quarters of strike tests are about a point comfortably inside a bore whose metal starts there, where one comparison settles it instead of a grid lookup. Elements declare a `clearBore`; a deflector cannot and does not. | 2.9 s |
+| The scan's step raised from 4× to 8× | Ranking still exact on two columns including an RF one. | **2.4 s** |
 
-The last of those is a genuine trade-off, so it was measured before being
-taken. Over a sweep of lens voltages, at two, four and eight times the default
-step the ordering of the settings is unchanged and the scores agree to four
-decimal places, while a flight drops from 70 ms to 36, 17 and 8.
+The coarse step is a genuine trade-off, so it was measured before being taken.
+Over a sweep of lens voltages on two columns — one ending in a deflector, one
+containing an RF mass filter, which is the harder case — at 4×, 8× and 16× the
+default step the **ordering of every setting is unchanged and the transmission
+counts are identical**, while a flight drops from 70 ms to 17 and 8. What does
+move, in the fifth decimal, is the tie-break between settings that all transmit
+fully; those go on to the refinement stage, which works at full fidelity and is
+a local search anyway.
 
-Flying **fewer ions** would also be cheaper and is deliberately not done: the
-same sweep reorders when the beam is thinned from nine to five, because the
-tie-break is a mean over whichever ions are present and a different sample is a
-different mean. Cheaper is not the same as faster at the same answer.
+### 10.7.1 Three things that looked faster and were not
+
+Worth recording, because each is the obvious next idea:
+
+**Velocity Verlet for the scan.** RK4 evaluates the field four times per step,
+Verlet once, so it looks like a fourfold saving. It is not. Verlet's smaller
+stability limit makes the adaptive stepper take more steps, so the real gain is
+28 %; and at the coarse step it **reorders the sweep**, swapping two settings
+whose scores differ in the fourth decimal. A cheaper integrator that changes
+the answer is not a faster search.
+
+**Fewer ions.** The same sweep reorders when the beam is thinned from nine to
+five, because the tie-break is a mean over whichever ions are present and a
+different sample is a different mean.
+
+**Dropping the second coordinate pass.** The reasoning was that a second pass
+exists to catch knob interactions and the Newton stage now handles those
+properly through the off-diagonal Hessian terms. On a two-knob column that
+holds — one pass and two give an identical 0.327 mm. On a three-knob column it
+does not: two passes reach 0.847 mm against one pass's 0.936 mm. The pass stays.
 
 **What it will not touch.** Only voltages: geometry needs a fresh solve, and
 leaving it alone is the constraint an operator at a real instrument works under

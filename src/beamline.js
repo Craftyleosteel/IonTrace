@@ -55,6 +55,31 @@ import { axisymmetricRuns, buildRunField } from './column.js';
  */
 const CLAIM_MARGIN = 1.6;
 
+/**
+ * Is this local point in the element's free space?
+ *
+ * The answer is `e.strikes`, which for anything with a solved field means a
+ * grid lookup - a hypotenuse, two roundings and an array index. That runs
+ * about 170,000 times per flight of nine ions, and three quarters of those
+ * calls are about a point comfortably inside the clear aperture, where the
+ * answer is a foregone conclusion.
+ *
+ * So an element may declare `clearBore`: a transverse radius within which it
+ * promises there is no metal anywhere along its length. Inside it, one
+ * comparison settles the question. Outside it, or for an element that cannot
+ * make that promise, the real test runs.
+ *
+ * A deflector cannot make it. Its electrodes wrap around the beam rather than
+ * lying outside a cylinder, so a point can be well within r0 of the element's
+ * axis and still be inside metal - which makes distance from that axis no
+ * guide at all.
+ */
+function isFree(e, l) {
+  const clear = e.clearBore;
+  if (clear !== undefined && l[0] * l[0] + l[1] * l[1] <= clear * clear) return true;
+  return !e.strikes(l[0], l[1], l[2]);
+}
+
 export class Beamline {
   constructor(elements = []) {
     this.elements = [];
@@ -491,8 +516,8 @@ export class Beamline {
     if (hint) {
       const e = hint.element;
       const l = toLocal(e.frame, g);
-      if (e.contains(l[0], l[1], l[2]) && !e.strikes(l[0], l[1], l[2])) {
-        return { element: e, local: l, index: hint.index };
+      if (e.contains(l[0], l[1], l[2]) && isFree(e, l)) {
+        return { element: e, local: l, index: hint.index, free: true };
       }
     }
 
@@ -501,12 +526,12 @@ export class Beamline {
       const e = this.elements[i];
       const l = toLocal(e.frame, g);
       if (!e.contains(l[0], l[1], l[2])) continue;
-      if (!e.strikes(l[0], l[1], l[2])) {
+      if (isFree(e, l)) {
         this.#hint = { element: e, index: i };
-        return { element: e, local: l, index: i };
+        return { element: e, local: l, index: i, free: true };
       }
       const reach = Math.hypot(l[0], l[1]) <= e.outerRadius * CLAIM_MARGIN;
-      if (reach && !fallback) fallback = { element: e, local: l, index: i };
+      if (reach && !fallback) fallback = { element: e, local: l, index: i, free: false };
     }
     return fallback;
   }
@@ -554,6 +579,9 @@ export class Beamline {
   strikes(x, y, z) {
     const hit = this.locate([x, y, z]);
     if (!hit) return false;
+    // `locate` already had to decide this to choose the element at all, so
+    // asking again would be the same grid lookup twice for every step.
+    if (hit.free) return false;
     return hit.element.strikes(hit.local[0], hit.local[1], hit.local[2]);
   }
 

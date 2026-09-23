@@ -105,6 +105,9 @@ export function createAperture(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore,
+    // The plate starts at the hole radius, so inside it there is nothing but
+    // vacuum. See `isFree` in beamline.js.
+    clearBore: bore,
     outerRadius: mmToM(p.housingRadius),
     lengthScale: grid.step,
     shortestPeriod: null,

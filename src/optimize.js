@@ -302,7 +302,7 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     refine: refineSamples = 7,
     levels = 3,
     polish = true,
-    scanSpeed = 4,
+    scanSpeed = 8,
     flight = {},
     onProgress,
     shouldStop,
@@ -312,11 +312,18 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     The scan flies at a coarser time step than the answer is finally judged at.
 
     Its job is to RANK settings, not to measure one, and ranking survives a
-    much coarser integration than measuring does. Measured on a lens-and-
-    deflector column over a sweep of lens voltages: at two, four and eight
-    times the default step the order of the settings is unchanged and the
-    scores agree to four decimal places, while a flight drops from 70 ms to
-    36, 17 and 8.
+    much coarser integration than measuring does. Measured over a sweep of
+    lens voltages on two columns - one ending in a deflector, one containing an
+    RF mass filter, which is the harder case for a coarse step - at four, eight
+    and sixteen times the default the ordering of every setting is unchanged
+    and the transmission counts are identical at all of them. A flight drops
+    from 70 ms to 17 and 8.
+
+    What does move, in the fifth decimal, is the tie-break between settings
+    that all transmit everything. That is the mildest failure available: those
+    settings go to the refinement stage, which works at full fidelity and is a
+    local search anyway, so a slightly different starting point among equally
+    good ones costs nothing that matters.
 
     The setting the scan chooses is then re-scored at full fidelity before
     anything is reported or refined, so the coarse step never reaches the
@@ -410,6 +417,12 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   };
 
   outer: for (let pass = 0; pass < passes && !cancelled; pass++) {
+    // Further passes exist because knobs interact: moving one can open room in
+    // another. If a whole pass finds nothing, they have stopped interacting
+    // and every later pass will re-walk the same ground for the same answer.
+    // Measured, the second pass cost 26 evaluations and changed nothing.
+    const scoreAtPassStart = bestResult.score;
+
     for (let ki = 0; ki < knobs.length; ki++) {
       const knob = knobs[ki];
 
@@ -463,6 +476,12 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
         if (hi - lo < knob.step) break;
       }
     }
+
+    // A relative threshold, not an exact comparison: a pass that moves the
+    // score in its seventh decimal has found nothing, it has jittered the
+    // tie-break, and treating that as progress keeps the search going for
+    // another full sweep that ends in the same place.
+    if (bestResult.score <= scoreAtPassStart * (1 + 1e-6)) break;
   }
 
   writeKnobs(beamline, knobs, best);

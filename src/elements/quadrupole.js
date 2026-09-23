@@ -182,6 +182,9 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore: r0,
+    // The rod surfaces are tangent to the field radius, so inside it the
+    // aperture is clear. See `isFree` in beamline.js.
+    clearBore: r0,
     outerRadius: extent,
     lengthScale: grid.step,
     warnings,

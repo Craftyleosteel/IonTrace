@@ -281,6 +281,12 @@ export function createBender(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore: r0,
+    // Deliberately no `clearBore`. The electrodes wrap around the beam rather
+    // than lying outside a cylinder about the element's axis, so a point can
+    // be well within r0 of that axis and still be buried in metal - a point at
+    // 45 degrees, for instance, sits on an electrode face while being only
+    // 14 mm from the axis of a 19 mm aperture. Distance from the axis is no
+    // guide here and the real test has to run.
     outerRadius: Math.max(extent, halfHeight),
     lengthScale: step,
     shortestPeriod: null,

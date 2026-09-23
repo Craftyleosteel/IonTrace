@@ -45,6 +45,9 @@ export function createEinzel(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore,
+    // The three cylinders all start at the bore, so inside it the lens is
+    // clear along its whole length. See `isFree` in beamline.js.
+    clearBore: bore,
     outerRadius: mmToM(p.housingRadius),
     lengthScale: grid.step,
     shortestPeriod: null,

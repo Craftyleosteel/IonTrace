@@ -30,6 +30,9 @@ export function createDrift(params = {}) {
     params: p,
     length,
     bore,
+    // Nothing but vacuum inside the tube, so a point within it needs no
+    // further test. See `isFree` in beamline.js.
+    clearBore: bore,
     outerRadius: bore,
     // No field structure to resolve, so a drift never constrains the time
     // step. Something in the line has to, and something always does.
