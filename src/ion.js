@@ -98,6 +98,65 @@ export function parallelBeam({ count = 7, maxOffset = 4, ...spec }) {
 }
 
 /**
+ * A round beam: ions spread over a DISC in the transverse plane.
+ *
+ * This is what a real beam looks like, and it is what `parallelBeam` is not.
+ * That one places every ion on the x axis with y = 0, which is a line of ions
+ * rather than a beam. In any element here y = 0 is a symmetry plane - for an
+ * axisymmetric lens because the radial field has no azimuthal component, and
+ * for a quadrupole because E_y is proportional to y - so such a beam stays in
+ * that plane for ever. The motion looks two-dimensional because the SOURCE is
+ * two-dimensional, not because the integrator is.
+ *
+ * A meridional fan is still the right tool for characterising a lens, where
+ * seeing every ray cross the axis in one plane is the point. Use a disc when
+ * the question is what a beam actually does - and always for a quadrupole,
+ * whose whole behaviour is that the two transverse planes differ.
+ *
+ * Ions are placed on a Fermat (sunflower) spiral: radius proportional to
+ * sqrt(k) so the areal density is uniform, with the golden angle between
+ * successive ions so no two line up. It is deterministic - no random number
+ * generator - so the same beam is reproducible run to run, which matters when
+ * a trajectory is being compared against another.
+ *
+ * @param {object} spec
+ * @param {number} [spec.count]      Number of ions.
+ * @param {number} [spec.radius]     Beam radius in mm.
+ * @param {number} [spec.divergence] Half-angle in degrees at the beam edge.
+ */
+export function discBeam({ count = 9, radius = 1.5, divergence = 0, ...spec }) {
+  if (count <= 1) return [makeIon({ ...spec, x: 0, y: 0 })];
+
+  // The angle between successive seeds in a sunflower head.
+  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+  const ions = [];
+
+  for (let k = 0; k < count; k++) {
+    // +0.5 keeps the innermost ion off the exact centre, so a beam of any
+    // count samples the disc rather than stacking one ion on the axis.
+    const frac = Math.sqrt((k + 0.5) / count);
+    const r = radius * frac;
+    const theta = k * GOLDEN_ANGLE;
+
+    ions.push(
+      makeIon({
+        ...spec,
+        x: r * Math.cos(theta),
+        y: r * Math.sin(theta),
+        // Divergence grows linearly with radius and points radially outward,
+        // so the beam expands from a waist here rather than from a point
+        // source at some arbitrary distance upstream. The ion on the axis
+        // travels straight; the one at the edge gets the full half-angle.
+        angle: divergence * frac,
+        azimuth: (theta * 180) / Math.PI,
+      })
+    );
+  }
+
+  return ions;
+}
+
+/**
  * A fan of ions launched from one point over a spread of angles - a point
  * source, used to find the image plane rather than the focal plane.
  */

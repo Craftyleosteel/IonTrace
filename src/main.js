@@ -17,7 +17,7 @@
 import { Beamline } from './beamline.js';
 import { ELEMENT_TYPES, createElement, needsRebuild } from './elements/index.js';
 import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
-import { makeIon, parallelBeam, focalCrossing } from './ion.js';
+import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
 import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
@@ -117,21 +117,21 @@ const readNumber = (input, fallback) => {
  * A starting column that shows what the thing does without any setup.
  *
  * The einzel is set where it matches the beam into the quadrupole's
- * acceptance rather than merely where it focuses: at -400 V it over-focuses
- * and one ion in nine survives, at 0 V the beam is too wide entering the rods
- * and three survive, and at -150 V seven do. Matching one element to the next
- * is most of what building a column is.
+ * acceptance rather than merely where it focuses. Measured with the shipped
+ * disc beam: 2 of 9 ions survive at 0 V, 8 at -80 V, 1 at -150 V and 9 at
+ * -300 V. Matching one element to the next is most of what building a column
+ * is, and the answer is not monotonic in the lens voltage.
  */
 function defaultBeamline() {
   return new Beamline([
     createElement('drift', { length: 12, bore: 5 }),
     createElement('einzel', {
       gridStep: 0.5,
-      voltage: -150,
+      voltage: -300,
       boreRadius: 5,
       housingRadius: 14,
-      entryDrift: 8,
-      exitDrift: 8,
+      entryDrift: 15,
+      exitDrift: 15,
     }),
     createElement('drift', { length: 14, bore: 5 }),
     // 150 mm at 2 MHz gives a 50 eV ion about thirty RF cycles in the rods.
@@ -225,6 +225,163 @@ function afterStructureChange() {
 }
 
 /* ------------------------------------------------------------------ */
+/* direct manipulation on the canvas                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Pointer interaction with the beamline drawing.
+ *
+ * Elements are dragged along the axis to reorder them, and the beam source is
+ * dragged to set its radius. The column is a contiguous sequence rather than
+ * a free layout - elements sit end to end with no gaps - so dragging along z
+ * means "put this one somewhere else in the order", and the drop indicator
+ * shows where it will land.
+ */
+let drag = null;
+
+/** Canvas pixel position of a pointer event, in CSS pixels. */
+function pointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return { px: e.clientX - rect.left, py: e.clientY - rect.top };
+}
+
+/** Beamline z (metres) for a canvas x position. */
+function zAtPixel(px) {
+  return (px / canvas.clientWidth) * beamline.length;
+}
+
+/** Index of the element under this z, or -1. */
+function elementIndexAtZ(z) {
+  return beamline.elements.findIndex((e) => z >= e.zStart && z < e.zEnd);
+}
+
+/** Where an element dragged to this z would be inserted. */
+function dropIndexAtZ(z) {
+  for (let i = 0; i < beamline.elements.length; i++) {
+    const e = beamline.elements[i];
+    if (z < e.zStart + e.length / 2) return i;
+  }
+  return beamline.elements.length;
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!beamline) return;
+  const { px, py } = pointerPos(e);
+  const z = zAtPixel(px);
+
+  // The source handle sits at the entrance and sets the beam radius.
+  if (px < 26) {
+    drag = { kind: 'beam' };
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = 'ns-resize';
+    return;
+  }
+
+  const index = elementIndexAtZ(z);
+  if (index < 0) return;
+
+  selected = index;
+  renderTrack();
+  renderInspector();
+
+  drag = { kind: 'element', index, from: index, startPx: px, moved: false };
+  canvas.setPointerCapture(e.pointerId);
+  canvas.style.cursor = 'grabbing';
+  render();
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!beamline) return;
+  const { px, py } = pointerPos(e);
+
+  if (!drag) {
+    // Cursor feedback: the whole column is grabbable, the left edge resizes.
+    canvas.style.cursor = px < 26 ? 'ns-resize' : 'grab';
+    return;
+  }
+
+  if (drag.kind === 'beam') {
+    // Vertical distance from the axis, converted back into millimetres.
+    const halfH = canvas.clientHeight / 2;
+    const frac = Math.abs(py - halfH) / halfH;
+    const mm = frac * mToMm(viewHalfHeightMetres());
+    const clamped = Math.max(0.1, Math.min(6, mm));
+    inputs.beamRadius.value = clamped.toFixed(1);
+    syncOutputs();
+    markStale();
+    render();
+    return;
+  }
+
+  if (Math.abs(px - drag.startPx) > 4) drag.moved = true;
+  drag.dropIndex = dropIndexAtZ(zAtPixel(px));
+  render();
+});
+
+function endDrag(e) {
+  if (!drag) return;
+  const finished = drag;
+  drag = null;
+  canvas.style.cursor = 'grab';
+  try {
+    canvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* pointer already released */
+  }
+
+  if (finished.kind === 'element' && finished.moved) {
+    let target = finished.dropIndex ?? finished.from;
+    // Removing the element first shifts everything after it down one.
+    if (target > finished.from) target -= 1;
+    if (target !== finished.from) {
+      const [moved] = beamline.elements.splice(finished.from, 1);
+      beamline.elements.splice(target, 0, moved);
+      beamline.layout();
+      selected = target;
+      afterStructureChange();
+      return;
+    }
+  }
+  render();
+  drawReadout();
+}
+
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+// Dropping a new element from the toolbar onto the column.
+canvas.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  const { px } = pointerPos(e);
+  drag = { kind: 'insert', dropIndex: dropIndexAtZ(zAtPixel(px)) };
+  render();
+});
+
+canvas.addEventListener('dragleave', () => {
+  if (drag?.kind === 'insert') {
+    drag = null;
+    render();
+  }
+});
+
+canvas.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const type = e.dataTransfer.getData('text/iontrace-element');
+  const index = drag?.dropIndex ?? beamline.elements.length;
+  drag = null;
+  if (!type || !ELEMENT_TYPES[type]) {
+    render();
+    return;
+  }
+  statusEl.classList.add('busy');
+  beamline.add(createElement(type), index);
+  statusEl.classList.remove('busy');
+  selected = index;
+  afterStructureChange();
+});
+
+/* ------------------------------------------------------------------ */
 /* track and inspector                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -279,10 +436,13 @@ function renderTrack() {
 }
 
 function renderAdders() {
+  // Draggable as well as clickable: drop one onto the column to place it at a
+  // chosen point, or click to append after the selection.
   addersEl.innerHTML = Object.entries(ELEMENT_TYPES)
     .map(
       ([type, spec]) =>
-        `<button class="add" data-add="${type}" title="${escapeHtml(spec.blurb)}">
+        `<button class="add" draggable="true" data-add="${type}"
+                 title="${escapeHtml(spec.blurb)} — drag onto the beamline to place it">
            + ${escapeHtml(spec.label)}
          </button>`
     )
@@ -369,20 +529,11 @@ function startFlight() {
 
   let ions;
   try {
-    ions = parallelBeam({ ...spec, count, maxOffset });
-    // A real source is not perfectly collimated. Divergence is applied as a
-    // linear fan so the outermost ion gets the full angle, which is the usual
-    // way a beam's emittance is sketched.
-    if (divergence !== 0 && count > 1) {
-      ions = ions.map((ion, i) => {
-        const frac = (2 * i) / (count - 1) - 1;
-        return makeIon({
-          ...spec,
-          x: mToMm(ion.x),
-          angle: frac * divergence,
-        });
-      });
-    }
+    // A DISC, not a line. Placing every ion on the x axis would put the whole
+    // beam on a symmetry plane of every element here, where it would stay for
+    // ever - the motion would look two-dimensional because the source was,
+    // not because the physics is.
+    ions = discBeam({ ...spec, count, radius: maxOffset, divergence });
   } catch (err) {
     trajectories = [];
     flight = null;
@@ -559,6 +710,11 @@ function makeTransform(width, height, zoom) {
 /** Half-height the view needs, in metres, at the given zoom. */
 function viewHalfHeight(zoom) {
   return beamline.radiusLimit / zoom;
+}
+
+/** The same, for the zoom currently selected. */
+function viewHalfHeightMetres() {
+  return viewHalfHeight(readNumber(inputs.zoom, 1));
 }
 
 function drawElementField(e, T, width, height, zoom) {
@@ -770,6 +926,75 @@ function drawTrajectories(T) {
   ctx.restore();
 }
 
+/** Band behind the selected element, so the inspector's subject is obvious. */
+function drawSelection(T, height) {
+  const e = beamline.elements[selected];
+  if (!e) return;
+  ctx.save();
+  ctx.fillStyle = cssVar('--accent');
+  ctx.globalAlpha = drag?.kind === 'element' && drag.from === selected ? 0.22 : 0.09;
+  ctx.fillRect(T.sx(e.zStart), 0, T.sx(e.zEnd) - T.sx(e.zStart), height);
+  ctx.strokeStyle = cssVar('--accent');
+  ctx.globalAlpha = 0.5;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(T.sx(e.zStart) + 0.5, 0.5, T.sx(e.zEnd) - T.sx(e.zStart) - 1, height - 1);
+  ctx.restore();
+}
+
+/**
+ * The ion source: a draggable handle at the entrance showing the beam radius.
+ *
+ * Dragging it vertically sets that radius, which is the one beam property with
+ * an obvious spatial meaning in this view.
+ */
+function drawSource(T, height, halfH) {
+  const radius = mmToM(readNumber(inputs.beamRadius, 1.5));
+  const y = (radius / halfH) * (height / 2);
+  const c = height / 2;
+
+  ctx.save();
+  ctx.strokeStyle = cssVar('--traj');
+  ctx.fillStyle = cssVar('--traj');
+  ctx.lineWidth = 2;
+
+  // A bracket spanning the beam at the entrance plane.
+  ctx.beginPath();
+  ctx.moveTo(10, c - y);
+  ctx.lineTo(4, c - y);
+  ctx.lineTo(4, c + y);
+  ctx.lineTo(10, c + y);
+  ctx.stroke();
+
+  for (const sign of [-1, 1]) {
+    ctx.beginPath();
+    ctx.arc(4, c + sign * y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** Where a dragged or dropped element would land. */
+function drawDropIndicator(T, height) {
+  if (!drag || drag.dropIndex == null) return;
+  if (drag.kind === 'element' && !drag.moved) return;
+
+  const i = drag.dropIndex;
+  const z =
+    i >= beamline.elements.length
+      ? beamline.length
+      : beamline.elements[i].zStart;
+
+  ctx.save();
+  ctx.strokeStyle = cssVar('--accent');
+  ctx.lineWidth = 3;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(T.sx(z), 0);
+  ctx.lineTo(T.sx(z), height);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawScale(T, width, height) {
   ctx.save();
   ctx.fillStyle = cssVar('--text-muted');
@@ -897,7 +1122,10 @@ function render() {
   drawBoundaries(T, cssHeight);
   drawAxis(T, cssWidth);
   drawElectrodes(T);
+  drawSelection(T, cssHeight);
   drawTrajectories(T);
+  drawSource(T, cssHeight, halfH);
+  drawDropIndicator(T, cssHeight);
   drawScale(T, cssWidth, cssHeight);
   drawCrossSection();
 
@@ -1084,6 +1312,13 @@ trackEl.addEventListener('click', (e) => {
 addersEl.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-add]');
   if (button) addElement(button.dataset.add);
+});
+
+addersEl.addEventListener('dragstart', (e) => {
+  const button = e.target.closest('button[data-add]');
+  if (!button) return;
+  e.dataTransfer.setData('text/iontrace-element', button.dataset.add);
+  e.dataTransfer.effectAllowed = 'copy';
 });
 
 // Inspector sliders edit the selected element.

@@ -15,8 +15,10 @@ export const EINZEL_ELEMENT_DEFAULTS = {
   outerLength: 20, // mm
   centreLength: 20, // mm
   gap: 4, // mm
-  entryDrift: 10, // mm, this element's own grounded margin
-  exitDrift: 10, // mm
+  // About three bore radii. Shorter margins let this element's own grounded
+  // end faces clip its fringe field - see the warning in geometries/einzel.js.
+  entryDrift: 18, // mm, this element's own grounded margin
+  exitDrift: 18, // mm
   housingRadius: 16, // mm
   gridStep: 0.5, // mm
   voltage: -2000, // V on the centre electrode
@@ -37,7 +39,11 @@ export function createEinzel(params = {}, solverOpts = {}) {
     type: 'einzel',
     label: 'Einzel lens',
     params: p,
-    length: mmToM(geometry.totalLength),
+    // The grid's own extent, not the requested length. Node counts are
+    // rounded, so a requested 85 mm at 0.4 mm resolution actually spans
+    // 85.2 mm. Reporting the requested figure would leave the beamline
+    // placing the next element 0.2 mm inside this one's solved domain.
+    length: grid.zLength,
     bore,
     outerRadius: mmToM(p.housingRadius),
     lengthScale: grid.step,

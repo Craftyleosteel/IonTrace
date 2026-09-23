@@ -86,6 +86,22 @@ export function buildEinzelLens(options = {}, solverOpts = {}) {
         'the bore may be measurably distorted by the boundary.'
     );
   }
+  // The element's own margins have to be long enough for its fringe field to
+  // die away before its grounded end faces, or the lens is solved with a
+  // grounded disc sitting inside its own fringe. Measured against a single
+  // solve of a whole column, the on-axis error is about 12 % at 1.6 bore
+  // radii of margin, 6.6 % at 2.4, and 3.5 % at 3.2 - it decays roughly
+  // exponentially, so this is cheap to fix and expensive to ignore.
+  const marginRadii = Math.min(g.entryDrift, g.exitDrift) / g.boreRadius;
+  if (marginRadii < 2.5) {
+    warnings.push(
+      `Only ${marginRadii.toFixed(1)} bore radii of grounded drift inside this ` +
+        'element. Its own end faces are clipping its fringe field: expect a ' +
+        'few per cent error in the on-axis potential, more at smaller margins. ' +
+        'Increase entryDrift and exitDrift to about 3 bore radii.'
+    );
+  }
+
   if (g.gridStep > g.wallThickness) {
     warnings.push(
       `Grid step (${g.gridStep} mm) is coarser than the cylinder wall ` +
@@ -131,11 +147,11 @@ export function buildEinzelLens(options = {}, solverOpts = {}) {
 
   // Painted after the enclosure so a cylinder touching the boundary wins the
   // node, which is the physically right precedence: it is the nearer metal.
+  // grid.spans rather than bare comparisons: an edge landing exactly on a
+  // node must paint the same way wherever the element sits in a beamline.
   const cylinder = (zStart, zEnd) => (z, r) =>
-    z >= mmToM(zStart) &&
-    z <= mmToM(zEnd) &&
-    r >= mmToM(g.boreRadius) &&
-    r <= mmToM(outerRadius);
+    grid.spans(z, mmToM(zStart), mmToM(zEnd)) &&
+    grid.spans(r, mmToM(g.boreRadius), mmToM(outerRadius));
 
   const painted = {
     entrance: grid.paint(entrance, cylinder(z1, z2)),

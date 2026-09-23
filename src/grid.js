@@ -138,6 +138,33 @@ export class PotentialArray {
   }
 
   /**
+   * Inclusive range test for geometry painting, tolerant of round-off.
+   *
+   * Use this rather than bare `>=` and `<=` when deciding whether a node lies
+   * inside a piece of metal. Node coordinates are accumulated as
+   * `z0 + i * step`, while the geometry is written as `mm * 1e-3`; the two
+   * routes to what should be the same number differ in the last bit, and
+   * which way they differ depends on where the element happens to sit in the
+   * grid.
+   *
+   * Without a tolerance the consequence is not subtle. An electrode whose
+   * edge falls exactly on a node is painted one step shorter or longer purely
+   * because of its absolute position, so the *same* element placed at two
+   * different points in a beamline solves to two different fields. Measured
+   * on a 15 mm centre electrode at 0.4 mm resolution, that single node moved
+   * the on-axis potential by 7.8 V out of 300 - because it sits where the
+   * potential is changing at 20 V/mm.
+   *
+   * The tolerance is a millionth of a grid step: far too small to capture a
+   * node that is genuinely outside, and far larger than the round-off it
+   * exists to absorb. Ties resolve inclusively, and consistently.
+   */
+  spans(value, lo, hi) {
+    const tol = this.step * 1e-6;
+    return value >= lo - tol && value <= hi + tol;
+  }
+
+  /**
    * True if (i, j) lies on a physical rim of the domain.
    *
    * In cylindrical mode the axis row j = 0 is a symmetry line, not a rim, so

@@ -101,13 +101,43 @@ Dirichlet problem with grounded end faces, so its fringe field is confined to
 its own footprint and stops abruptly at the boundary. The true solution for the
 whole column would let neighbouring electrodes see each other.
 
-That approximation is good when active electrodes are separated by enough
-grounded drift for the fringe to have died away — roughly one bore radius — and
-wrong when two live elements are butted together. The beamline warns rather
-than leaving it to be discovered. Solving the whole column at once is what a 3D
-code does; it is far more expensive, and it would destroy the property that
-makes this interactive, namely that only the element you changed re-solves, and
-voltages never re-solve at all.
+**How good is that?** Measured, by building the same column both ways and
+comparing the on-axis potential:
+
+| What changes | On-axis error |
+|---|---|
+| Splitting a lens into drift + lens + drift rather than one wider lens | 0.004 V out of 300 V |
+| Element margin 0.8 bore radii | ≈ 19 % |
+| Element margin 1.6 bore radii | ≈ 12 % |
+| Element margin 2.4 bore radii | ≈ 6.6 % |
+| Element margin 3.2 bore radii | ≈ 3.5 % |
+
+The grounded faces *between* elements cost almost nothing. What costs accuracy
+is each element's own margin clipping its **own** fringe field, and that error
+decays roughly exponentially in margin / bore.
+
+So the rule is not "leave a drift between elements" — it is **give each element
+about three bore radii of its own margin**. Elements warn when they do not have
+it. A drift between two live elements still helps, because a real grounded
+drift tube genuinely shields, which is exactly what the isolation approximation
+is pretending.
+
+Solving the whole column at once is what a 3D code does; it is far more
+expensive, and it would destroy the property that makes this interactive,
+namely that only the element you changed re-solves, and voltages never re-solve
+at all.
+
+**A related trap, now fixed and worth recording.** Node coordinates are
+accumulated as `z0 + i·h`, while geometry is written as `mm × 10⁻³`. Those two
+routes to the same number differ in the last bit, and which way they differ
+depends on where the element sits in the grid. Comparing them with a bare
+`<=` therefore painted an electrode one node shorter or longer purely because
+of its absolute position — so the *same* element solved to two different fields
+in two different beamlines. On a 15 mm centre electrode at 0.4 mm resolution
+that single node moved the on-axis potential by 7.8 V out of 300, because it
+sits where the field changes at 20 V/mm. `grid.spans()` exists to make these
+comparisons tolerant, and a test asserts that an element paints identically
+wherever it is placed.
 
 ### 2.1 The enclosure
 

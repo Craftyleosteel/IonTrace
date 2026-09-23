@@ -15,12 +15,26 @@
  * solution for the whole column would let neighbouring electrodes see each
  * other.
  *
- * That approximation is good when active electrodes are separated by enough
- * grounded drift for the fringe to have died away - roughly one bore radius is
- * the usual rule - and it is wrong when two live elements are butted together.
- * `warnings` says so rather than leaving it to be discovered. The alternative,
- * a single solve over the whole line, is what a 3D code does; it is far more
- * expensive and is not what this build does.
+ * How good is that? Measured, by building the same column both ways and
+ * comparing the on-axis potential:
+ *
+ *   - The grounded end faces BETWEEN elements cost almost nothing, provided
+ *     each element's own margins are adequate: splitting a lens into
+ *     drift + lens + drift rather than one wider lens changed the on-axis
+ *     potential by 0.004 V out of 300 V.
+ *   - What actually costs accuracy is each element's own margin clipping its
+ *     OWN fringe field. The error decays roughly exponentially in
+ *     margin / bore: about 19 % at 0.8 bore radii, 12 % at 1.6, 6.6 % at 2.4
+ *     and 3.5 % at 3.2.
+ *
+ * So the rule is not "leave a drift between elements" - it is "give each
+ * element about three bore radii of its own margin". Elements warn when they
+ * do not have it. A drift between two live elements still helps, because a
+ * real grounded drift tube genuinely shields, which is exactly what the
+ * isolation approximation is pretending.
+ *
+ * The alternative, a single solve over the whole line, is what a 3D code
+ * does; it is far more expensive and is not what this build does.
  *
  * Solving the whole column at once would also destroy the property that makes
  * this interactive: each element re-solves only when ITS geometry changes, and

@@ -102,15 +102,28 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
   // it straddles the origin in each. The PotentialArray's "z" axis carries x
   // and its "r" axis carries y - the planar stencil does not care which
   // Cartesian pair it is solving.
-  const span = 2 * p.housingRadius;
-  const n = Math.round(span / p.gridStep) + 1;
+  //
+  // The node count is forced ODD and the extent derived from it, rather than
+  // the other way round. Taking n = round(2R/h) + 1 and spanning -R..-R+(n-1)h
+  // leaves the domain lopsided by up to half a grid step, which destroys the
+  // one property this element depends on: the enclosure must share the rods'
+  // four-fold symmetry. Without that, E_y is not zero on the y = 0 plane, and
+  // an ion launched there is pushed out of it. Measured before this fix, a
+  // planar ion drifted 197 um - five per cent of the aperture - purely
+  // because the grid was 0.15 mm wider on one side than the other.
+  //
+  // An odd count also puts a node exactly on the axis, which is where the
+  // potential is zero by symmetry and where ions most often sit.
+  const half = Math.max(2, Math.round(p.housingRadius / p.gridStep));
+  const step = mmToM(p.gridStep);
+  const extent = half * step;
   const grid = new PotentialArray({
-    nz: n,
-    nr: n,
-    step: mmToM(p.gridStep),
+    nz: 2 * half + 1,
+    nr: 2 * half + 1,
+    step,
     symmetry: PLANAR,
-    z0: -housing,
-    r0: -housing,
+    z0: -extent,
+    r0: -extent,
   });
 
   const encl = grid.addElectrode('housing');
@@ -121,7 +134,11 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
   // Rod centres sit at r0 + rodRadius from the axis, so the rod SURFACE is
   // tangent to the field radius r0. That is what r0 means.
   const centre = r0 + rod;
-  const disc = (cx, cy) => (x, y) => Math.hypot(x - cx, y - cy) <= rod;
+  // The tolerance matters here for the same reason as elsewhere: a rod
+  // surface passing exactly through a node must be painted the same way
+  // whichever of the four rods it belongs to, or the set is not symmetric.
+  const disc = (cx, cy) => (x, y) =>
+    Math.hypot(x - cx, y - cy) <= rod + grid.step * 1e-6;
 
   const paintedA =
     grid.paint(poleA, disc(+centre, 0)) + grid.paint(poleA, disc(-centre, 0));
@@ -155,7 +172,7 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore: r0,
-    outerRadius: housing,
+    outerRadius: extent,
     lengthScale: grid.step,
     warnings,
     grid,
@@ -189,9 +206,9 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
     },
 
     strikes(x, y, zl) {
-      if (Math.hypot(x, y) > housing) return true;
+      if (Math.hypot(x, y) > extent) return true;
       if (zl < 0 || zl > length) return false;
-      return unit.strikes(x, y, 0) || Math.hypot(x, y) > housing;
+      return unit.strikes(x, y, 0);
     },
 
     /**

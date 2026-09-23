@@ -349,6 +349,22 @@ input[type="range"]:focus-visible {
   display: block;
   width: 100%;
   height: auto;
+  cursor: grab;
+  /* The canvas is a drag surface; browser text selection fights with that. */
+  touch-action: none;
+  user-select: none;
+}
+
+.track-hint {
+  margin: 10px 0 0;
+}
+
+.add[draggable='true'] {
+  cursor: grab;
+}
+
+.add[draggable='true']:active {
+  cursor: grabbing;
 }
 
 .status {

@@ -16,7 +16,7 @@ import { Beamline } from '../src/beamline.js';
 import { createElement, ELEMENT_TYPES, needsRebuild } from '../src/elements/index.js';
 import { createQuadrupole, MATHIEU_Q_LIMIT } from '../src/elements/quadrupole.js';
 import { createDrift } from '../src/elements/drift.js';
-import { makeIon } from '../src/ion.js';
+import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
 import {
   mmToM,
@@ -105,6 +105,44 @@ describe('Quadrupole field', () => {
     const e1 = at(0.2);
     const e2 = at(0.4);
     assertRelClose(e2, 2 * e1, 0.05, 'field must double when x doubles');
+  });
+
+  it('solves on a grid that is exactly symmetric about the axis', () => {
+    // The enclosure must share the rods' four-fold symmetry. Deriving the node
+    // count as round(2R/h) + 1 and then spanning -R upward leaves the domain
+    // lopsided by up to half a grid step, which is enough to make E_y non-zero
+    // on the y = 0 plane - and an ion launched there is then pushed out of it.
+    // Measured with the lopsided grid, a planar ion drifted 197 um, five per
+    // cent of the aperture, from a 0.15 mm asymmetry in the box.
+    for (const gridStep of [0.15, 0.25, 0.35, 0.4]) {
+      const q = createQuadrupole({ gridStep, housingRadius: 12 });
+      const g = q.grid;
+      assertClose(g.zAt(0), -g.zAt(g.nz - 1), 1e-15, `x extent at h = ${gridStep}`);
+      assertClose(g.rAt(0), -g.rAt(g.nr - 1), 1e-15, `y extent at h = ${gridStep}`);
+      assert(g.nz % 2 === 1, `node count must be odd so the axis is a node (h = ${gridStep})`);
+      // And therefore the axis really is a node, sitting at exactly zero.
+      assertClose(g.zAt((g.nz - 1) / 2), 0, 1e-15, 'axis node position');
+    }
+  });
+
+  it('has no transverse field on either symmetry plane', () => {
+    // E_y = 0 everywhere on y = 0, and E_x = 0 everywhere on x = 0, by the
+    // reflection symmetry of the rod set. This is the property that keeps a
+    // planar beam planar, and it is the one the grid asymmetry destroyed.
+    const z = quad.length / 2;
+    const scale = Math.abs(quad.fieldAt(r0 * 0.5, 0, z, 0).Ex);
+    for (const f of [0.1, 0.25, 0.5, 0.75]) {
+      const onX = quad.fieldAt(f * r0, 0, z, 0);
+      const onY = quad.fieldAt(0, f * r0, z, 0);
+      assert(
+        Math.abs(onX.Ey) / scale < 1e-4,
+        `E_y on the y = 0 plane at x = ${f} r0 is ${(Math.abs(onX.Ey) / scale).toExponential(2)} of scale`
+      );
+      assert(
+        Math.abs(onY.Ex) / scale < 1e-4,
+        `E_x on the x = 0 plane at y = ${f} r0 is ${(Math.abs(onY.Ex) / scale).toExponential(2)} of scale`
+      );
+    }
   });
 
   it('is four-fold symmetric', () => {
@@ -353,6 +391,165 @@ describe('Quadrupole dynamics', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* the beam is three-dimensional                                       */
+/* ------------------------------------------------------------------ */
+
+describe('Beam in three dimensions', () => {
+  const line = () =>
+    new Beamline([
+      createElement('drift', { length: 6, bore: 6 }),
+      createElement('quadrupole', { gridStep: 0.35, length: 120, rfAmplitude: 250, frequency: 2 }),
+      createElement('drift', { length: 10, bore: 6 }),
+    ]);
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+
+  it('spreads a disc beam over both transverse axes', () => {
+    // parallelBeam puts every ion on the x axis, which is a line of ions and
+    // not a beam. discBeam must actually fill the disc.
+    const ions = discBeam({ ...SPEC, count: 24, radius: 2 });
+    const offAxisY = ions.filter((i) => Math.abs(i.y) > 1e-9);
+    assert(
+      offAxisY.length > ions.length / 2,
+      `expected most ions off the y = 0 plane, got ${offAxisY.length} of ${ions.length}`
+    );
+
+    // Uniform areal density: half the ions inside r/sqrt(2), half outside.
+    const radii = ions.map((i) => Math.hypot(i.x, i.y)).sort((a, b) => a - b);
+    const median = radii[Math.floor(radii.length / 2)];
+    assertRelClose(median, mmToM(2) / Math.SQRT2, 0.12, 'median radius of a uniform disc');
+    assert(radii[radii.length - 1] <= mmToM(2) + 1e-12, 'no ion outside the beam radius');
+  });
+
+  it('keeps a planar beam exactly planar in an axisymmetric column', () => {
+    // Here the confinement to a plane is EXACT, not approximate. The radial
+    // field is resolved onto y as E_r * (y/r), which is identically zero when
+    // y is zero - no solver residue can leak in, because the multiplication
+    // by y does it. So this is asserted at machine zero.
+    const bl = new Beamline([
+      createElement('drift', { length: 6, bore: 8 }),
+      createElement('einzel', { gridStep: 0.6, voltage: -200, boreRadius: 6, entryDrift: 18, exitDrift: 18 }),
+      createElement('drift', { length: 10, bore: 8 }),
+    ]);
+    const { points } = flyIon(bl, makeIon({ ...SPEC, x: 1.2, y: 0 }), { cfl: 0.05 });
+    for (const p of points) {
+      assertClose(p.y, 0, 0, `planar ion left its plane at z = ${mToMm(p.z).toFixed(1)} mm`);
+    }
+    assert(points.some((p) => Math.abs(p.x) < mmToM(1.1)), 'the lens should still act in x');
+  });
+
+  it('keeps a planar beam planar in a quadrupole to within solver residue', () => {
+    // Same statement, weaker guarantee, and the difference is worth knowing.
+    // A quadrupole's E_y comes from interpolating a solved transverse grid,
+    // where it is zero on the y = 0 plane only to the relaxation's residue
+    // rather than by construction. The ion therefore drifts sub-nanometre
+    // amounts out of its plane - physically nothing against a 4 mm aperture,
+    // but not machine zero, and it would be wrong to claim otherwise.
+    // A thousandth of the aperture. The residual E_y does not simply displace
+    // the ion, it DRIVES it: the quadrupole restores in y, so the residue
+    // acts as a forcing term on an oscillator and the ion rings at a small
+    // amplitude rather than settling at a small offset. A micron on a 4 mm
+    // aperture is still nothing, but the bound has to leave room for the
+    // oscillation rather than for a static offset.
+    const bl = line();
+    const tol = bl.elements[1].bore * 1e-3;
+    const { points } = flyIon(bl, makeIon({ ...SPEC, x: 1.2, y: 0 }), { cfl: 0.05 });
+    for (const p of points) {
+      assertClose(p.y, 0, tol, `planar ion left its plane at z = ${mToMm(p.z).toFixed(1)} mm`);
+    }
+    assert(
+      points.some((p) => Math.abs(p.x) > mmToM(1.3)),
+      'the ion should still be moving in x'
+    );
+  });
+
+  it('moves an ion in both transverse axes when it starts off both', () => {
+    // The same line, the same element, one ion moved off the symmetry plane.
+    const bl = line();
+    const { points } = flyIon(bl, makeIon({ ...SPEC, x: 1.2, y: 0.8 }), { cfl: 0.05 });
+    let maxX = 0;
+    let maxY = 0;
+    for (const p of points) {
+      maxX = Math.max(maxX, Math.abs(p.x));
+      maxY = Math.max(maxY, Math.abs(p.y));
+    }
+    assert(maxY > mmToM(0.5), `expected real motion in y, got ${mToMm(maxY).toFixed(3)} mm`);
+    assert(maxX > mmToM(0.5), `expected real motion in x, got ${mToMm(maxX).toFixed(3)} mm`);
+  });
+
+  it('drives the two transverse planes out of phase in a quadrupole', () => {
+    // The signature of a quadrupole: while one plane is being squeezed the
+    // other is being stretched. Both coordinates must oscillate, and their
+    // extremes must not coincide.
+    const bl = line();
+    const { points } = flyIon(bl, makeIon({ ...SPEC, x: 1.2, y: 1.2 }), { cfl: 0.02 });
+    const q = bl.elements[1];
+    const inside = points.filter((p) => p.z > q.zStart && p.z < q.zEnd);
+    assert(inside.length > 50, 'need a decent sample inside the rods');
+
+    // Count sign changes: a confined ion oscillates in both planes.
+    const crossings = (key) => {
+      let n = 0;
+      for (let i = 1; i < inside.length; i++) {
+        if (inside[i - 1][key] * inside[i][key] < 0) n++;
+      }
+      return n;
+    };
+    assert(crossings('x') > 2, `expected several x oscillations, got ${crossings('x')}`);
+    assert(crossings('y') > 2, `expected several y oscillations, got ${crossings('y')}`);
+  });
+
+  it('sends a divergent disc beam outward, not sideways', () => {
+    // Divergence is radial: every ion's transverse velocity points away from
+    // the axis along its own azimuth, so the beam expands as a cone rather
+    // than fanning out in one plane.
+    for (const ion of discBeam({ ...SPEC, count: 16, radius: 2, divergence: 3 })) {
+      const r = Math.hypot(ion.x, ion.y);
+      if (r < 1e-9) continue;
+      const vr = (ion.vx * ion.x + ion.vy * ion.y) / r;
+      const vTransverse = Math.hypot(ion.vx, ion.vy);
+      assertRelClose(vr, vTransverse, 1e-9, 'transverse velocity must be purely radial');
+      // And the angle must scale with radius, reaching the full value at the
+      // beam edge.
+      const angle = (Math.atan2(vTransverse, ion.vz) * 180) / Math.PI;
+      assertRelClose(angle, 3 * (r / mmToM(2)), 1e-6, 'divergence scales with radius');
+    }
+  });
+
+  it('expands a divergent beam and leaves a collimated one alone', () => {
+    const bl = new Beamline([createElement('drift', { length: 60, bore: 10 })]);
+    // Compared against the beam's OWN launch radius, not against the nominal
+    // one: a uniform-density disc places its outermost ion a little inside
+    // the nominal edge, so the nominal radius is a property of the
+    // distribution rather than the position of any particular ion.
+    const widthAfter = (divergence) => {
+      const ions = discBeam({ ...SPEC, count: 12, radius: 1, divergence });
+      let launched = 0;
+      let worst = 0;
+      for (const ion of ions) {
+        launched = Math.max(launched, Math.hypot(ion.x, ion.y));
+        const { points } = flyIon(bl, ion, { cfl: 0.2 });
+        const p = points[points.length - 1];
+        worst = Math.max(worst, Math.hypot(p.x, p.y));
+      }
+      return { launched, worst };
+    };
+    const collimated = widthAfter(0);
+    const diverging = widthAfter(3);
+    assertRelClose(
+      collimated.worst,
+      collimated.launched,
+      1e-9,
+      'a collimated beam keeps the radius it was launched with'
+    );
+    assert(
+      diverging.worst > collimated.worst * 2,
+      `a 3 degree beam should widen over 60 mm: ${mToMm(collimated.worst).toFixed(2)} -> ` +
+        `${mToMm(diverging.worst).toFixed(2)} mm`
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* composition                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -378,6 +575,64 @@ describe('Beamline composition', () => {
     assert(bl.elementAt(mmToM(15)) === bl.elements[1], 'inside the second');
     assert(bl.elementAt(mmToM(20)) === bl.elements[1], 'the far end belongs to the last');
     assert(bl.elementAt(mmToM(25)) === null, 'beyond the column');
+  });
+
+  it('paints an element identically wherever it sits in the grid', () => {
+    // Node coordinates come from `z0 + i * step`, geometry from `mm * 1e-3`.
+    // Those two routes to the same number differ in the last bit, and which
+    // way depends on the element's absolute position. Without a tolerance an
+    // electrode whose edge lands on a node is painted one step shorter or
+    // longer purely because of where it was placed, so the same element
+    // solves to two different fields in two different beamlines.
+    //
+    // Measured before the fix: a 15 mm centre electrode came out 14.8 mm in
+    // one position and 15.0 mm in another, moving the on-axis potential by
+    // 7.8 V out of 300 because that node sits where the field changes at
+    // 20 V/mm.
+    const COMMON = {
+      gridStep: 0.4, voltage: -300, boreRadius: 5, wallThickness: 2,
+      outerLength: 15, centreLength: 15, gap: 4, housingRadius: 14,
+    };
+
+    const extentOf = (element, name, offsetM) => {
+      const g = element.grid;
+      const id = g.electrodeNames.indexOf(name);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let j = 0; j < g.nr; j++) {
+        for (let i = 0; i < g.nz; i++) {
+          if (g.electrodeId[g.idx(i, j)] !== id) continue;
+          lo = Math.min(lo, g.zAt(i) + offsetM);
+          hi = Math.max(hi, g.zAt(i) + offsetM);
+        }
+      }
+      return { lo, hi };
+    };
+
+    // The same lens, reached two ways: shifted by a 10 mm drift, or with that
+    // 10 mm folded into its own margins. The metal is in the same place.
+    const shifted = createElement('einzel', { ...COMMON, entryDrift: 16, exitDrift: 16 });
+    const direct = createElement('einzel', { ...COMMON, entryDrift: 26, exitDrift: 26 });
+
+    for (const name of ['entrance', 'centre', 'exit']) {
+      const a = extentOf(shifted, name, mmToM(10));
+      const b = extentOf(direct, name, 0);
+      assertClose(a.lo, b.lo, 1e-9, `${name} start must not depend on placement`);
+      assertClose(a.hi, b.hi, 1e-9, `${name} end must not depend on placement`);
+    }
+
+    // And therefore the fields must agree, including in the steep region at
+    // the downstream edge of the centre electrode where the bug showed up.
+    let worst = 0;
+    for (let zmm = 40; zmm <= 80; zmm += 0.2) {
+      const a = shifted.potentialAt(0, 0, mmToM(zmm - 10));
+      const b = direct.potentialAt(0, 0, mmToM(zmm));
+      worst = Math.max(worst, Math.abs(a - b));
+    }
+    assert(
+      worst < 0.5,
+      `the same lens placed two ways differs by ${worst.toFixed(2)} V on axis`
+    );
   });
 
   it('translates coordinates into each element', () => {
