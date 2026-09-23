@@ -16,6 +16,16 @@ import { Beamline } from '../src/beamline.js';
 import { createElement, ELEMENT_TYPES, needsRebuild } from '../src/elements/index.js';
 import { createQuadrupole, MATHIEU_Q_LIMIT } from '../src/elements/quadrupole.js';
 import { createDrift } from '../src/elements/drift.js';
+import { createBender, matchedVoltage } from '../src/elements/bender.js';
+import {
+  compose,
+  translation,
+  yawFrame,
+  toGlobal,
+  toLocal,
+  vectorToGlobal,
+  forwardOf,
+} from '../src/frames.js';
 import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
 import {
@@ -546,6 +556,202 @@ describe('Beam in three dimensions', () => {
       `a 3 degree beam should widen over 60 mm: ${mToMm(collimated.worst).toFixed(2)} -> ` +
         `${mToMm(diverging.worst).toFixed(2)} mm`
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* placements                                                          */
+/* ------------------------------------------------------------------ */
+
+describe('Frames', () => {
+  it('round-trips a point through a placement', () => {
+    const f = compose(translation(0.1, -0.02, 0.3), yawFrame(0.7));
+    const p = [0.004, -0.003, 0.05];
+    const back = toLocal(f, toGlobal(f, p));
+    for (let i = 0; i < 3; i++) {
+      assertClose(back[i], p[i], 1e-15, `component ${i} must survive the round trip`);
+    }
+  });
+
+  it('rotates vectors without displacing them', () => {
+    // A field is a vector: it turns with the frame but must not pick up the
+    // frame's origin. Treating it as a point would be a category error that
+    // happens to compile.
+    const f = compose(translation(1, 2, 3), yawFrame(Math.PI / 2));
+    const v = vectorToGlobal(f, [0, 0, 1]);
+    assertClose(Math.hypot(v[0], v[1], v[2]), 1, 1e-15, 'rotation preserves length');
+    assertClose(v[0], -1, 1e-15, 'a quarter turn sends +z to -x');
+    assertClose(v[2], 0, 1e-15, 'and leaves nothing along z');
+  });
+
+  it('composes placements in order', () => {
+    // Two quarter turns make a half turn, and the origins accumulate along
+    // the rotated axes rather than the global ones.
+    const quarter = compose(translation(0, 0, 1), yawFrame(Math.PI / 2));
+    const half = compose(quarter, quarter);
+    const dir = forwardOf(half);
+    assertClose(dir[2], -1, 1e-15, 'two quarter turns reverse the direction');
+    assertClose(half.o[0], -1, 1e-15, 'the second leg runs along the turned axis');
+    assertClose(half.o[2], 1, 1e-15, 'the first leg ran along the original one');
+  });
+
+  it('keeps a misalignment local to its own element', () => {
+    // A misaligned lens does not move the ones downstream of it: each is
+    // mounted independently. Propagating the error would model a bent bench.
+    const bl = new Beamline([
+      createElement('drift', { length: 10, bore: 6 }),
+      createElement('drift', { length: 10, bore: 6 }),
+      createElement('drift', { length: 10, bore: 6 }),
+    ]);
+    const before = bl.elements[2].frame.o.slice();
+
+    bl.elements[1].align = { dx: mmToM(2), dy: 0, tiltX: 0, tiltY: 0 };
+    bl.layout();
+
+    assertClose(bl.elements[1].frame.o[0], mmToM(2), 1e-15, 'the element moves');
+    for (let i = 0; i < 3; i++) {
+      assertClose(
+        bl.elements[2].frame.o[i],
+        before[i],
+        1e-15,
+        'the element after it must not move'
+      );
+    }
+    assert(bl.misaligned, 'the column should report itself misaligned');
+
+    bl.autoAlign();
+    assertClose(bl.elements[1].frame.o[0], 0, 1e-15, 'auto-align restores the mount');
+    assert(!bl.misaligned, 'and the column is aligned again');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* bender                                                              */
+/* ------------------------------------------------------------------ */
+
+describe('Bender', () => {
+  const PARAMS = { bendRadius: 40, bendAngle: 90, gap: 8, height: 16, gridStep: 0.3 };
+  const ENERGY = 50;
+
+  it('matches the closed-form plate voltage', () => {
+    // For the central orbit, the electric force supplies the centripetal one:
+    //   qE = 2T/R,  with  E = V / (R ln(r2/r1))   =>   V = (2T/q) ln(r2/r1)
+    // which for a narrow gap approaches the familiar 2Td/(qR).
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const r1 = mmToM(PARAMS.bendRadius - PARAMS.gap / 2);
+    const r2 = mmToM(PARAMS.bendRadius + PARAMS.gap / 2);
+    assertRelClose(V, 2 * ENERGY * Math.log(r2 / r1), 1e-12, 'closed form');
+    // And the narrow-gap limit, to the accuracy that limit deserves.
+    assertRelClose(V, (2 * ENERGY * PARAMS.gap) / PARAMS.bendRadius, 0.01, 'narrow-gap estimate');
+  });
+
+  it('scales the matched voltage with energy and charge', () => {
+    const base = matchedVoltage(PARAMS, 50, 1);
+    assertRelClose(matchedVoltage(PARAMS, 100, 1), 2 * base, 1e-12, 'V ~ T');
+    assertRelClose(matchedVoltage(PARAMS, 50, 2), base / 2, 1e-12, 'V ~ 1/q');
+  });
+
+  it('turns the column by its bend angle', () => {
+    // The whole point of the element: its exit faces somewhere else, so
+    // everything downstream turns with it.
+    for (const deg of [30, 90, 127]) {
+      const bl = new Beamline([
+        createElement('drift', { length: 5, bore: 4 }),
+        createElement('bender', { ...PARAMS, bendAngle: deg }),
+      ]);
+      const dir = forwardOf(bl.exitFrame);
+      const turned = (Math.atan2(-dir[0], dir[2]) * 180) / Math.PI;
+      assertRelClose(turned, deg, 1e-9, `a ${deg} degree bend`);
+    }
+  });
+
+  it('places the element after a bend on the turned axis', () => {
+    const bl = new Beamline([
+      createElement('bender', { ...PARAMS, bendAngle: 90 }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    const after = bl.elements[1].frame;
+    // A 90 degree bend of radius R puts the exit at (-R, 0, R) and pointing
+    // along -x, so the drift after it runs in -x from there.
+    const R = mmToM(40);
+    assertClose(after.o[0], -R, 1e-12, 'exit sits one radius to the side');
+    assertClose(after.o[2], R, 1e-12, 'and one radius downstream');
+    const dir = forwardOf(after);
+    assertClose(dir[0], -1, 1e-12, 'and the drift runs across the original axis');
+  });
+
+  it('carries a matched ion round the arc and out', () => {
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 10, bore: 4 }),
+      createElement('bender', { ...PARAMS, voltage: V }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    const { points, stop } = flyIon(
+      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+    );
+    assert(stop === 'exited', `a matched ion should get through, got ${stop}`);
+
+    const last = points[points.length - 1];
+    const turned = (Math.atan2(-last.vx, last.vz) * 180) / Math.PI;
+    // Within a degree or so of nominal. The remaining error is real: the
+    // grounded lids sit close enough to perturb the field from the ideal
+    // cylindrical-capacitor form the matched voltage assumes.
+    assertClose(turned, 90, 2, 'a matched ion follows the nominal bend');
+  });
+
+  it('puts a badly mismatched ion into a plate', () => {
+    // A bender at the wrong voltage does not bend the beam slightly wrongly,
+    // it disperses it onto an electrode. That is also what makes it an energy
+    // filter rather than merely a corner.
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 10, bore: 4 }),
+      createElement('bender', { ...PARAMS, voltage: V }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    for (const energy of [ENERGY * 0.8, ENERGY * 1.2]) {
+      const { stop } = flyIon(
+        bl, makeIon({ mass: 100, charge: 1, energy }), { cfl: 0.05 }
+      );
+      assert(
+        stop === 'electrode',
+        `an ion ${((energy / ENERGY - 1) * 100).toFixed(0)} % off energy should be ` +
+          `dispersed into a plate, got ${stop}`
+      );
+    }
+  });
+
+  it('keeps an on-orbit ion in the bend plane', () => {
+    // A cylindrical sector bends horizontally and does essentially nothing
+    // vertically - it has no vertical focusing at all in the ideal geometry,
+    // which is exactly why spherical deflectors exist. An ion launched in the
+    // plane must stay in it.
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 10, bore: 4 }),
+      createElement('bender', { ...PARAMS, voltage: V }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    const { points } = flyIon(
+      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+    );
+    for (const p of points) {
+      assertClose(p.y, 0, mmToM(1e-3), `left the bend plane at z = ${mToMm(p.z).toFixed(1)} mm`);
+    }
+  });
+
+  it('solves on a cylindrical band that excludes the axis', () => {
+    // The bender reuses the axisymmetric stencil with the roles of the axes
+    // reinterpreted, but its radial band sits about the bend radius rather
+    // than starting at zero - so the singular on-axis stencil must NOT be
+    // applied, and row j = 0 is an ordinary wall.
+    const b = createBender(PARAMS);
+    assert(b.grid.r0 > 0, 'the band should not reach the axis');
+    assert(!b.grid.includesAxis, 'and must not claim to contain it');
+    // Which means j = 0 has to be part of the enclosure, or the problem is
+    // unbounded on that side.
+    assert(b.grid.isElectrode(Math.floor(b.grid.nz / 2), 0), 'inner wall must be fixed');
   });
 });
 

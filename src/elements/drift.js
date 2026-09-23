@@ -37,6 +37,19 @@ export function createDrift(params = {}) {
     shortestPeriod: null,
     warnings: [],
 
+    /**
+     * Whether a local point falls inside this element's span.
+     *
+     * Deliberately axial only: an ion that is within the element's length but
+     * outside its bore is still THIS element's business, and `strikes` is
+     * what decides it has hit the wall. Excluding it here would leave the
+     * beamline unable to find any element for it, and a lost ion would be
+     * reported as having wandered out of the column rather than as a strike.
+     */
+    contains(x, y, zl) {
+      return zl >= 0 && zl <= length;
+    },
+
     fieldAt() {
       return { Ex: 0, Ey: 0, Ez: 0 };
     },

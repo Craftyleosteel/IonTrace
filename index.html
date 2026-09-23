@@ -27,18 +27,38 @@
       <!-- ---------------------------------------------------------- -->
       <!-- controls                                                    -->
       <!-- ---------------------------------------------------------- -->
+      <!--
+        One rule for the whole panel: select something, see its options.
+        With nothing selected there is only the menu of things to add and the
+        button that launches the beam. The ion source is selectable too, so
+        the beam's settings live where everything else's do rather than in a
+        permanent panel of their own.
+
+        Every control below is created once and kept in the DOM, hidden rather
+        than rebuilt, so the simulation state never depends on what happens to
+        be on screen.
+      -->
       <aside class="controls" aria-label="Simulation parameters">
         <button id="fly" class="fly" type="button">
           <span class="fly-label">Fly ions</span>
           <span class="fly-hint">launch the beam</span>
         </button>
 
-        <!-- Parameters of whichever element is selected in the track. -->
-        <section class="group" id="inspector" aria-live="polite"></section>
+        <section class="group" id="addPanel">
+          <h2>Add to the beamline</h2>
+          <label class="field">
+            <span class="field-label">Element</span>
+            <select id="addType"></select>
+          </label>
+          <button class="add-go" id="addGo" type="button">Add to beamline</button>
+          <p class="hint" id="addBlurb"></p>
+        </section>
 
-        <section class="group">
-          <h2>Ion beam</h2>
+        <!-- Whatever is selected: an element, or the ion source. -->
+        <section class="group" id="inspector" aria-live="polite" hidden></section>
 
+        <!-- Beam settings. Shown only while the source is selected. -->
+        <section class="group" id="beamPanel" hidden>
           <label class="field">
             <span class="field-label">Mass<span class="unit">u</span></span>
             <input id="mass" type="number" min="0.1" step="1" value="100" />
@@ -71,89 +91,62 @@
             <input id="divergence" type="range" min="0" max="5" step="0.1" value="0" />
             <output id="divergenceOut">0.0</output>
             <span class="field-help">
-              How fast the beam spreads. Each ion is aimed radially outward at
-              an angle proportional to its distance from the axis, so the beam
-              expands as a cone from a waist here — 0° is perfectly collimated,
-              and the ion at the edge gets the full angle.
+              Each ion is aimed radially outward at an angle proportional to
+              its distance from the axis, so the beam expands as a cone from a
+              waist here. 0° is perfectly collimated; the ion at the edge gets
+              the full angle.
             </span>
           </label>
 
-          <p class="hint">
-            Ions fill a <strong>disc</strong>, not a line. A beam launched along
-            one axis would sit on a symmetry plane of every element and stay
-            there — the motion would look flat because the source was, not
-            because the physics is.
-          </p>
-        </section>
+          <details class="sub">
+            <summary>Repulsion and integration</summary>
 
-        <section class="group">
-          <h2>Repulsion</h2>
-          <p class="hint">
-            <strong>Coulomb</strong> treats each trajectory as one ion feeling
-            every other directly. <strong>Beam</strong> treats each as a
-            <em>ring</em> of charge and uses Gauss's law on the enclosed
-            current.
-          </p>
+            <label class="field">
+              <span class="field-label">Repulsion</span>
+              <select id="repulsion">
+                <option value="none" selected>None</option>
+                <option value="coulomb">Coulomb — discrete ions</option>
+                <option value="beam">Beam — continuous current</option>
+              </select>
+            </label>
 
-          <label class="field">
-            <span class="field-label">Model</span>
-            <select id="repulsion">
-              <option value="none" selected>None</option>
-              <option value="coulomb">Coulomb — discrete ions</option>
-              <option value="beam">Beam — continuous current</option>
-            </select>
-          </label>
+            <label class="field" data-model="coulomb">
+              <span class="field-label">
+                Ions per particle<span class="unit">real ions</span>
+              </span>
+              <input id="ionsPerParticle" type="range" min="0" max="8" step="0.1" value="6" />
+              <output id="ionsPerParticleOut">1e6</output>
+            </label>
 
-          <label class="field" data-model="coulomb">
-            <span class="field-label">
-              Ions per particle<span class="unit">real ions</span>
-            </span>
-            <input id="ionsPerParticle" type="range" min="0" max="8" step="0.1" value="6" />
-            <output id="ionsPerParticleOut">1e6</output>
-          </label>
+            <label class="field" data-model="beam">
+              <span class="field-label">Beam current<span class="unit">µA</span></span>
+              <input id="beamCurrent" type="range" min="0" max="50" step="0.5" value="5" />
+              <output id="beamCurrentOut">5.0</output>
+            </label>
 
-          <label class="field" data-model="beam">
-            <span class="field-label">Beam current<span class="unit">µA</span></span>
-            <input id="beamCurrent" type="range" min="0" max="50" step="0.5" value="5" />
-            <output id="beamCurrentOut">5.0</output>
-          </label>
-        </section>
+            <label class="field">
+              <span class="field-label">Integrator</span>
+              <select id="method">
+                <option value="rk4" selected>Runge–Kutta 4</option>
+                <option value="verlet">Velocity Verlet</option>
+              </select>
+            </label>
 
-        <section class="group">
-          <h2>Integration</h2>
+            <label class="field">
+              <span class="field-label">Step fraction</span>
+              <input id="cfl" type="range" min="0.01" max="0.3" step="0.01" value="0.05" />
+              <output id="cflOut">0.05</output>
+            </label>
 
-          <label class="field">
-            <span class="field-label">Method</span>
-            <select id="method">
-              <option value="rk4" selected>Runge–Kutta 4</option>
-              <option value="verlet">Velocity Verlet</option>
-            </select>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Step fraction</span>
-            <input id="cfl" type="range" min="0.01" max="0.3" step="0.01" value="0.05" />
-            <output id="cflOut">0.05</output>
-          </label>
-        </section>
-
-        <section class="group">
-          <h2>Display</h2>
-          <label class="field">
-            <span class="field-label">
-              Transverse zoom<span class="unit">× true scale</span>
-            </span>
-            <input id="zoom" type="range" min="1" max="8" step="0.5" value="1" />
-            <output id="zoomOut">1.0</output>
-          </label>
-          <label class="check">
-            <input id="showField" type="checkbox" checked />
-            <span>Potential map</span>
-          </label>
-          <label class="check">
-            <input id="showContours" type="checkbox" />
-            <span>Equipotentials</span>
-          </label>
+            <label class="check">
+              <input id="showField" type="checkbox" checked />
+              <span>Potential map</span>
+            </label>
+            <label class="check">
+              <input id="showContours" type="checkbox" />
+              <span>Equipotentials</span>
+            </label>
+          </details>
         </section>
       </aside>
 
@@ -174,14 +167,15 @@
         <div class="track-wrap">
           <div class="track-head">
             <h2>Beamline</h2>
-            <div class="adders" id="adders"></div>
+            <button class="ghost-btn" id="autoAlign" type="button" hidden>
+              Auto-align
+            </button>
           </div>
           <ol class="track" id="track" aria-label="Beamline elements"></ol>
           <p class="hint track-hint">
-            Drag an element along the beamline above to reorder it, or drag a
-            button here onto the beamline to place a new one. Drag the green
-            handles at the entrance to resize the beam. The chips below work
-            too, for keyboard and screen-reader use.
+            Click anything to select it and see its settings; click empty space
+            to deselect. Drag an element along the beamline to reorder it, and
+            drag the green handles at the entrance to resize the beam.
           </p>
         </div>
 

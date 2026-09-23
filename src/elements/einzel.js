@@ -34,16 +34,16 @@ export function createEinzel(params = {}, solverOpts = {}) {
   const b = geometry.bounds;
   const bore = mmToM(p.boreRadius);
   const outer = mmToM(geometry.outerRadius);
+  // The grid's own extent, not the requested length. Node counts are rounded,
+  // so a requested 85 mm at 0.4 mm resolution actually spans 85.2 mm, and the
+  // beamline must place the next element where this one's solved domain ends.
+  const length = grid.zLength;
 
   return {
     type: 'einzel',
     label: 'Einzel lens',
     params: p,
-    // The grid's own extent, not the requested length. Node counts are
-    // rounded, so a requested 85 mm at 0.4 mm resolution actually spans
-    // 85.2 mm. Reporting the requested figure would leave the beamline
-    // placing the next element 0.2 mm inside this one's solved domain.
-    length: grid.zLength,
+    length,
     bore,
     outerRadius: mmToM(p.housingRadius),
     lengthScale: grid.step,
@@ -57,6 +57,12 @@ export function createEinzel(params = {}, solverOpts = {}) {
       p.voltage = v;
       // Fast adjust; no relaxation happens here.
       field.setVoltages({ housing: 0, entrance: 0, centre: v, exit: 0 });
+    },
+
+    // Axial only: an ion inside the length but outside the bore is still
+    // this element's business, and strikes decides it has hit metal.
+    contains(x, y, zl) {
+      return zl >= 0 && zl <= length;
     },
 
     fieldAt(x, y, zl) {

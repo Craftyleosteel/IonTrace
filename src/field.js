@@ -307,6 +307,21 @@ export class Field {
   }
 
   /**
+   * Where a point is relative to the modelled region.
+   *
+   * The integrator asks this rather than comparing coordinates itself,
+   * because a composed beamline has no single axis to compare against once it
+   * contains a bender. A lone Field does have one, so this is the simple
+   * case; Beamline answers the same question for a path through space.
+   */
+  classify(x, y, z) {
+    const [zMin, zMax] = this.zRange;
+    if (z > zMax) return 'exited';
+    if (z < zMin) return 'reflected';
+    return 'inside';
+  }
+
+  /**
    * Finest spatial detail the field can represent, in metres.
    *
    * The integrator uses this to bound how far an ion may travel per step. It

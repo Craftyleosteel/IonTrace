@@ -15,6 +15,7 @@ import { createDrift, DRIFT_DEFAULTS } from './drift.js';
 import { createAperture, APERTURE_DEFAULTS } from './aperture.js';
 import { createEinzel, EINZEL_ELEMENT_DEFAULTS } from './einzel.js';
 import { createQuadrupole, QUADRUPOLE_DEFAULTS } from './quadrupole.js';
+import { createBender, BENDER_DEFAULTS } from './bender.js';
 
 /** @typedef {{key: string, label: string, unit?: string, min: number, max: number, step: number, rebuild: boolean, help?: string}} FieldSpec */
 
@@ -55,6 +56,21 @@ export const ELEMENT_TYPES = {
       { key: 'boreRadius', label: 'Bore', unit: 'mm', min: 3, max: 10, step: 0.5, rebuild: true },
       { key: 'centreLength', label: 'Centre length', unit: 'mm', min: 5, max: 40, step: 1, rebuild: true },
       { key: 'gap', label: 'Gap', unit: 'mm', min: 1, max: 12, step: 0.5, rebuild: true },
+    ],
+  },
+
+  bender: {
+    label: 'Bender',
+    blurb:
+      'Two curved plates that turn the beam. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
+    create: createBender,
+    defaults: BENDER_DEFAULTS,
+    fields: [
+      { key: 'voltage', label: 'Plate voltage', unit: 'V', min: -2000, max: 2000, step: 5, rebuild: false, help: 'Across the pair. The matched value for the current ion is shown below — a bender at the wrong voltage puts the beam into a plate.' },
+      { key: 'bendAngle', label: 'Bend angle', unit: '°', min: 10, max: 180, step: 5, rebuild: false },
+      { key: 'bendRadius', label: 'Bend radius', unit: 'mm', min: 15, max: 120, step: 1, rebuild: true },
+      { key: 'gap', label: 'Plate gap', unit: 'mm', min: 2, max: 20, step: 0.5, rebuild: true },
+      { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 40, step: 1, rebuild: true },
     ],
   },
 

@@ -118,6 +118,12 @@ export function createAperture(params = {}, solverOpts = {}) {
       field.setVoltages({ housing: 0, plate: v });
     },
 
+    // Axial only: an ion inside the length but outside the bore is still
+    // this element's business, and strikes decides it has hit metal.
+    contains(x, y, zl) {
+      return zl >= 0 && zl <= length;
+    },
+
     fieldAt(x, y, zl) {
       return field.fieldAt3D(x, y, zl);
     },

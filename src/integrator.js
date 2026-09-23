@@ -270,8 +270,6 @@ export function flyIon(field, ion, opts = {}) {
   const maxTime = opts.maxTime ?? Infinity;
   const recordEvery = opts.recordEvery ?? 1;
 
-  const [zMin, zMax] = field.zRange;
-
   let current = { ...ion };
   const points = [current];
 
@@ -300,19 +298,16 @@ export function flyIon(field, ion, opts = {}) {
       break;
     }
 
-    // Leaving through an open face ends the flight, and the direction matters.
-    // An ion that comes back out of the entrance has been REFLECTED, not
-    // transmitted; reporting both as "exited" turns a working ion mirror into
-    // a lens with a negative focal length.
-    if (next.z > zMax) {
+    // Leaving ends the flight, and the direction matters. An ion that comes
+    // back out of the entrance has been REFLECTED, not transmitted; reporting
+    // both as "exited" turns a working ion mirror into a lens with a negative
+    // focal length. A third case exists once elements can be misaligned: an
+    // ion can escape through a gap without reaching either end, and calling
+    // that "exited" would count a lost ion as transmitted.
+    const where = field.classify(next.x, next.y ?? 0, next.z);
+    if (where !== 'inside') {
       current = next;
-      stop = 'exited';
-      points.push(current);
-      break;
-    }
-    if (next.z < zMin) {
-      current = next;
-      stop = 'reflected';
+      stop = where;
       points.push(current);
       break;
     }
@@ -386,7 +381,6 @@ export function createFlight(field, ions, opts = {}) {
   const beamCurrent = opts.beamCurrent ?? 0;
   const ionsPerParticle = opts.ionsPerParticle ?? 1;
 
-  const [zMin, zMax] = field.zRange;
   const planar = field.grid?.symmetry === PLANAR;
 
   // Ring model only: each ion's share of the beam current is fixed at launch
@@ -458,18 +452,17 @@ export function createFlight(field, ions, opts = {}) {
           t.state = next;
           t.stop = 'electrode';
           t.active = false;
-        } else if (next.z > zMax) {
-          t.state = next;
-          t.stop = 'exited';
-          t.active = false;
-        } else if (next.z < zMin) {
-          t.state = next;
-          t.stop = 'reflected';
-          t.active = false;
         } else {
-          t.state = next;
-          const drift = Math.abs(totalEnergy(field, next) - t.E0) / t.scale;
-          if (drift > t.energyDrift) t.energyDrift = drift;
+          const where = field.classify(next.x, next.y ?? 0, next.z);
+          if (where !== 'inside') {
+            t.state = next;
+            t.stop = where;
+            t.active = false;
+          } else {
+            t.state = next;
+            const drift = Math.abs(totalEnergy(field, next) - t.E0) / t.scale;
+            if (drift > t.energyDrift) t.energyDrift = drift;
+          }
         }
 
         if (!t.active || flight.steps % recordEvery === 0) t.points.push(t.state);

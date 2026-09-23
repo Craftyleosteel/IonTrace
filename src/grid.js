@@ -60,9 +60,9 @@ export class PotentialArray {
       throw new Error(`Unknown symmetry: ${symmetry}`);
     }
 
-    if (symmetry === CYLINDRICAL && r0 !== 0) {
+    if (symmetry === CYLINDRICAL && r0 < 0) {
       throw new Error(
-        'Cylindrical symmetry requires r0 = 0; row j = 0 is the axis itself'
+        'Cylindrical symmetry needs r0 >= 0; a radius cannot be negative'
       );
     }
 
@@ -231,9 +231,18 @@ export class PotentialArray {
     return this.paint(id, (z, r, i, j) => {
       if (i === 0 || i === this.nz - 1) return true; // end walls, full height
       if (j === this.nr - 1) return true; // outer wall
-      if (j === 0) return this.symmetry === PLANAR; // axis is not a wall
+      // Row j = 0 is only a symmetry axis when the grid actually reaches
+      // r = 0. A cylindrical band that starts further out - a bender's, which
+      // spans a narrow range about its bend radius - has an ordinary wall
+      // there, and leaving it free would leave the problem unbounded.
+      if (j === 0) return this.symmetry === PLANAR || this.includesAxis === false;
       return false;
     });
+  }
+
+  /** True when row j = 0 really is the symmetry axis rather than a wall. */
+  get includesAxis() {
+    return this.symmetry === CYLINDRICAL && this.r0 === 0;
   }
 
   /** Count of nodes owned by each electrode, for diagnostics. */

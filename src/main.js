@@ -21,6 +21,7 @@ import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
 import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
+import { toGlobal, toLocal, forwardOf } from './frames.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -31,8 +32,13 @@ const crossCtx = cross.getContext('2d');
 const statusEl = el('status');
 const readoutEl = el('readout');
 const trackEl = el('track');
-const addersEl = el('adders');
 const inspectorEl = el('inspector');
+const addPanel = el('addPanel');
+const addType = el('addType');
+const addGo = el('addGo');
+const addBlurb = el('addBlurb');
+const beamPanel = el('beamPanel');
+const autoAlignBtn = el('autoAlign');
 const scaleNote = el('scaleNote');
 const flyButton = el('fly');
 
@@ -48,13 +54,12 @@ const inputs = {
   ionsPerParticle: el('ionsPerParticle'),
   method: el('method'),
   cfl: el('cfl'),
-  zoom: el('zoom'),
   showField: el('showField'),
   showContours: el('showContours'),
 };
 
 /** Controls that change only how the scene is drawn, never the physics. */
-const DISPLAY_INPUTS = ['showField', 'showContours', 'zoom'];
+const DISPLAY_INPUTS = ['showField', 'showContours'];
 
 /* ------------------------------------------------------------------ */
 /* colour                                                              */
@@ -98,7 +103,20 @@ function divergingColour(t, neg, zero, pos) {
 /* ------------------------------------------------------------------ */
 
 let beamline = null;
-let selected = 0;
+
+/**
+ * What the inspector is showing.
+ *
+ * `null` means nothing is selected, and the panel collapses to the add menu
+ * and the Fly button. The ion SOURCE is a selectable object in its own right,
+ * so the beam's settings live where every other object's do rather than in a
+ * panel that is always on screen.
+ */
+let selection = null; // null | {kind:'source'} | {kind:'element', index}
+
+const selectedIndex = () => (selection?.kind === 'element' ? selection.index : -1);
+
+let view = null; // the current screen transform, for hit-testing
 let trajectories = [];
 let stats = {};
 let flight = null;
@@ -192,27 +210,25 @@ function setParam(index, key, value) {
 }
 
 function addElement(type) {
-  const index = beamline.elements.length
-    ? Math.min(selected + 1, beamline.elements.length)
-    : 0;
+  const after = selectedIndex();
+  const index = after >= 0 ? after + 1 : beamline.elements.length;
   statusEl.classList.add('busy');
-  const created = createElement(type);
-  beamline.add(created, index);
+  beamline.add(createElement(type), index);
   statusEl.classList.remove('busy');
-  selected = index;
+  selection = { kind: 'element', index };
   afterStructureChange();
 }
 
 function removeElement(index) {
   if (beamline.elements.length <= 1) return;
   beamline.remove(index);
-  selected = Math.max(0, Math.min(selected, beamline.elements.length - 1));
+  selection = null;
   afterStructureChange();
 }
 
 function moveElement(index, delta) {
   if (!beamline.move(index, delta)) return;
-  selected = index + delta;
+  selection = { kind: 'element', index: index + delta };
   afterStructureChange();
 }
 
@@ -245,76 +261,139 @@ function pointerPos(e) {
   return { px: e.clientX - rect.left, py: e.clientY - rect.top };
 }
 
-/** Beamline z (metres) for a canvas x position. */
-function zAtPixel(px) {
-  return (px / canvas.clientWidth) * beamline.length;
+/**
+ * The world point under the cursor, on the y = 0 plane.
+ *
+ * The view is a top view of the global x-z plane, so a screen position maps
+ * back to a point in that plane exactly. Hit testing then happens in world
+ * coordinates, which is what lets it keep working after the column bends.
+ */
+function worldAt(px, py) {
+  if (!view) return [0, 0, 0];
+  return view.unproject(px, py);
 }
 
-/** Index of the element under this z, or -1. */
-function elementIndexAtZ(z) {
-  return beamline.elements.findIndex((e) => z >= e.zStart && z < e.zEnd);
-}
-
-/** Where an element dragged to this z would be inserted. */
-function dropIndexAtZ(z) {
+/** The element under a world point, or -1. */
+function elementIndexAtWorld(g) {
   for (let i = 0; i < beamline.elements.length; i++) {
     const e = beamline.elements[i];
-    if (z < e.zStart + e.length / 2) return i;
+    const l = toLocal(e.frame, g);
+    if (!e.contains(l[0], l[1], l[2])) continue;
+    if (Math.hypot(l[0], l[1]) <= e.outerRadius * 1.25) return i;
+  }
+  return -1;
+}
+
+/** Whether the cursor is on one of the source handles. */
+function onSourceHandle(px, py) {
+  const first = beamline.elements[0];
+  if (!first || !view) return false;
+  const radius = mmToM(readNumber(inputs.beamRadius, 1));
+  for (const sign of [-1, 1]) {
+    const [hx, hy] = view.project(toGlobal(first.frame, [sign * radius, 0, 0]));
+    if (Math.hypot(px - hx, py - hy) < 10) return true;
+  }
+  return false;
+}
+
+/**
+ * Distance along the reference path nearest a world point.
+ *
+ * Used to decide where a dragged element would land. Once the column can bend
+ * there is no coordinate to compare against, so the drop position comes from
+ * the closest point on the orbit itself.
+ */
+function nearestPathDistance(g) {
+  let best = Infinity;
+  let bestS = 0;
+  for (const e of beamline.elements) {
+    const n = e.curved ? 16 : 2;
+    for (let k = 0; k <= n; k++) {
+      const f = k / n;
+      const p = toGlobal(
+        e.frame,
+        e.pathPoint ? e.pathPoint(f) : [0, 0, f * e.length]
+      );
+      const d = Math.hypot(p[0] - g[0], p[2] - g[2]);
+      if (d < best) {
+        best = d;
+        bestS = e.zStart + f * e.length;
+      }
+    }
+  }
+  return bestS;
+}
+
+/** Where an element dropped at this path distance would be inserted. */
+function dropIndexAtS(s) {
+  for (let i = 0; i < beamline.elements.length; i++) {
+    const e = beamline.elements[i];
+    if (s < e.zStart + e.length / 2) return i;
   }
   return beamline.elements.length;
+}
+
+function select(next) {
+  selection = next;
+  renderTrack();
+  renderInspector();
+  render();
 }
 
 canvas.addEventListener('pointerdown', (e) => {
   if (!beamline) return;
   const { px, py } = pointerPos(e);
-  const z = zAtPixel(px);
 
-  // The source handle sits at the entrance and sets the beam radius.
-  if (px < 26) {
+  if (onSourceHandle(px, py)) {
     drag = { kind: 'beam' };
     canvas.setPointerCapture(e.pointerId);
-    canvas.style.cursor = 'ns-resize';
+    select({ kind: 'source' });
     return;
   }
 
-  const index = elementIndexAtZ(z);
-  if (index < 0) return;
+  const index = elementIndexAtWorld(worldAt(px, py));
+  if (index < 0) {
+    // Clicking empty space deselects, which is what collapses the panel back
+    // to the add menu and the Fly button.
+    select(null);
+    return;
+  }
 
-  selected = index;
-  renderTrack();
-  renderInspector();
-
-  drag = { kind: 'element', index, from: index, startPx: px, moved: false };
+  select({ kind: 'element', index });
+  drag = { kind: 'element', from: index, startPx: px, startPy: py, moved: false };
   canvas.setPointerCapture(e.pointerId);
   canvas.style.cursor = 'grabbing';
-  render();
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  if (!beamline) return;
+  if (!beamline || !view) return;
   const { px, py } = pointerPos(e);
 
   if (!drag) {
-    // Cursor feedback: the whole column is grabbable, the left edge resizes.
-    canvas.style.cursor = px < 26 ? 'ns-resize' : 'grab';
+    canvas.style.cursor = onSourceHandle(px, py)
+      ? 'grab'
+      : elementIndexAtWorld(worldAt(px, py)) >= 0
+        ? 'grab'
+        : 'default';
     return;
   }
 
   if (drag.kind === 'beam') {
-    // Vertical distance from the axis, converted back into millimetres.
-    const halfH = canvas.clientHeight / 2;
-    const frac = Math.abs(py - halfH) / halfH;
-    const mm = frac * mToMm(viewHalfHeightMetres());
-    const clamped = Math.max(0.1, Math.min(6, mm));
-    inputs.beamRadius.value = clamped.toFixed(1);
+    // Distance from the axis, measured in the source's own frame so the
+    // handles keep working if the first element is nudged.
+    const first = beamline.elements[0];
+    const l = toLocal(first.frame, worldAt(px, py));
+    const mm = Math.max(0.1, Math.min(6, Math.abs(mToMm(l[0]))));
+    inputs.beamRadius.value = mm.toFixed(1);
     syncOutputs();
+    renderTrack();
     markStale();
     render();
     return;
   }
 
-  if (Math.abs(px - drag.startPx) > 4) drag.moved = true;
-  drag.dropIndex = dropIndexAtZ(zAtPixel(px));
+  if (Math.hypot(px - drag.startPx, py - drag.startPy) > 5) drag.moved = true;
+  drag.dropIndex = dropIndexAtS(nearestPathDistance(worldAt(px, py)));
   render();
 });
 
@@ -322,11 +401,11 @@ function endDrag(e) {
   if (!drag) return;
   const finished = drag;
   drag = null;
-  canvas.style.cursor = 'grab';
+  canvas.style.cursor = 'default';
   try {
     canvas.releasePointerCapture(e.pointerId);
   } catch {
-    /* pointer already released */
+    /* already released */
   }
 
   if (finished.kind === 'element' && finished.moved) {
@@ -337,7 +416,7 @@ function endDrag(e) {
       const [moved] = beamline.elements.splice(finished.from, 1);
       beamline.elements.splice(target, 0, moved);
       beamline.layout();
-      selected = target;
+      selection = { kind: 'element', index: target };
       afterStructureChange();
       return;
     }
@@ -348,38 +427,6 @@ function endDrag(e) {
 
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
-
-// Dropping a new element from the toolbar onto the column.
-canvas.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-  const { px } = pointerPos(e);
-  drag = { kind: 'insert', dropIndex: dropIndexAtZ(zAtPixel(px)) };
-  render();
-});
-
-canvas.addEventListener('dragleave', () => {
-  if (drag?.kind === 'insert') {
-    drag = null;
-    render();
-  }
-});
-
-canvas.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const type = e.dataTransfer.getData('text/iontrace-element');
-  const index = drag?.dropIndex ?? beamline.elements.length;
-  drag = null;
-  if (!type || !ELEMENT_TYPES[type]) {
-    render();
-    return;
-  }
-  statusEl.classList.add('busy');
-  beamline.add(createElement(type), index);
-  statusEl.classList.remove('busy');
-  selected = index;
-  afterStructureChange();
-});
 
 /* ------------------------------------------------------------------ */
 /* track and inspector                                                 */
@@ -404,20 +451,25 @@ function summarise(e) {
       return p.rfAmplitude === 0
         ? `DC ${p.dcVoltage} V · ${p.length} mm`
         : `${p.rfAmplitude} V @ ${p.frequency} MHz · ${p.length} mm`;
+    case 'bender':
+      return `${p.bendAngle}° · R${p.bendRadius} mm · ${p.voltage.toFixed(0)} V`;
     default:
       return '';
   }
 }
 
 function renderTrack() {
-  trackEl.innerHTML = beamline.elements
+  const idx = selectedIndex();
+  const chips = beamline.elements
     .map((e, i) => {
       const last = beamline.elements.length - 1;
+      const off = Math.hypot(e.align.dx, e.align.dy);
       return `
-        <li class="chip ${i === selected ? 'sel' : ''} chip-${e.typeKey}"
-            data-index="${i}">
+        <li class="chip ${i === idx ? 'sel' : ''} chip-${e.typeKey}">
           <button class="chip-body" data-act="select" data-index="${i}">
-            <span class="chip-name">${escapeHtml(e.label)}</span>
+            <span class="chip-name">${escapeHtml(e.label)}${
+              off > 0 ? ' <span class="nudged" title="Misaligned">off</span>' : ''
+            }</span>
             <span class="chip-meta">${escapeHtml(summarise(e))}</span>
             <span class="chip-len">${mToMm(e.length).toFixed(0)} mm</span>
           </button>
@@ -433,34 +485,78 @@ function renderTrack() {
         </li>`;
     })
     .join('');
+
+  // The source is part of the column as far as selection goes.
+  trackEl.innerHTML =
+    `<li class="chip chip-source ${selection?.kind === 'source' ? 'sel' : ''}">
+       <button class="chip-body" data-act="source">
+         <span class="chip-name">Ion source</span>
+         <span class="chip-meta">${escapeHtml(summariseBeam())}</span>
+         <span class="chip-len">entrance</span>
+       </button>
+     </li>` + chips;
+
+  autoAlignBtn.hidden = !beamline.misaligned;
 }
 
-function renderAdders() {
-  // Draggable as well as clickable: drop one onto the column to place it at a
-  // chosen point, or click to append after the selection.
-  addersEl.innerHTML = Object.entries(ELEMENT_TYPES)
-    .map(
-      ([type, spec]) =>
-        `<button class="add" draggable="true" data-add="${type}"
-                 title="${escapeHtml(spec.blurb)} — drag onto the beamline to place it">
-           + ${escapeHtml(spec.label)}
-         </button>`
-    )
+function summariseBeam() {
+  return (
+    `${readNumber(inputs.mass, 100)} u · ${readNumber(inputs.charge, 1)}+ · ` +
+    `${readNumber(inputs.energy, 50)} eV`
+  );
+}
+
+function renderAddMenu() {
+  addType.innerHTML = Object.entries(ELEMENT_TYPES)
+    .map(([type, spec]) => `<option value="${type}">${escapeHtml(spec.label)}</option>`)
     .join('');
+  updateAddBlurb();
 }
 
+function updateAddBlurb() {
+  addBlurb.textContent = ELEMENT_TYPES[addType.value]?.blurb ?? '';
+}
+
+/**
+ * Show exactly the panel that belongs to the current selection.
+ *
+ * Nothing selected: the add menu and the Fly button, and nothing else. An
+ * element or the source: that object's settings. Panels are hidden rather
+ * than destroyed, so the inputs keep their values and the simulation never
+ * depends on what is on screen.
+ */
 function renderInspector() {
-  const e = beamline.elements[selected];
-  if (!e) {
-    inspectorEl.innerHTML = '<h2>Element</h2><p class="hint">Nothing selected.</p>';
+  const isSource = selection?.kind === 'source';
+  const e = beamline.elements[selectedIndex()];
+
+  addPanel.hidden = selection !== null;
+  beamPanel.hidden = !isSource;
+  inspectorEl.hidden = selection === null;
+
+  if (isSource) {
+    inspectorEl.innerHTML = `
+      <h2>Ion source ${backButton()}</h2>
+      <p class="hint">
+        Ions fill a <strong>disc</strong>, not a line. A beam launched along one
+        axis would sit on a symmetry plane of every element and stay there — the
+        motion would look flat because the source was, not because the physics
+        is.
+      </p>`;
     return;
   }
-  const spec = ELEMENT_TYPES[e.typeKey];
 
+  if (!e) {
+    inspectorEl.hidden = true;
+    return;
+  }
+
+  const spec = ELEMENT_TYPES[e.typeKey];
   const rows = spec.fields
     .map((f) => {
       const value = e.params[f.key];
-      const instant = f.rebuild ? '' : '<span class="instant" title="No re-solve needed">fast</span>';
+      const instant = f.rebuild
+        ? ''
+        : '<span class="instant" title="No re-solve needed">fast</span>';
       return `
         <label class="field">
           <span class="field-label">
@@ -476,10 +572,76 @@ function renderInspector() {
     .join('');
 
   inspectorEl.innerHTML = `
-    <h2>${escapeHtml(e.label)}</h2>
+    <h2>${escapeHtml(e.label)} ${backButton()}</h2>
     <p class="hint">${escapeHtml(spec.blurb)}</p>
     ${rows}
-    ${quadrupoleReadout(e)}`;
+    ${benderReadout(e)}
+    ${quadrupoleReadout(e)}
+    ${alignmentRows(e)}
+    <div class="row-actions">
+      <button data-act="left" data-index="${selectedIndex()}">◀ Upstream</button>
+      <button data-act="right" data-index="${selectedIndex()}">Downstream ▶</button>
+      <button data-act="remove" data-index="${selectedIndex()}">Remove</button>
+    </div>`;
+}
+
+const backButton = () =>
+  '<button class="back" data-act="deselect" title="Deselect">✕</button>';
+
+/**
+ * Misalignment controls.
+ *
+ * A real beamline is never perfectly aligned, and seeing what a fraction of a
+ * millimetre does to transmission is worth more than any amount of prose
+ * about it. Offsets move this element only - its neighbours stay on their own
+ * mounts, because that is how they are actually bolted down.
+ */
+function alignmentRows(e) {
+  const mm = (v) => (v * 1e3).toFixed(2);
+  return `
+    <details class="sub" ${
+      e.align.dx || e.align.dy ? 'open' : ''
+    }>
+      <summary>Alignment</summary>
+      <label class="field">
+        <span class="field-label">Offset x<span class="unit">mm</span></span>
+        <input type="range" data-align="dx" min="-3" max="3" step="0.05"
+               value="${mm(e.align.dx)}" />
+        <output data-alignout="dx">${mm(e.align.dx)}</output>
+      </label>
+      <label class="field">
+        <span class="field-label">Offset y<span class="unit">mm</span></span>
+        <input type="range" data-align="dy" min="-3" max="3" step="0.05"
+               value="${mm(e.align.dy)}" />
+        <output data-alignout="dy">${mm(e.align.dy)}</output>
+        <span class="field-help">
+          Moves this element only. The ones after it stay on their own mounts,
+          because each is bolted down independently.
+        </span>
+      </label>
+    </details>`;
+}
+
+/** Matched plate voltage for the current ion, beside the control that sets it. */
+function benderReadout(e) {
+  if (e.typeKey !== 'bender') return '';
+  const V = e.matchedVoltage(
+    readNumber(inputs.energy, 50),
+    Math.abs(readNumber(inputs.charge, 1)) || 1
+  );
+  const set = e.params.voltage;
+  const off = V === 0 ? 0 : Math.abs((set - V) / V);
+  return `
+    <div class="mathieu ${off < 0.05 ? 'ok' : 'bad'}">
+      <span>matched = ${V.toFixed(2)} V</span>
+      <span>set = ${set.toFixed(2)} V</span>
+      <span class="verdict">${
+        off < 0.05
+          ? 'on the central orbit'
+          : `${(off * 100).toFixed(0)} % off — the beam will be driven into a plate`
+      }</span>
+      <button class="mini" data-act="match">Use matched voltage</button>
+    </div>`;
 }
 
 /**
@@ -688,40 +850,48 @@ function setFlyLabel(label, hint) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Screen transform.
+ * Screen transform: a top view of the global x-z plane, fitted to whatever
+ * the column actually occupies.
  *
- * The axial and transverse scales are equal by default, because stretching the
- * transverse axis makes trajectory angles unreadable. A long column is a very
- * thin strip at true scale, so the zoom control exists - and whenever it is
- * not 1, the view is labelled, because an unlabelled exaggerated plot is a
- * misleading one.
+ * Once a bender is in the line there is no axis to lay along the screen, so
+ * the view frames the beamline's bounding box instead. Both axes carry the
+ * SAME scale - a bent path drawn with unequal scales would show bend angles
+ * that are not the bend angles - and the fit is recomputed whenever the
+ * column changes shape.
  */
-function makeTransform(width, height, zoom) {
-  const half = height / 2;
-  const scale = width / beamline.length;
+function makeTransform(width, height, padding = 18) {
+  const b = beamline.bounds();
+  const margin = beamline.radiusLimit * 1.4;
+  const minZ = b.minZ - margin;
+  const maxZ = b.maxZ + margin;
+  const minX = b.minX - margin;
+  const maxX = b.maxX + margin;
+
+  const spanZ = Math.max(1e-6, maxZ - minZ);
+  const spanX = Math.max(1e-6, maxX - minX);
+  const scale = Math.min((width - 2 * padding) / spanZ, (height - 2 * padding) / spanX);
+
+  // Centre whatever is left over, so a short column does not hug one corner.
+  const offX = (width - spanZ * scale) / 2;
+  const offY = (height - spanX * scale) / 2;
+
   return {
-    sx: (z) => z * scale,
-    sy: (x) => half - x * scale * zoom,
+    // Global z runs across the screen, global x down it.
+    sx: (z) => offX + (z - minZ) * scale,
+    sy: (x) => offY + (maxX - x) * scale,
+    project: (p) => [offX + (p[2] - minZ) * scale, offY + (maxX - p[0]) * scale],
+    /** Screen position back to a world point on the y = 0 plane. */
+    unproject: (px, py) => [maxX - (py - offY) / scale, 0, minZ + (px - offX) / scale],
     scale,
-    zoom,
   };
 }
 
-/** Half-height the view needs, in metres, at the given zoom. */
-function viewHalfHeight(zoom) {
-  return beamline.radiusLimit / zoom;
-}
-
-/** The same, for the zoom currently selected. */
-function viewHalfHeightMetres() {
-  return viewHalfHeight(readNumber(inputs.zoom, 1));
-}
-
-function drawElementField(e, T, width, height, zoom) {
+function drawElementField(e, T) {
   // Only elements with an axisymmetric (z, r) map have something meaningful
   // to paint in this view. A quadrupole's solve lives in the transverse
-  // plane; its slice is drawn in the cross-section inset instead.
-  if (!e.grid || !e.field || e.typeKey === 'quadrupole') return;
+  // plane and a bender's in its own bend frame; their slices belong in the
+  // cross-section inset, not here.
+  if (!e.grid || !e.field || e.typeKey === 'quadrupole' || e.typeKey === 'bender') return;
 
   const { grid, field } = e;
   const { nz, nr } = grid;
@@ -757,17 +927,43 @@ function drawElementField(e, T, width, height, zoom) {
   }
   offCtx.putImageData(img, 0, 0);
 
-  const x0 = T.sx(e.zStart);
-  const x1 = T.sx(e.zEnd);
-  const yTop = T.sy(grid.rMax);
-  const yBot = T.sy(-grid.rMax);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(off, x0, yTop, x1 - x0, yBot - yTop);
+  // Painted in the element's own frame rather than screen-aligned, so a
+  // misaligned or post-bend element carries its field map with it.
+  ctx.save();
+  withElementTransform(e, T, () => {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(
+      off,
+      grid.z0 * T.scale,
+      -grid.rMax * T.scale,
+      grid.zLength * T.scale,
+      2 * grid.rMax * T.scale
+    );
+  });
+  ctx.restore();
+}
+
+/**
+ * Run `body` with the canvas placed in an element's own frame.
+ *
+ * Inside, local axial runs along screen +x and local transverse along screen
+ * -y, at the view's scale - so an element can draw itself as though it were
+ * at the origin facing along the axis, wherever it has actually ended up.
+ */
+function withElementTransform(e, T, body) {
+  const [ox, oy] = T.project(e.frame.o);
+  const f = forwardOf(e.frame);
+  // Screen x is global z and screen y is -global x, so the forward direction
+  // appears on screen as (fz, -fx).
+  const angle = Math.atan2(-f[0], f[2]);
+  ctx.translate(ox, oy);
+  ctx.rotate(angle);
+  body();
 }
 
 function drawContours(e, T) {
-  if (!e.grid || !e.field || e.typeKey === 'quadrupole') return;
+  if (!e.grid || !e.field || e.typeKey === 'quadrupole' || e.typeKey === 'bender') return;
   const { grid, field } = e;
   const { nz, nr } = grid;
   const phi = field.phi;
@@ -782,10 +978,14 @@ function drawContours(e, T) {
   }
 
   ctx.save();
+  withElementTransform(e, T, () => {});
   ctx.strokeStyle = cssVar('--gridline');
   ctx.globalAlpha = 0.85;
   ctx.lineWidth = 1;
   ctx.beginPath();
+
+  const gx = (i) => e.grid.zAt(i) * T.scale;
+  const gy = (r) => -r * T.scale;
 
   for (const level of levels) {
     for (let j = 0; j < nr - 1; j++) {
@@ -808,8 +1008,8 @@ function drawContours(e, T) {
         for (let p = 0; p + 1 < pts.length; p += 2) {
           const [a, b] = [pts[p], pts[p + 1]];
           for (const sign of [1, -1]) {
-            ctx.moveTo(T.sx(e.zStart + grid.zAt(a[0])), T.sy(sign * grid.rAt(a[1])));
-            ctx.lineTo(T.sx(e.zStart + grid.zAt(b[0])), T.sy(sign * grid.rAt(b[1])));
+            ctx.moveTo(gx(a[0]), gy(sign * grid.rAt(a[1])));
+            ctx.lineTo(gx(b[0]), gy(sign * grid.rAt(b[1])));
           }
         }
       }
@@ -819,56 +1019,73 @@ function drawContours(e, T) {
   ctx.restore();
 }
 
+/**
+ * Electrodes, as polygons in global space.
+ *
+ * Filled as paths rather than axis-aligned rectangles, because once the
+ * column can bend an element's metal is no longer parallel to anything.
+ */
 function drawElectrodes(T) {
   ctx.save();
-  for (const r of beamline.outline()) {
-    ctx.fillStyle = r.ghost
+  for (const shape of beamline.outline()) {
+    ctx.fillStyle = shape.ghost
       ? cssVar('--electrode-ghost')
-      : r.wall
+      : shape.wall
         ? cssVar('--axis')
         : cssVar('--electrode');
-    ctx.globalAlpha = r.ghost ? 0.35 : r.wall ? 0.5 : 1;
-    for (const sign of [1, -1]) {
-      const yA = T.sy(sign * r.r0);
-      const yB = T.sy(sign * r.r1);
-      ctx.fillRect(
-        T.sx(r.z0),
-        Math.min(yA, yB),
-        Math.max(1, T.sx(r.z1) - T.sx(r.z0)),
-        Math.abs(yB - yA)
-      );
-    }
+    ctx.globalAlpha = shape.ghost ? 0.35 : shape.wall ? 0.5 : 1;
+    ctx.beginPath();
+    shape.corners.forEach((c, i) => {
+      const [px, py] = T.project(c);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    ctx.fill();
   }
   ctx.restore();
 }
 
-function drawBoundaries(T, height) {
-  // Where one element ends and the next begins. Worth showing, because each
-  // was solved as a separate problem and the joins are where that
-  // approximation lives.
-  ctx.save();
-  ctx.strokeStyle = cssVar('--gridline');
-  ctx.lineWidth = 1;
-  ctx.setLineDash([2, 3]);
-  ctx.beginPath();
-  for (const e of beamline.elements) {
-    const x = T.sx(e.zStart);
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-  }
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawAxis(T, width) {
+/** The reference orbit, which is a curve as soon as a bender is in the line. */
+function drawReferencePath(T) {
+  const pts = beamline.centreLine();
+  if (pts.length < 2) return;
   ctx.save();
   ctx.strokeStyle = cssVar('--axis');
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(0, T.sy(0));
-  ctx.lineTo(width, T.sy(0));
+  pts.forEach((p, i) => {
+    const [px, py] = T.project(p);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
   ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Where one element ends and the next begins.
+ *
+ * Worth showing, because each was solved as a separate problem and the joins
+ * are where that approximation lives. Drawn as a short bar across the
+ * element's entrance face rather than a full-height line, since the faces are
+ * no longer parallel once the column bends.
+ */
+function drawBoundaries(T) {
+  ctx.save();
+  ctx.strokeStyle = cssVar('--gridline');
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 3]);
+  for (const e of beamline.elements) {
+    const r = e.outerRadius * 1.1;
+    const a = T.project(toGlobal(e.frame, [r, 0, 0]));
+    const b = T.project(toGlobal(e.frame, [-r, 0, 0]));
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -889,8 +1106,9 @@ function drawTrajectories(T) {
       ctx.beginPath();
       for (let n = 0; n < traj.points.length; n++) {
         const p = traj.points[n];
-        if (n === 0) ctx.moveTo(T.sx(p.z), T.sy(p.x));
-        else ctx.lineTo(T.sx(p.z), T.sy(p.x));
+        const [px, py] = T.project([p.x, p.y ?? 0, p.z]);
+        if (n === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
       }
       ctx.stroke();
     }
@@ -905,8 +1123,9 @@ function drawTrajectories(T) {
     for (const traj of trajectories) {
       if (!traj.active) continue;
       const p = traj.state;
+      const [px, py] = T.project([p.x, p.y ?? 0, p.z]);
       ctx.beginPath();
-      ctx.arc(T.sx(p.z), T.sy(p.x), 3.5, 0, Math.PI * 2);
+      ctx.arc(px, py, 3.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
@@ -919,97 +1138,150 @@ function drawTrajectories(T) {
   for (const traj of trajectories) {
     if (traj.stop !== 'electrode' || traj.active) continue;
     const p = traj.points[traj.points.length - 1];
+    const [px, py] = T.project([p.x, p.y ?? 0, p.z]);
     ctx.beginPath();
-    ctx.arc(T.sx(p.z), T.sy(p.x), 3, 0, Math.PI * 2);
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
 }
 
-/** Band behind the selected element, so the inspector's subject is obvious. */
-function drawSelection(T, height) {
-  const e = beamline.elements[selected];
+/** Outline around the selected element, so the inspector's subject is obvious. */
+function drawSelection(T) {
+  const e = beamline.elements[selectedIndex()];
   if (!e) return;
+  const r = e.outerRadius * 1.12;
+  const corners = [
+    [r, 0, 0],
+    [-r, 0, 0],
+    [-r, 0, e.curved ? 0 : e.length],
+    [r, 0, e.curved ? 0 : e.length],
+  ];
+
   ctx.save();
-  ctx.fillStyle = cssVar('--accent');
-  ctx.globalAlpha = drag?.kind === 'element' && drag.from === selected ? 0.22 : 0.09;
-  ctx.fillRect(T.sx(e.zStart), 0, T.sx(e.zEnd) - T.sx(e.zStart), height);
   ctx.strokeStyle = cssVar('--accent');
-  ctx.globalAlpha = 0.5;
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(T.sx(e.zStart) + 0.5, 0.5, T.sx(e.zEnd) - T.sx(e.zStart) - 1, height - 1);
+  ctx.fillStyle = cssVar('--accent');
+  ctx.lineWidth = 2;
+
+  if (e.curved) {
+    // A bent element has no rectangle to outline, so trace its own orbit.
+    ctx.globalAlpha = 0.65;
+    ctx.beginPath();
+    for (let k = 0; k <= 24; k++) {
+      const [px, py] = T.project(toGlobal(e.frame, e.pathPoint(k / 24)));
+      if (k === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.lineWidth = Math.max(3, e.bore * 2 * T.scale);
+    ctx.stroke();
+  } else {
+    ctx.globalAlpha = drag?.kind === 'element' && drag.from === selectedIndex() ? 0.22 : 0.1;
+    ctx.beginPath();
+    corners.forEach((c, i) => {
+      const [px, py] = T.project(toGlobal(e.frame, c));
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 0.55;
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
 /**
- * The ion source: a draggable handle at the entrance showing the beam radius.
+ * The ion source: draggable handles at the entrance showing the beam radius.
  *
- * Dragging it vertically sets that radius, which is the one beam property with
- * an obvious spatial meaning in this view.
+ * Placed in the first element's frame, so it follows the column's entrance
+ * wherever that is.
  */
-function drawSource(T, height, halfH) {
-  const radius = mmToM(readNumber(inputs.beamRadius, 1.5));
-  const y = (radius / halfH) * (height / 2);
-  const c = height / 2;
+function drawSource(T) {
+  const first = beamline.elements[0];
+  if (!first) return;
+  const radius = mmToM(readNumber(inputs.beamRadius, 1));
 
   ctx.save();
   ctx.strokeStyle = cssVar('--traj');
   ctx.fillStyle = cssVar('--traj');
   ctx.lineWidth = 2;
 
-  // A bracket spanning the beam at the entrance plane.
+  const at = (tx, tz) => T.project(toGlobal(first.frame, [tx, 0, tz]));
+  const lead = Math.max(mmToM(2), radius * 0.8);
+
   ctx.beginPath();
-  ctx.moveTo(10, c - y);
-  ctx.lineTo(4, c - y);
-  ctx.lineTo(4, c + y);
-  ctx.lineTo(10, c + y);
+  let p = at(radius, lead);
+  ctx.moveTo(p[0], p[1]);
+  p = at(radius, 0);
+  ctx.lineTo(p[0], p[1]);
+  p = at(-radius, 0);
+  ctx.lineTo(p[0], p[1]);
+  p = at(-radius, lead);
+  ctx.lineTo(p[0], p[1]);
   ctx.stroke();
 
   for (const sign of [-1, 1]) {
+    const [hx, hy] = at(sign * radius, 0);
     ctx.beginPath();
-    ctx.arc(4, c + sign * y, 4, 0, Math.PI * 2);
+    ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
 }
 
 /** Where a dragged or dropped element would land. */
-function drawDropIndicator(T, height) {
+function drawDropIndicator(T) {
   if (!drag || drag.dropIndex == null) return;
   if (drag.kind === 'element' && !drag.moved) return;
 
   const i = drag.dropIndex;
-  const z =
+  const at =
     i >= beamline.elements.length
-      ? beamline.length
-      : beamline.elements[i].zStart;
+      ? { frame: beamline.exitFrame, r: beamline.radiusLimit }
+      : { frame: beamline.elements[i].frame, r: beamline.elements[i].outerRadius };
+
+  const a = T.project(toGlobal(at.frame, [at.r * 1.4, 0, 0]));
+  const b = T.project(toGlobal(at.frame, [-at.r * 1.4, 0, 0]));
 
   ctx.save();
   ctx.strokeStyle = cssVar('--accent');
   ctx.lineWidth = 3;
   ctx.setLineDash([6, 4]);
   ctx.beginPath();
-  ctx.moveTo(T.sx(z), 0);
-  ctx.lineTo(T.sx(z), height);
+  ctx.moveTo(a[0], a[1]);
+  ctx.lineTo(b[0], b[1]);
   ctx.stroke();
   ctx.restore();
 }
 
+/** A scale bar, since the view now fits itself rather than using a fixed span. */
 function drawScale(T, width, height) {
+  // Choose a round length that comes out a sensible size on screen.
+  const targetPx = width * 0.18;
+  const targetMm = mToMm(targetPx / T.scale);
+  const nice = [1, 2, 5, 10, 20, 50, 100, 200, 500];
+  const barMm = nice.reduce((a, b) => (Math.abs(b - targetMm) < Math.abs(a - targetMm) ? b : a));
+  const barPx = mmToM(barMm) * T.scale;
+
   ctx.save();
   ctx.fillStyle = cssVar('--text-muted');
+  ctx.strokeStyle = cssVar('--text-muted');
+  ctx.lineWidth = 1;
   ctx.font = '11px ui-monospace, monospace';
   ctx.textBaseline = 'bottom';
-  const totalMm = mToMm(beamline.length);
-  const stepMm = totalMm > 400 ? 100 : totalMm > 200 ? 50 : totalMm > 80 ? 20 : 10;
-  for (let zmm = 0; zmm <= totalMm + 1e-9; zmm += stepMm) {
-    const x = T.sx(mmToM(zmm));
-    ctx.fillRect(x, height - 10, 1, 5);
-    ctx.textAlign = zmm === 0 ? 'left' : 'center';
-    ctx.fillText(`${zmm.toFixed(0)}`, x, height - 12);
-  }
-  ctx.textAlign = 'right';
-  ctx.fillText('z / mm', width - 6, height - 12);
+  ctx.textAlign = 'center';
+
+  const y = height - 14;
+  const x0 = 14;
+  ctx.beginPath();
+  ctx.moveTo(x0, y);
+  ctx.lineTo(x0 + barPx, y);
+  ctx.moveTo(x0, y - 4);
+  ctx.lineTo(x0, y + 4);
+  ctx.moveTo(x0 + barPx, y - 4);
+  ctx.lineTo(x0 + barPx, y + 4);
+  ctx.stroke();
+  ctx.fillText(`${barMm} mm`, x0 + barPx / 2, y - 5);
   ctx.restore();
 }
 
@@ -1091,11 +1363,14 @@ function drawCrossSection() {
 function render() {
   if (!beamline || beamline.elements.length === 0) return;
 
-  const zoom = readNumber(inputs.zoom, 1);
   const cssWidth = canvas.parentElement.clientWidth;
-  const halfH = viewHalfHeight(zoom);
-  const aspect = beamline.length / (2 * beamline.radiusLimit) * zoom;
-  const cssHeight = Math.max(170, Math.min(480, Math.round(cssWidth / aspect)));
+  // The view fits the column's own bounding box, so a bent line gets a taller
+  // frame and a straight one a shallow strip.
+  const b = beamline.bounds();
+  const margin = beamline.radiusLimit * 1.4;
+  const aspect =
+    (b.maxZ - b.minZ + 2 * margin) / Math.max(1e-9, b.maxX - b.minX + 2 * margin);
+  const cssHeight = Math.max(200, Math.min(560, Math.round(cssWidth / aspect)));
 
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssWidth * dpr);
@@ -1107,34 +1382,33 @@ function render() {
   ctx.fillStyle = cssVar('--surface-1');
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  // The transverse scale that makes the visible half-height match the view.
-  const T = {
-    sx: (z) => (z / beamline.length) * cssWidth,
-    sy: (x) => cssHeight / 2 - (x / halfH) * (cssHeight / 2),
-  };
+  const T = makeTransform(cssWidth, cssHeight);
+  view = T;
 
   if (inputs.showField.checked) {
-    for (const e of beamline.elements) drawElementField(e, T, cssWidth, cssHeight, zoom);
+    for (const e of beamline.elements) drawElementField(e, T);
   }
   if (inputs.showContours.checked) {
     for (const e of beamline.elements) drawContours(e, T);
   }
-  drawBoundaries(T, cssHeight);
-  drawAxis(T, cssWidth);
+  drawBoundaries(T);
+  drawReferencePath(T);
   drawElectrodes(T);
-  drawSelection(T, cssHeight);
+  drawSelection(T);
   drawTrajectories(T);
-  drawSource(T, cssHeight, halfH);
-  drawDropIndicator(T, cssHeight);
+  drawSource(T);
+  drawDropIndicator(T);
   drawScale(T, cssWidth, cssHeight);
   drawCrossSection();
 
-  // An exaggerated transverse axis is legitimate but must never be silent.
-  const exaggerated = Math.abs(zoom - 1) > 1e-9;
-  scaleNote.hidden = !exaggerated;
-  if (exaggerated) {
-    scaleNote.textContent = `Transverse scale exaggerated ${zoom.toFixed(1)}× — angles are not true`;
-  }
+  // Both screen axes carry the same scale, so angles on screen are true
+  // angles. Worth saying, because ion-optics figures usually stretch one axis
+  // and this one does not.
+  scaleNote.hidden = false;
+  scaleNote.textContent = beamline.misaligned
+    ? 'True scale · elements are misaligned'
+    : 'True scale — 1:1 in both axes';
+  scaleNote.classList.toggle('warn', beamline.misaligned);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1279,57 +1553,106 @@ for (const [id, input] of Object.entries(inputs)) {
   input.addEventListener(event, () => {
     syncOutputs();
     if (!displayOnly) markStale();
-    // Mathieu numbers depend on the ion, so the inspector follows the beam.
-    if (id === 'mass' || id === 'charge') renderInspector();
+    // Mathieu numbers and the bender's matched voltage depend on the ion, so
+    // the inspector follows the beam.
+    if (id === 'mass' || id === 'charge' || id === 'energy') {
+      renderTrack();
+      renderInspector();
+    }
     render();
     if (!displayOnly) drawReadout();
   });
 }
 
-// Track: select, reorder, remove.
-trackEl.addEventListener('click', (e) => {
-  const button = e.target.closest('button[data-act]');
-  if (!button) return;
-  const index = Number(button.dataset.index);
-  switch (button.dataset.act) {
+// Escape deselects, which collapses the panel back to the add menu.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && selection !== null) select(null);
+});
+
+/** Actions that can appear in either the track or the inspector. */
+function handleAction(act, index) {
+  switch (act) {
     case 'select':
-      selected = index;
-      renderTrack();
-      renderInspector();
-      break;
+      select({ kind: 'element', index });
+      return true;
+    case 'source':
+      select({ kind: 'source' });
+      return true;
+    case 'deselect':
+      select(null);
+      return true;
     case 'left':
       moveElement(index, -1);
-      break;
+      return true;
     case 'right':
       moveElement(index, 1);
-      break;
+      return true;
     case 'remove':
       removeElement(index);
-      break;
+      return true;
+    case 'match': {
+      // Put the bender on the matched voltage for the current ion.
+      const e = beamline.elements[selectedIndex()];
+      if (e?.typeKey !== 'bender') return true;
+      const V = e.matchedVoltage(
+        readNumber(inputs.energy, 50),
+        Math.abs(readNumber(inputs.charge, 1)) || 1
+      );
+      setParam(selectedIndex(), 'voltage', Math.round(V * 100) / 100);
+      return true;
+    }
+    default:
+      return false;
   }
+}
+
+trackEl.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-act]');
+  if (button) handleAction(button.dataset.act, Number(button.dataset.index));
 });
 
-addersEl.addEventListener('click', (e) => {
-  const button = e.target.closest('button[data-add]');
-  if (button) addElement(button.dataset.add);
+inspectorEl.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-act]');
+  if (button) handleAction(button.dataset.act, Number(button.dataset.index));
 });
 
-addersEl.addEventListener('dragstart', (e) => {
-  const button = e.target.closest('button[data-add]');
-  if (!button) return;
-  e.dataTransfer.setData('text/iontrace-element', button.dataset.add);
-  e.dataTransfer.effectAllowed = 'copy';
+addType.addEventListener('change', updateAddBlurb);
+addGo.addEventListener('click', () => addElement(addType.value));
+
+autoAlignBtn.addEventListener('click', () => {
+  beamline.autoAlign();
+  afterStructureChange();
 });
 
 // Inspector sliders edit the selected element.
 inspectorEl.addEventListener('input', (e) => {
-  const input = e.target.closest('input[data-param]');
-  if (!input) return;
-  const key = input.dataset.param;
-  const value = parseFloat(input.value);
-  const out = inspectorEl.querySelector(`[data-out="${key}"]`);
-  if (out) out.textContent = value;
-  setParam(selected, key, value);
+  const param = e.target.closest('input[data-param]');
+  if (param) {
+    const key = param.dataset.param;
+    const value = parseFloat(param.value);
+    const out = inspectorEl.querySelector(`[data-out="${key}"]`);
+    if (out) out.textContent = value;
+    setParam(selectedIndex(), key, value);
+    return;
+  }
+
+  const align = e.target.closest('input[data-align]');
+  if (align) {
+    const key = align.dataset.align;
+    const mm = parseFloat(align.value);
+    const out = inspectorEl.querySelector(`[data-alignout="${key}"]`);
+    if (out) out.textContent = mm.toFixed(2);
+    const element = beamline.elements[selectedIndex()];
+    if (!element) return;
+    // Misalignment costs no re-solve: the element is unchanged, only where it
+    // sits. That is the whole reason it can be dragged smoothly.
+    element.align = { ...element.align, [key]: mmToM(mm) };
+    beamline.layout();
+    markStale();
+    renderTrack();
+    render();
+    drawReadout();
+  }
 });
 
 flyButton.addEventListener('click', fly);
@@ -1357,10 +1680,10 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ren
 statusEl.classList.add('busy');
 beamline = defaultBeamline();
 statusEl.classList.remove('busy');
-selected = 1;
+selection = null;
 
 syncOutputs();
-renderAdders();
+renderAddMenu();
 renderTrack();
 renderInspector();
 render();

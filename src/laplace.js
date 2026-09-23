@@ -97,15 +97,19 @@ export function relax(grid, phi, opts = {}) {
   }
 
   const cylindrical = symmetry === CYLINDRICAL;
+  // The singular on-axis stencil applies only when the grid actually reaches
+  // r = 0. A cylindrical band that starts further out - a bender's, which
+  // spans a narrow range about its bend radius - has an ordinary wall at
+  // j = 0, and applying the axis limit there would be solving a different
+  // problem entirely.
+  const hasAxis = cylindrical && grid.r0 === 0;
   let change = Infinity;
   let sweeps = 0;
 
   while (sweeps < maxSweeps && change > tolerance) {
     change = 0;
 
-    // The axis row is only a free row in cylindrical mode; in planar mode the
-    // enclosure has already pinned it, so the generic loop below skips it.
-    if (cylindrical) {
+    if (hasAxis) {
       for (let i = 1; i < nz - 1; i++) {
         const k = i; // j = 0, so index == i
         if (electrodeId[k] !== NO_ELECTRODE) continue;
@@ -126,8 +130,13 @@ export function relax(grid, phi, opts = {}) {
       // Radial weights are constant along a row, so hoist them out of the
       // inner loop. In planar mode both are exactly 1 and the stencil
       // collapses to the standard five-point form.
-      const wUp = cylindrical ? 1 + 1 / (2 * j) : 1;
-      const wDown = cylindrical ? 1 - 1 / (2 * j) : 1;
+      //
+      // The weights depend on the PHYSICAL radius, not the row index, so a
+      // band that starts away from the axis gets 1 +/- h/(2r) with r = r0 + jh
+      // rather than 1 +/- 1/(2j). They coincide only when r0 is zero.
+      const r = grid.rAt(j);
+      const wUp = cylindrical ? 1 + grid.step / (2 * r) : 1;
+      const wDown = cylindrical ? 1 - grid.step / (2 * r) : 1;
 
       for (let i = 1; i < nz - 1; i++) {
         const k = row + i;
@@ -168,9 +177,10 @@ export function relax(grid, phi, opts = {}) {
 export function maxResidual(grid, phi) {
   const { nz, nr, symmetry, electrodeId } = grid;
   const cylindrical = symmetry === CYLINDRICAL;
+  const hasAxis = cylindrical && grid.r0 === 0;
   let worst = 0;
 
-  if (cylindrical) {
+  if (hasAxis) {
     for (let i = 1; i < nz - 1; i++) {
       if (electrodeId[i] !== NO_ELECTRODE) continue;
       // 2 d2phi/dr2 + d2phi/dz2, mirrored across the axis.
@@ -182,8 +192,9 @@ export function maxResidual(grid, phi) {
 
   for (let j = 1; j < nr - 1; j++) {
     const row = j * nz;
-    const wUp = cylindrical ? 1 + 1 / (2 * j) : 1;
-    const wDown = cylindrical ? 1 - 1 / (2 * j) : 1;
+    const r = grid.rAt(j);
+    const wUp = cylindrical ? 1 + grid.step / (2 * r) : 1;
+    const wDown = cylindrical ? 1 - grid.step / (2 * r) : 1;
     for (let i = 1; i < nz - 1; i++) {
       const k = row + i;
       if (electrodeId[k] !== NO_ELECTRODE) continue;

@@ -1,45 +1,47 @@
 /**
- * Beamline - an ordered column of elements that ions fly through.
+ * Beamline - a chain of elements that ions fly through.
  *
- * Each element carries its own local field solve and its own local
- * coordinates. The beamline lays them end to end, and at any point in space it
- * finds the element containing that z and asks it, translating the coordinate.
- * This is what makes the elements composable: adding a new kind of optic means
- * describing its metal and its field, not touching anything here.
+ * The column is a PATH, not a line. Each element carries a frame saying where
+ * it sits and which way it faces, and the chain is built by starting the next
+ * element wherever the last one left the beam. That is what makes elements
+ * snap together, and it is also what lets a bender exist: a bender's exit
+ * faces a different direction from its entrance, so everything after it turns
+ * with it, without any element having to know it has been bent.
+ *
+ * A field query finds the element containing the point, transforms the point
+ * into that element's local coordinates, asks it, and rotates the answer back.
+ * Elements therefore never know where they are - which is precisely why they
+ * are interchangeable.
+ *
+ * Misalignment
+ * ------------
+ * Each element may carry a small offset and tilt. These are applied to that
+ * element's own placement and deliberately NOT propagated: a misaligned lens
+ * does not move the ones downstream of it, because each is mounted
+ * independently. Propagating them would model a bent optical bench rather
+ * than a misaligned element.
  *
  * The modelling assumption, stated plainly
  * ----------------------------------------
  * **Elements are solved in isolation, not as one system.** Each is a separate
  * Dirichlet problem with grounded end faces, so its fringe field is confined
- * inside its own footprint and stops abruptly at the boundary. The true
- * solution for the whole column would let neighbouring electrodes see each
- * other.
- *
- * How good is that? Measured, by building the same column both ways and
- * comparing the on-axis potential:
- *
- *   - The grounded end faces BETWEEN elements cost almost nothing, provided
- *     each element's own margins are adequate: splitting a lens into
- *     drift + lens + drift rather than one wider lens changed the on-axis
- *     potential by 0.004 V out of 300 V.
- *   - What actually costs accuracy is each element's own margin clipping its
- *     OWN fringe field. The error decays roughly exponentially in
- *     margin / bore: about 19 % at 0.8 bore radii, 12 % at 1.6, 6.6 % at 2.4
- *     and 3.5 % at 3.2.
- *
- * So the rule is not "leave a drift between elements" - it is "give each
- * element about three bore radii of its own margin". Elements warn when they
- * do not have it. A drift between two live elements still helps, because a
- * real grounded drift tube genuinely shields, which is exactly what the
- * isolation approximation is pretending.
- *
- * The alternative, a single solve over the whole line, is what a 3D code
- * does; it is far more expensive and is not what this build does.
- *
- * Solving the whole column at once would also destroy the property that makes
- * this interactive: each element re-solves only when ITS geometry changes, and
- * voltages never re-solve at all.
+ * inside its own footprint. Measured against a single solve of a whole column:
+ * the grounded faces BETWEEN elements cost almost nothing (0.004 V out of
+ * 300), but each element's own margin clipping its OWN fringe costs about
+ * 19 % at 0.8 bore radii, 12 % at 1.6, 6.6 % at 2.4 and 3.5 % at 3.2. So the
+ * rule is not "leave a drift between elements" - it is "give each element
+ * about three bore radii of its own margin". Elements warn when they do not.
  */
+
+import {
+  identityFrame,
+  compose,
+  toLocal,
+  toGlobal,
+  vectorToGlobal,
+  misalignment,
+  forwardOf,
+} from './frames.js';
 
 export class Beamline {
   constructor(elements = []) {
@@ -47,21 +49,19 @@ export class Beamline {
     for (const e of elements) this.add(e);
   }
 
-  /** Append an element and re-lay the column. */
   add(element, index = this.elements.length) {
+    element.align ??= { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
     this.elements.splice(index, 0, element);
     this.layout();
     return element;
   }
 
-  /** Remove the element at `index`. */
   remove(index) {
     const [removed] = this.elements.splice(index, 1);
     this.layout();
     return removed;
   }
 
-  /** Move an element one place along the column. */
   move(index, delta) {
     const target = index + delta;
     if (target < 0 || target >= this.elements.length) return false;
@@ -72,32 +72,72 @@ export class Beamline {
   }
 
   replace(index, element) {
+    element.align ??= this.elements[index]?.align ?? {
+      dx: 0, dy: 0, tiltX: 0, tiltY: 0,
+    };
     this.elements[index] = element;
     this.layout();
     return element;
   }
 
-  /** Assign each element its axial start, in metres. */
+  /**
+   * Walk the chain, giving every element its place.
+   *
+   * `nominalFrame` is where the element's mount puts it; `frame` is where it
+   * actually is, once its own misalignment is applied. The chain continues
+   * from the NOMINAL exit, so one element's error does not displace the rest
+   * of the column.
+   */
   layout() {
-    let z = 0;
+    let cursor = identityFrame();
+    let path = 0;
+
     for (const e of this.elements) {
-      e.zStart = z;
-      e.zEnd = z + e.length;
-      z = e.zEnd;
+      e.nominalFrame = cursor;
+      e.frame = compose(cursor, misalignment(e.align));
+      // Distance along the REFERENCE PATH, not along z. For a straight column
+      // the two coincide, which is why the name survives; once a bender is in
+      // the line, z stops being meaningful and arc length is what orders the
+      // elements.
+      e.zStart = path;
+      path += e.length;
+      e.zEnd = path;
+      cursor = compose(cursor, e.exitTransform ?? straightExit(e.length));
     }
-    this.length = z;
+
+    this.exitFrame = cursor;
+    this.length = path;
     return this;
   }
 
-  /** The element containing this z, or null beyond the ends. */
-  elementAt(z) {
+  /**
+   * The element containing a global point, with the point already expressed
+   * in that element's local coordinates.
+   *
+   * O(N) rather than a sorted lookup, because once the path can bend and
+   * elements can be nudged off their mounts there is no single coordinate to
+   * sort on. For the handful of elements a column has, this is nothing.
+   */
+  /**
+   * The element at a given distance along the reference path.
+   *
+   * Ordering by arc length rather than by z, because z stops being monotonic
+   * as soon as the column bends back on itself.
+   */
+  elementAt(s) {
     for (const e of this.elements) {
-      if (z >= e.zStart && z < e.zEnd) return e;
+      if (s >= e.zStart && s < e.zEnd) return e;
     }
-    // The very end of the column belongs to its last element rather than to
-    // nothing, so an ion exactly on the exit plane is still inside the optic.
     const last = this.elements[this.elements.length - 1];
-    if (last && z === last.zEnd) return last;
+    if (last && s === last.zEnd) return last;
+    return null;
+  }
+
+  locate(g) {
+    for (const e of this.elements) {
+      const l = toLocal(e.frame, g);
+      if (e.contains(l[0], l[1], l[2])) return { element: e, local: l };
+    }
     return null;
   }
 
@@ -106,39 +146,70 @@ export class Beamline {
   /* ---------------------------------------------------------------- */
 
   fieldAt3D(x, y, z, t) {
-    const e = this.elementAt(z);
-    if (!e) return { Ex: 0, Ey: 0, Ez: 0 };
-    return e.fieldAt(x, y, z - e.zStart, t);
+    const hit = this.locate([x, y, z]);
+    if (!hit) return { Ex: 0, Ey: 0, Ez: 0 };
+    const { element, local } = hit;
+    const e = element.fieldAt(local[0], local[1], local[2], t);
+    const g = vectorToGlobal(element.frame, [e.Ex, e.Ey, e.Ez]);
+    return { Ex: g[0], Ey: g[1], Ez: g[2] };
   }
 
   potentialAt3D(x, y, z, t) {
-    const e = this.elementAt(z);
-    if (!e) return 0;
-    return e.potentialAt(x, y, z - e.zStart, t);
+    const hit = this.locate([x, y, z]);
+    if (!hit) return 0;
+    return hit.element.potentialAt(hit.local[0], hit.local[1], hit.local[2], t);
   }
 
   strikes(x, y, z) {
-    const e = this.elementAt(z);
-    if (!e) return false;
-    return e.strikes(x, y, z - e.zStart);
+    const hit = this.locate([x, y, z]);
+    if (!hit) return false;
+    return hit.element.strikes(hit.local[0], hit.local[1], hit.local[2]);
   }
 
-  get zRange() {
-    return [0, this.length];
+  /**
+   * Where an ion is relative to the column: inside it, before it, past it, or
+   * wandered out of it altogether.
+   *
+   * With a straight contiguous line this was just a z comparison. Once the
+   * path bends and elements can be misaligned, "past the end" means past the
+   * exit PLANE - on the far side of the last element's exit face - and there
+   * is a fourth possibility that did not exist before: an ion can leave
+   * through a gap opened up by a misalignment without ever reaching either
+   * end. Calling that "exited" would quietly count a lost ion as transmitted.
+   */
+  classify(x, y, z) {
+    if (this.locate([x, y, z])) return 'inside';
+    const g = [x, y, z];
+
+    const last = this.elements[this.elements.length - 1];
+    if (last) {
+      const exitO = toGlobal(last.frame, [0, 0, last.length]);
+      const f = forwardOf(last.frame);
+      const ahead =
+        (g[0] - exitO[0]) * f[0] +
+        (g[1] - exitO[1]) * f[1] +
+        (g[2] - exitO[2]) * f[2];
+      if (ahead >= 0) return 'exited';
+    }
+
+    const first = this.elements[0];
+    if (first) {
+      const entryO = first.frame.o;
+      const f = forwardOf(first.frame);
+      const behind =
+        (g[0] - entryO[0]) * f[0] +
+        (g[1] - entryO[1]) * f[1] +
+        (g[2] - entryO[2]) * f[2];
+      if (behind <= 0) return 'reflected';
+    }
+
+    return 'lost';
   }
 
-  /** Widest the column gets, for framing the view. */
   get radiusLimit() {
     return Math.max(1e-3, ...this.elements.map((e) => e.outerRadius));
   }
 
-  /**
-   * Finest spatial detail anywhere in the column.
-   *
-   * The whole line is stepped at the pace of its most demanding element,
-   * because an ion that resolves a coarse drift well is not thereby resolving
-   * a fine quadrupole.
-   */
   get lengthScale() {
     const scales = this.elements
       .map((e) => e.lengthScale)
@@ -146,7 +217,6 @@ export class Beamline {
     return scales.length ? Math.min(...scales) : 1e-3;
   }
 
-  /** Shortest period of any time-dependent element, or null if all static. */
   get shortestPeriod() {
     const periods = this.elements
       .map((e) => e.shortestPeriod)
@@ -158,18 +228,12 @@ export class Beamline {
   /* diagnostics                                                      */
   /* ---------------------------------------------------------------- */
 
-  /**
-   * Problems with the column as assembled, as opposed to with any one
-   * element.
-   */
   get warnings() {
     const out = [];
     for (const e of this.elements) {
       for (const w of e.warnings ?? []) out.push(`${e.label}: ${w}`);
     }
 
-    // Two live elements with no grounded drift between them: each was solved
-    // as though the other were not there.
     for (let i = 1; i < this.elements.length; i++) {
       const a = this.elements[i - 1];
       const b = this.elements[i];
@@ -177,13 +241,10 @@ export class Beamline {
       out.push(
         `${a.label} and ${b.label} are adjacent with no drift between them. ` +
           'Each was solved in isolation with grounded end faces, so the field ' +
-          'at their junction is not a true solution for the pair. Insert a ' +
-          'drift of at least one bore radius.'
+          'at their junction is not a true solution for the pair.'
       );
     }
 
-    // A bore that steps outward then back in is a real aperture, but a bore
-    // that steps DOWN abruptly will scrape the beam.
     for (let i = 1; i < this.elements.length; i++) {
       const a = this.elements[i - 1];
       const b = this.elements[i];
@@ -195,25 +256,125 @@ export class Beamline {
       }
     }
 
+    // A misalignment big enough to open a gap the beam can escape through.
+    for (const e of this.elements) {
+      const off = Math.hypot(e.align.dx, e.align.dy);
+      if (off > e.bore * 0.5) {
+        out.push(
+          `${e.label} is offset by ${(off * 1e3).toFixed(2)} mm, more than half ` +
+            'its own bore. The beam will clip its aperture.'
+        );
+      }
+    }
+
     return out;
   }
 
-  /** Flat list of drawable electrode rectangles in beamline coordinates. */
+  /** Reset every element onto its nominal mount. */
+  autoAlign() {
+    for (const e of this.elements) {
+      e.align = { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
+    }
+    return this.layout();
+  }
+
+  /** True if anything is off its nominal placement. */
+  get misaligned() {
+    return this.elements.some(
+      (e) =>
+        e.align.dx !== 0 ||
+        e.align.dy !== 0 ||
+        e.align.tiltX !== 0 ||
+        e.align.tiltY !== 0
+    );
+  }
+
+  /**
+   * Drawable outline in GLOBAL coordinates.
+   *
+   * Each element's rectangles are expressed in its own frame as
+   * (along, transverse) pairs; here they become quadrilaterals in space, so a
+   * rotated or bent element draws correctly without the renderer knowing
+   * anything about bends.
+   */
   outline() {
     const out = [];
     for (const e of this.elements) {
-      for (const r of e.rects ?? []) {
+      for (const shape of shapesOf(e)) {
         out.push({
-          z0: e.zStart + r.z0,
-          z1: e.zStart + r.z1,
-          r0: r.r0,
-          r1: r.r1,
-          ghost: !!r.ghost,
-          wall: !!r.wall,
+          corners: shape.points.map((pt) => toGlobal(e.frame, [pt[0], 0, pt[1]])),
+          ghost: !!shape.ghost,
+          wall: !!shape.wall,
           element: e,
         });
       }
     }
     return out;
   }
+
+  /** The reference path through the column, as points in global space. */
+  centreLine(perElement = 12) {
+    const pts = [];
+    for (const e of this.elements) {
+      const n = e.curved ? perElement : 1;
+      for (let k = 0; k <= n; k++) {
+        pts.push(toGlobal(e.frame, e.pathPoint ? e.pathPoint(k / n) : [0, 0, (k / n) * e.length]));
+      }
+    }
+    return pts;
+  }
+
+  /** Axis-aligned bounds of everything drawn, in the global x-z plane. */
+  bounds() {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    const see = (p) => {
+      minX = Math.min(minX, p[0]);
+      maxX = Math.max(maxX, p[0]);
+      minZ = Math.min(minZ, p[2]);
+      maxZ = Math.max(maxZ, p[2]);
+    };
+    for (const r of this.outline()) for (const c of r.corners) see(c);
+    for (const p of this.centreLine()) see(p);
+    if (!Number.isFinite(minX)) return { minX: -0.01, maxX: 0.01, minZ: 0, maxZ: 0.1 };
+    return { minX, maxX, minZ, maxZ };
+  }
+}
+
+/** The exit placement of a straight element of the given length. */
+export function straightExit(length) {
+  return { o: [0, 0, length], m: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+}
+
+/**
+ * An element's drawable shapes, as polygons in its own (transverse, axial)
+ * plane.
+ *
+ * Most elements are axisymmetric and describe themselves as a few boxes, which
+ * are mirrored about the axis to give the familiar two-sided cross-section. A
+ * bender is neither axisymmetric nor straight - its two plates sit at
+ * different radii and follow an arc - so it supplies its polygons directly.
+ * Going through polygons rather than boxes is what lets the renderer stay
+ * ignorant of which kind it is drawing.
+ */
+function shapesOf(e) {
+  if (typeof e.shapes === 'function') return e.shapes();
+  const out = [];
+  for (const r of e.rects ?? []) {
+    for (const sign of [1, -1]) {
+      out.push({
+        points: [
+          [sign * r.r0, r.z0],
+          [sign * r.r1, r.z0],
+          [sign * r.r1, r.z1],
+          [sign * r.r0, r.z1],
+        ],
+        ghost: r.ghost,
+        wall: r.wall,
+      });
+    }
+  }
+  return out;
 }

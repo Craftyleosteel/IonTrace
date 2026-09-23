@@ -190,6 +190,10 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
         : 1 / (p.frequency * 1e6);
     },
 
+    contains(x, y, zl) {
+      return zl >= 0 && zl <= length;
+    },
+
     fieldAt(x, y, zl, t) {
       if (zl < 0 || zl > length) return { Ex: 0, Ey: 0, Ez: 0 };
       // The grid's two axes are x and y, so its "axial" component is Ex and
