@@ -112,34 +112,39 @@ const COULOMB_K = 1 / (4 * Math.PI * VACUUM_PERMITTIVITY);
  * @param {number} softening   Plummer softening length, metres.
  * @returns {{Ex: number[], Ez: number[]}} Field at each particle, V/m.
  */
-export function coulombField(xs, zs, charges, weight = 1, softening = 0) {
+export function coulombField(xs, ys, zs, charges, weight = 1, softening = 0) {
   const n = xs.length;
   const Ex = new Array(n).fill(0);
+  const Ey = new Array(n).fill(0);
   const Ez = new Array(n).fill(0);
-  if (n < 2 || weight === 0) return { Ex, Ez };
+  if (n < 2 || weight === 0) return { Ex, Ey, Ez };
 
   const eps2 = softening * softening;
 
   for (let i = 0; i < n; i++) {
     let ex = 0;
+    let ey = 0;
     let ez = 0;
     for (let j = 0; j < n; j++) {
       if (j === i) continue;
       const dx = xs[i] - xs[j];
+      const dy = ys[i] - ys[j];
       const dz = zs[i] - zs[j];
-      const d2 = dx * dx + dz * dz + eps2;
+      const d2 = dx * dx + dy * dy + dz * dz + eps2;
       if (d2 <= 0) continue;
       // 1 / d^3, via d^2 and its square root.
       const inv = 1 / (d2 * Math.sqrt(d2));
       const c = COULOMB_K * weight * charges[j] * inv;
       ex += c * dx;
+      ey += c * dy;
       ez += c * dz;
     }
     Ex[i] = ex;
+    Ey[i] = ey;
     Ez[i] = ez;
   }
 
-  return { Ex, Ez };
+  return { Ex, Ey, Ez };
 }
 
 /** 1 / (2 pi eps0), the recurring factor in the cylindrical Gauss result. */

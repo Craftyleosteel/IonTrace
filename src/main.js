@@ -3,92 +3,75 @@
  *
  * Wiring only: every physical quantity on screen is computed by the modules in
  * this directory, and nothing here adjusts a number to make a picture look
- * better. The two distinct cost paths are kept visible to the user because
- * they are the point of the architecture:
+ * better.
+ *
+ * Two cost paths are kept visible to the user because they are the point of
+ * the architecture:
  *
  *   changing a voltage   -> fast adjust, a weighted sum of stored solutions
- *   changing geometry    -> rebuild the potential array and re-solve Laplace
+ *   changing geometry    -> rebuild that element and re-solve Laplace
  *
- * Drawing preserves the true aspect ratio of the lens. Ion optics figures
- * often stretch the radial axis to make deflections legible, which makes
- * trajectory angles unreadable; an honest picture is worth the thin strip.
+ * and only the element that changed is ever re-solved, never the whole line.
  */
 
-import { buildEinzelLens } from './geometries/einzel.js';
+import { Beamline } from './beamline.js';
+import { ELEMENT_TYPES, createElement, needsRebuild } from './elements/index.js';
+import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
 import { makeIon, parallelBeam, focalCrossing } from './ion.js';
-import { createFlight, flyIon, kineticEnergy } from './integrator.js';
+import { createFlight, kineticEnergy } from './integrator.js';
 import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
-
-/* ------------------------------------------------------------------ */
-/* element lookup                                                      */
-/* ------------------------------------------------------------------ */
 
 const el = (id) => document.getElementById(id);
 
 const canvas = el('scene');
 const ctx = canvas.getContext('2d');
+const cross = el('cross');
+const crossCtx = cross.getContext('2d');
 const statusEl = el('status');
 const readoutEl = el('readout');
+const trackEl = el('track');
+const addersEl = el('adders');
+const inspectorEl = el('inspector');
+const scaleNote = el('scaleNote');
+const flyButton = el('fly');
 
 const inputs = {
-  vCentre: el('vCentre'),
-  vOuter: el('vOuter'),
   mass: el('mass'),
   charge: el('charge'),
   energy: el('energy'),
   rays: el('rays'),
   beamRadius: el('beamRadius'),
-  boreRadius: el('boreRadius'),
-  centreLength: el('centreLength'),
-  gridStep: el('gridStep'),
-  method: el('method'),
-  cfl: el('cfl'),
+  divergence: el('divergence'),
   repulsion: el('repulsion'),
   beamCurrent: el('beamCurrent'),
   ionsPerParticle: el('ionsPerParticle'),
+  method: el('method'),
+  cfl: el('cfl'),
+  zoom: el('zoom'),
   showField: el('showField'),
   showContours: el('showContours'),
 };
 
-const flyButton = el('fly');
-
-/** Controls whose change invalidates the solved field. */
-const GEOMETRY_INPUTS = ['boreRadius', 'centreLength', 'gridStep'];
-
-/**
- * Controls that change only how the scene is drawn.
- *
- * Everything else changes the physics, which makes any trajectory already on
- * screen stale: it was flown through a different field, or by a different
- * beam. Those are marked rather than silently redrawn, because a trajectory
- * that does not correspond to the settings beside it is simply wrong.
- */
-const DISPLAY_INPUTS = ['showField', 'showContours'];
+/** Controls that change only how the scene is drawn, never the physics. */
+const DISPLAY_INPUTS = ['showField', 'showContours', 'zoom'];
 
 /* ------------------------------------------------------------------ */
 /* colour                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Read a CSS custom property and parse it as [r, g, b]. */
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
 function cssRGB(name) {
-  const raw = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  const hex = raw.replace('#', '');
-  const full =
-    hex.length === 3
-      ? hex.split('').map((c) => c + c).join('')
-      : hex;
+  const hex = cssVar(name).replace('#', '');
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex;
   return [
     parseInt(full.slice(0, 2), 16),
     parseInt(full.slice(2, 4), 16),
     parseInt(full.slice(4, 6), 16),
   ];
-}
-
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
 const mix = (a, b, t) => [
@@ -111,94 +94,295 @@ function divergingColour(t, neg, zero, pos) {
 }
 
 /* ------------------------------------------------------------------ */
-/* simulation state                                                    */
+/* state                                                               */
 /* ------------------------------------------------------------------ */
 
-let model = null; // { grid, field, geometry }
+let beamline = null;
+let selected = 0;
 let trajectories = [];
 let stats = {};
-
-/**
- * The in-progress flight, advanced a chunk of steps per animation frame.
- *
- * Because every ion shares a time step, all the markers on screen are the
- * same INSTANT - a real snapshot of where the bunch is, not a drawing
- * convenience.
- */
 let flight = null;
 let flightSpec = null;
 let flightOpts = null;
 let flightStarted = 0;
 let animation = { running: false, frame: 0, perFrame: 40 };
-
-/** True when the drawn trajectories no longer match the current settings. */
 let stale = false;
 
-function readNumber(input, fallback) {
+const readNumber = (input, fallback) => {
   const v = parseFloat(input.value);
   return Number.isFinite(v) ? v : fallback;
+};
+
+/**
+ * A starting column that shows what the thing does without any setup.
+ *
+ * The einzel is set where it matches the beam into the quadrupole's
+ * acceptance rather than merely where it focuses: at -400 V it over-focuses
+ * and one ion in nine survives, at 0 V the beam is too wide entering the rods
+ * and three survive, and at -150 V seven do. Matching one element to the next
+ * is most of what building a column is.
+ */
+function defaultBeamline() {
+  return new Beamline([
+    createElement('drift', { length: 12, bore: 5 }),
+    createElement('einzel', {
+      gridStep: 0.5,
+      voltage: -150,
+      boreRadius: 5,
+      housingRadius: 14,
+      entryDrift: 8,
+      exitDrift: 8,
+    }),
+    createElement('drift', { length: 14, bore: 5 }),
+    // 150 mm at 2 MHz gives a 50 eV ion about thirty RF cycles in the rods.
+    // That number matters more than it looks: stability is an asymptotic
+    // property of the Mathieu equation, and an ion that crosses in a handful
+    // of cycles can be thrown out whatever its (a, q) says. A shorter or
+    // faster-crossing quadrupole loses ions for that reason alone.
+    createElement('quadrupole', {
+      gridStep: 0.25,
+      length: 150,
+      rfAmplitude: 250,
+      frequency: 2,
+    }),
+    createElement('drift', { length: 25, bore: 5 }),
+  ]);
 }
 
-/** Rebuild the potential array and solve every electrode's basis solution. */
-function rebuild() {
-  const t0 = performance.now();
-  model = buildEinzelLens({
-    boreRadius: readNumber(inputs.boreRadius, 6),
-    centreLength: readNumber(inputs.centreLength, 20),
-    gridStep: readNumber(inputs.gridStep, 0.5),
-  });
-  stats.solveMs = performance.now() - t0;
-  stats.warnings = model.warnings;
-}
+/* ------------------------------------------------------------------ */
+/* element editing                                                     */
+/* ------------------------------------------------------------------ */
 
-/** Apply the current voltages. Cheap: no relaxation happens here. */
-function applyVoltages() {
-  const t0 = performance.now();
-  const outer = readNumber(inputs.vOuter, 0);
-  model.field.setVoltages({
-    housing: 0,
-    entrance: outer,
-    centre: readNumber(inputs.vCentre, -2000),
-    exit: outer,
-  });
-  stats.adjustMs = performance.now() - t0;
-
-  // The domain end faces are part of the grounded housing, so they act as
-  // solid 0 V plates across the aperture. That is harmless while the outer
-  // cylinders are also at 0 V, but biasing them puts a real potential
-  // difference across the entry and exit drifts and invents a field of
-  // several kV/m where the actual instrument has none. The ion, meanwhile,
-  // flies through those faces as if they were open. Flag the inconsistency
-  // rather than pretending the result means something.
-  stats.voltageWarning =
-    outer !== 0
-      ? `Entrance/exit biased to ${outer} V against grounded end faces: the ` +
-        'drift regions carry a spurious accelerating field. See PHYSICS.md §2.1.'
-      : null;
+/** Rebuild one element from its current parameters, re-solving its field. */
+function rebuildElement(index) {
+  const old = beamline.elements[index];
+  const rebuilt = createElement(old.typeKey, old.params);
+  beamline.replace(index, rebuilt);
+  return rebuilt;
 }
 
 /**
- * Build the beam and create a flight, without running it.
+ * Apply a parameter change to an element.
  *
- * The flight is then advanced a chunk at a time by the animation loop, so the
- * ions are integrated as they are drawn rather than replayed from a finished
- * path. Chunking cannot change the result: the time step comes from each
- * ion's own state, never from the frame rate.
+ * Whether this costs a Laplace solve is decided by the element registry, not
+ * guessed here. Voltages and RF settings only rescale solutions that already
+ * exist; anything that moves metal changes the boundary and must be re-solved.
  */
+function setParam(index, key, value) {
+  const element = beamline.elements[index];
+  element.params[key] = value;
+
+  if (needsRebuild(element.typeKey, key)) {
+    statusEl.classList.add('busy');
+    rebuildElement(index);
+    statusEl.classList.remove('busy');
+  } else if (key === 'voltage' && element.setVoltage) {
+    element.setVoltage(value);
+  } else {
+    // Quadrupole drive parameters are read straight off `params` at
+    // evaluation time, so there is nothing to recompute at all.
+    beamline.layout();
+  }
+
+  markStale();
+  renderTrack();
+  renderInspector();
+  render();
+  drawReadout();
+}
+
+function addElement(type) {
+  const index = beamline.elements.length
+    ? Math.min(selected + 1, beamline.elements.length)
+    : 0;
+  statusEl.classList.add('busy');
+  const created = createElement(type);
+  beamline.add(created, index);
+  statusEl.classList.remove('busy');
+  selected = index;
+  afterStructureChange();
+}
+
+function removeElement(index) {
+  if (beamline.elements.length <= 1) return;
+  beamline.remove(index);
+  selected = Math.max(0, Math.min(selected, beamline.elements.length - 1));
+  afterStructureChange();
+}
+
+function moveElement(index, delta) {
+  if (!beamline.move(index, delta)) return;
+  selected = index + delta;
+  afterStructureChange();
+}
+
+function afterStructureChange() {
+  markStale();
+  renderTrack();
+  renderInspector();
+  render();
+  drawReadout();
+}
+
+/* ------------------------------------------------------------------ */
+/* track and inspector                                                 */
+/* ------------------------------------------------------------------ */
+
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+  })[c]);
+
+/** One-line summary of what an element is currently set to. */
+function summarise(e) {
+  const p = e.params;
+  switch (e.typeKey) {
+    case 'drift':
+      return `${p.length} mm · ⌀${p.bore * 2} mm`;
+    case 'aperture':
+      return `${p.voltage} V · ⌀${p.bore * 2} mm`;
+    case 'einzel':
+      return `${p.voltage} V · ⌀${p.boreRadius * 2} mm`;
+    case 'quadrupole':
+      return p.rfAmplitude === 0
+        ? `DC ${p.dcVoltage} V · ${p.length} mm`
+        : `${p.rfAmplitude} V @ ${p.frequency} MHz · ${p.length} mm`;
+    default:
+      return '';
+  }
+}
+
+function renderTrack() {
+  trackEl.innerHTML = beamline.elements
+    .map((e, i) => {
+      const last = beamline.elements.length - 1;
+      return `
+        <li class="chip ${i === selected ? 'sel' : ''} chip-${e.typeKey}"
+            data-index="${i}">
+          <button class="chip-body" data-act="select" data-index="${i}">
+            <span class="chip-name">${escapeHtml(e.label)}</span>
+            <span class="chip-meta">${escapeHtml(summarise(e))}</span>
+            <span class="chip-len">${mToMm(e.length).toFixed(0)} mm</span>
+          </button>
+          <span class="chip-tools">
+            <button data-act="left" data-index="${i}" ${i === 0 ? 'disabled' : ''}
+              title="Move upstream" aria-label="Move ${escapeHtml(e.label)} upstream">◀</button>
+            <button data-act="right" data-index="${i}" ${i === last ? 'disabled' : ''}
+              title="Move downstream" aria-label="Move ${escapeHtml(e.label)} downstream">▶</button>
+            <button data-act="remove" data-index="${i}"
+              ${beamline.elements.length <= 1 ? 'disabled' : ''}
+              title="Remove" aria-label="Remove ${escapeHtml(e.label)}">×</button>
+          </span>
+        </li>`;
+    })
+    .join('');
+}
+
+function renderAdders() {
+  addersEl.innerHTML = Object.entries(ELEMENT_TYPES)
+    .map(
+      ([type, spec]) =>
+        `<button class="add" data-add="${type}" title="${escapeHtml(spec.blurb)}">
+           + ${escapeHtml(spec.label)}
+         </button>`
+    )
+    .join('');
+}
+
+function renderInspector() {
+  const e = beamline.elements[selected];
+  if (!e) {
+    inspectorEl.innerHTML = '<h2>Element</h2><p class="hint">Nothing selected.</p>';
+    return;
+  }
+  const spec = ELEMENT_TYPES[e.typeKey];
+
+  const rows = spec.fields
+    .map((f) => {
+      const value = e.params[f.key];
+      const instant = f.rebuild ? '' : '<span class="instant" title="No re-solve needed">fast</span>';
+      return `
+        <label class="field">
+          <span class="field-label">
+            ${escapeHtml(f.label)}${instant}
+            <span class="unit">${escapeHtml(f.unit ?? '')}</span>
+          </span>
+          <input type="range" data-param="${f.key}"
+                 min="${f.min}" max="${f.max}" step="${f.step}" value="${value}" />
+          <output data-out="${f.key}">${value}</output>
+          ${f.help ? `<span class="field-help">${escapeHtml(f.help)}</span>` : ''}
+        </label>`;
+    })
+    .join('');
+
+  inspectorEl.innerHTML = `
+    <h2>${escapeHtml(e.label)}</h2>
+    <p class="hint">${escapeHtml(spec.blurb)}</p>
+    ${rows}
+    ${quadrupoleReadout(e)}`;
+}
+
+/**
+ * Mathieu parameters for the selected quadrupole and the current ion.
+ *
+ * These, not the voltages, are what decide whether an ion is transmitted, so
+ * they belong next to the controls that set them.
+ */
+function quadrupoleReadout(e) {
+  if (e.typeKey !== 'quadrupole') return '';
+  const mass = readNumber(inputs.mass, 100);
+  const charge = readNumber(inputs.charge, 1);
+  const { a, q } = e.mathieu(mass, Math.abs(charge) || 1);
+  const stable = Math.abs(q) < MATHIEU_Q_LIMIT && Math.abs(a) < 0.237;
+  return `
+    <div class="mathieu ${stable ? 'ok' : 'bad'}">
+      <span>a = ${a.toFixed(4)}</span>
+      <span>q = ${q.toFixed(4)}</span>
+      <span class="verdict">${
+        stable
+          ? 'inside the first stability region'
+          : `outside it — q limit is ${MATHIEU_Q_LIMIT}`
+      }</span>
+    </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* flight                                                              */
+/* ------------------------------------------------------------------ */
+
+function markStale() {
+  if (trajectories.length === 0) return;
+  stale = true;
+  flyButton.classList.add('stale');
+}
+
 function startFlight() {
-  const { field } = model;
   const spec = {
     mass: readNumber(inputs.mass, 100),
     charge: readNumber(inputs.charge, 1),
-    energy: readNumber(inputs.energy, 1000),
-    z: 0.5,
+    energy: readNumber(inputs.energy, 50),
+    z: 0.2,
   };
   const count = Math.round(readNumber(inputs.rays, 9));
-  const maxOffset = readNumber(inputs.beamRadius, 4);
+  const maxOffset = readNumber(inputs.beamRadius, 1.5);
+  const divergence = readNumber(inputs.divergence, 0);
 
-  let rays;
+  let ions;
   try {
-    rays = parallelBeam({ ...spec, count, maxOffset });
+    ions = parallelBeam({ ...spec, count, maxOffset });
+    // A real source is not perfectly collimated. Divergence is applied as a
+    // linear fan so the outermost ion gets the full angle, which is the usual
+    // way a beam's emittance is sketched.
+    if (divergence !== 0 && count > 1) {
+      ions = ions.map((ion, i) => {
+        const frac = (2 * i) / (count - 1) - 1;
+        return makeIon({
+          ...spec,
+          x: mToMm(ion.x),
+          angle: frac * divergence,
+        });
+      });
+    }
   } catch (err) {
     trajectories = [];
     flight = null;
@@ -209,15 +393,11 @@ function startFlight() {
   stats.flown = false;
 
   const repulsion = inputs.repulsion.value;
-  // Slider is in microamps; the physics is in amperes.
   const beamCurrent = readNumber(inputs.beamCurrent, 0) * 1e-6;
-  // Slider is a base-10 exponent, because the useful range spans eight orders.
-  const ionsPerParticle = 10 ** readNumber(inputs.ionsPerParticle, 7);
+  const ionsPerParticle = 10 ** readNumber(inputs.ionsPerParticle, 6);
 
   stats.repulsion = repulsion;
-  stats.beamCurrent = repulsion === 'beam' ? beamCurrent : 0;
-  stats.ionsPerParticle = repulsion === 'coulomb' ? ionsPerParticle : 0;
-  stats.particles = rays.length;
+  stats.particles = ions.length;
 
   const opts = {
     method: inputs.method.value,
@@ -225,123 +405,55 @@ function startFlight() {
     repulsion,
     beamCurrent,
     ionsPerParticle,
-    // Integrate at full resolution but keep every fourth point for drawing.
-    // The energy diagnostic is evaluated on every step regardless, so this
-    // costs nothing physically; it only avoids stroking tens of thousands of
-    // line segments that land on the same pixels.
     recordEvery: 4,
+    maxSteps: 400000,
   };
 
   flightSpec = spec;
   flightOpts = opts;
   flightStarted = performance.now();
-  flight = createFlight(field, rays, opts);
+  flight = createFlight(beamline, ions, opts);
   trajectories = flight.tracks;
   for (let i = 0; i < trajectories.length; i++) {
-    trajectories[i].start = rays[i];
+    trajectories[i].start = ions[i];
     trajectories[i].focus = null;
   }
 }
 
-/** Summarise a finished flight. */
 function finishFlight() {
-  const { field, geometry } = model;
-  const spec = flightSpec;
   stats.flyMs = performance.now() - flightStarted;
-
   for (const t of trajectories) t.focus = focalCrossing(t.points);
 
-  const lensCentre = (geometry.bounds.z3 + geometry.bounds.z4) / 2; // mm
-  const fromCentre = (zMetres) => mToMm(zMetres) - lensCentre;
-
-  // Only a forward exit is transmission. A reflected ion leaves through the
-  // entrance face, which is a real and interesting result, but it is not the
-  // beam getting through.
-  const transmitted = trajectories.filter((t) => t.stop === 'exited');
-  stats.transmitted = transmitted.length;
+  const through = trajectories.filter((t) => t.stop === 'exited');
+  stats.transmitted = through.length;
   stats.reflected = trajectories.filter((t) => t.stop === 'reflected').length;
   stats.struck = trajectories.filter((t) => t.stop === 'electrode').length;
   stats.total = trajectories.length;
   stats.drift = Math.max(0, ...trajectories.map((t) => t.energyDrift));
+  stats.steps = flight?.steps ?? 0;
 
-  // The paraxial focus comes from a dedicated probe ray close to the axis,
-  // not from an average over the drawn rays. Averaging mixes the marginal and
-  // paraxial foci, so the reported "focal length" would shift with the beam
-  // radius and the ray count - neither of which is a property of the lens.
-  //
-  // The probe flies WITHOUT space charge, deliberately. This number is a
-  // property of the optics, so it should not move when the beam current is
-  // turned up; what the loaded beam actually does is reported separately
-  // below. A probe ray flown inside the beam would also be unrepresentative,
-  // since at 1 % of the bore it encloses almost no current and would feel
-  // almost no self-field.
-  const probe = flyIon(field, makeIon({ ...spec, x: 0.01 * geometry.boreRadius }), {
-    ...flightOpts,
-    repulsion: 'none',
-    beamCurrent: 0,
-  });
-  const probeFocus = focalCrossing(probe.points);
-  stats.paraxial =
-    probe.stop === 'exited' && probeFocus
-      ? { mm: fromCentre(probeFocus.z), extrapolated: probeFocus.extrapolated }
-      : null;
-
-  // What the loaded beam actually does. Space charge goes as 1/r, so a
-  // sufficiently dense beam can never be brought to a point: it reaches a
-  // minimum radius and expands again. Reporting a focal length in that regime
-  // would be reporting something that does not exist.
-  const outermost = transmitted
-    .slice()
-    .sort((a, b) => Math.abs(b.start.x) - Math.abs(a.start.x))[0];
-  stats.waist = null;
-  if (outermost) {
-    const lensEnd = mmToM(geometry.bounds.z6);
-    let waist = Infinity;
-    let waistZ = 0;
-    for (const p of outermost.points) {
-      if (p.z < lensEnd) continue;
-      if (Math.abs(p.x) < waist) {
-        waist = Math.abs(p.x);
-        waistZ = p.z;
-      }
-    }
-    if (Number.isFinite(waist)) {
-      stats.waist = {
-        radiusMm: mToMm(waist),
-        atMm: fromCentre(waistZ),
-        crossed: outermost.focus !== null && !outermost.focus.extrapolated,
-      };
-    }
-  }
-
-  // Spherical aberration: how far short of the paraxial focus the outermost
-  // transmitted ray crosses. Negative means under-corrected, which is what
-  // every round electrostatic lens does.
-  const marginal = transmitted
-    .filter((t) => t.focus)
-    .sort((a, b) => Math.abs(b.start.x) - Math.abs(a.start.x))[0];
-  stats.aberration =
-    marginal && stats.paraxial
-      ? fromCentre(marginal.focus.z) - stats.paraxial.mm
-      : null;
-
-  // The einzel lens's defining property is that it does no net work, so the
-  // figure that matters is the WORST departure across the beam, not one
-  // arbitrary ray's.
-  if (transmitted.length > 0) {
+  // Where the surviving beam ends up, which is the number a user of a column
+  // actually wants. A focal length is only meaningful for a single lens.
+  if (through.length) {
     let worst = 0;
     let atIn = 0;
-    for (const t of transmitted) {
-      const kIn = joulesToEV(kineticEnergy(t.points[0]));
-      const kOut = joulesToEV(kineticEnergy(t.points[t.points.length - 1]));
+    let radius = 0;
+    for (const t of through) {
+      const first = t.points[0];
+      const last = t.points[t.points.length - 1];
+      radius = Math.max(radius, Math.hypot(last.x, last.y ?? 0));
+      const kIn = joulesToEV(kineticEnergy(first));
+      const kOut = joulesToEV(kineticEnergy(last));
       if (Math.abs(kOut - kIn) > Math.abs(worst)) {
         worst = kOut - kIn;
         atIn = kIn;
       }
     }
+    stats.exitRadius = radius;
     stats.keIn = atIn;
     stats.worstWork = worst;
   } else {
+    stats.exitRadius = null;
     stats.keIn = null;
     stats.worstWork = null;
   }
@@ -349,566 +461,11 @@ function finishFlight() {
   stats.flown = true;
 }
 
-/* ------------------------------------------------------------------ */
-/* rendering                                                           */
-/* ------------------------------------------------------------------ */
-
-/** Screen transform for the current model and canvas size. */
-function makeTransform(width, height) {
-  const { grid } = model;
-  const zLen = grid.zLength;
-  const rMax = grid.rLength;
-  return {
-    sx: (z) => ((z - grid.z0) / zLen) * width,
-    sy: (r) => height / 2 - (r / rMax) * (height / 2),
-    zLen,
-    rMax,
-  };
-}
-
-/**
- * Paint the potential as a diverging field, mirrored about the axis.
- *
- * Built at grid resolution into an ImageData and then scaled up, which lets
- * the browser interpolate smoothly instead of showing one hard-edged rectangle
- * per node.
- */
-function drawPotential(width, height) {
-  const { grid, field } = model;
-  const { nz, nr } = grid;
-
-  let maxAbs = 0;
-  for (let k = 0; k < field.phi.length; k++) {
-    const a = Math.abs(field.phi[k]);
-    if (a > maxAbs) maxAbs = a;
-  }
-  if (maxAbs === 0) return;
-
-  const neg = cssRGB('--pot-neg');
-  const zero = cssRGB('--pot-zero');
-  const pos = cssRGB('--pot-pos');
-
-  const rows = 2 * nr - 1; // mirrored: -rMax .. +rMax
-  const off = document.createElement('canvas');
-  off.width = nz;
-  off.height = rows;
-  const offCtx = off.getContext('2d');
-  const img = offCtx.createImageData(nz, rows);
-
-  for (let row = 0; row < rows; row++) {
-    // Row 0 is r = +rMax at the top, so j counts down to the axis and back up.
-    const j = Math.abs(nr - 1 - row);
-    for (let i = 0; i < nz; i++) {
-      const [r, g, b] = divergingColour(field.phi[j * nz + i] / maxAbs, neg, zero, pos);
-      const p = (row * nz + i) * 4;
-      img.data[p] = r;
-      img.data[p + 1] = g;
-      img.data[p + 2] = b;
-      img.data[p + 3] = 255;
-    }
-  }
-
-  offCtx.putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(off, 0, 0, width, height);
-}
-
-/**
- * Equipotential contours by marching squares on the solved grid.
- *
- * Contours are the most informative single overlay in ion optics: an ion is
- * deflected perpendicular to them, so where they bow across the bore is
- * exactly where focusing happens.
- */
-function drawContours(width, height, T) {
-  const { grid, field } = model;
-  const { nz, nr } = grid;
-  const phi = field.phi;
-
-  let maxAbs = 0;
-  for (let k = 0; k < phi.length; k++) maxAbs = Math.max(maxAbs, Math.abs(phi[k]));
-  if (maxAbs === 0) return;
-
-  const levels = [];
-  const N = 11;
-  for (let n = 1; n <= N; n++) {
-    const frac = n / (N + 1);
-    levels.push(maxAbs * frac, -maxAbs * frac);
-  }
-
-  ctx.save();
-  ctx.strokeStyle = cssVar('--gridline');
-  ctx.globalAlpha = 0.85;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-
-  const gz = (i) => T.sx(grid.zAt(i));
-
-  for (const level of levels) {
-    for (let j = 0; j < nr - 1; j++) {
-      for (let i = 0; i < nz - 1; i++) {
-        const v00 = phi[j * nz + i];
-        const v10 = phi[j * nz + i + 1];
-        const v01 = phi[(j + 1) * nz + i];
-        const v11 = phi[(j + 1) * nz + i + 1];
-
-        // Edge crossings, in grid coordinates.
-        const pts = [];
-        const cross = (a, b, ia, ja, ib, jb) => {
-          if ((a - level) * (b - level) >= 0) return;
-          const t = (level - a) / (b - a);
-          pts.push([ia + (ib - ia) * t, ja + (jb - ja) * t]);
-        };
-        cross(v00, v10, i, j, i + 1, j); // bottom
-        cross(v10, v11, i + 1, j, i + 1, j + 1); // right
-        cross(v01, v11, i, j + 1, i + 1, j + 1); // top
-        cross(v00, v01, i, j, i, j + 1); // left
-
-        if (pts.length < 2) continue;
-        // With four crossings the cell is ambiguous; pairing them in order is
-        // a standard resolution and is visually indistinguishable at this
-        // contour density.
-        for (let p = 0; p + 1 < pts.length; p += 2) {
-          const [a, b] = [pts[p], pts[p + 1]];
-          for (const sign of [1, -1]) {
-            ctx.moveTo(gz(a[0]), T.sy(sign * grid.rAt(a[1])));
-            ctx.lineTo(gz(b[0]), T.sy(sign * grid.rAt(b[1])));
-          }
-        }
-      }
-    }
-  }
-
-  ctx.stroke();
-  ctx.restore();
-}
-
-/**
- * Draw electrodes from the grid itself rather than from the geometry
- * description, so any painted geometry renders without extra code.
- *
- * Nodes are merged into horizontal runs before filling. Drawing one rectangle
- * per node leaves hairline seams between them at fractional scales.
- */
-function drawElectrodes(width, height, T) {
-  const { grid } = model;
-  const { nz, nr } = grid;
-  const h = grid.step;
-
-  ctx.save();
-  ctx.fillStyle = cssVar('--electrode');
-
-  for (let j = 0; j < nr; j++) {
-    let runStart = -1;
-    for (let i = 0; i <= nz; i++) {
-      const isEl =
-        i < nz &&
-        grid.electrodeId[j * nz + i] !== NO_ELECTRODE &&
-        // The domain end faces close the Laplace problem but are not hardware;
-        // drawing them would put a wall across the beam's entrance and exit.
-        !(i === 0 && grid.openFaces.zMin) &&
-        !(i === nz - 1 && grid.openFaces.zMax);
-
-      if (isEl && runStart === -1) runStart = i;
-      if (!isEl && runStart !== -1) {
-        const z0 = grid.zAt(runStart) - h / 2;
-        const z1 = grid.zAt(i - 1) + h / 2;
-        const r0 = grid.rAt(j) - h / 2;
-        const r1 = grid.rAt(j) + h / 2;
-        for (const sign of [1, -1]) {
-          const yA = T.sy(sign * r0);
-          const yB = T.sy(sign * r1);
-          ctx.fillRect(
-            T.sx(z0),
-            Math.min(yA, yB),
-            T.sx(z1) - T.sx(z0),
-            Math.abs(yB - yA)
-          );
-        }
-        runStart = -1;
-      }
-    }
-  }
-
-  ctx.restore();
-}
-
-/** The optic axis, drawn as a recessive hairline. */
-function drawAxis(width, height, T) {
-  ctx.save();
-  ctx.strokeStyle = cssVar('--axis');
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.moveTo(0, T.sy(0));
-  ctx.lineTo(width, T.sy(0));
-  ctx.stroke();
-  ctx.restore();
-}
-
-/**
- * Draw trajectories.
- *
- * Each ray is stroked twice: once in the surface colour as a slightly wider
- * halo, then in the trajectory hue. The halo separates rays that overlap and
- * keeps them legible over both poles of the diverging field, which is the
- * secondary encoding the palette's colour-vision margin relies on.
- */
-function drawTrajectories(width, height, T) {
-  const trajColour = cssVar('--traj');
-  const halo = cssVar('--surface-1');
-
-  // A stale path was flown through a different field or a different beam, so
-  // it is drawn faintly rather than removed: the shape is still useful
-  // context while a slider is moving, but it must not read as the answer.
-  const dim = stale ? 0.28 : 1;
-
-  // Trails: every point integrated so far. During a live flight these grow
-  // step by step, so the picture is the solver's actual progress.
-  for (const pass of ['halo', 'line']) {
-    ctx.save();
-    ctx.strokeStyle = pass === 'halo' ? halo : trajColour;
-    ctx.lineWidth = pass === 'halo' ? 4 : 2;
-    ctx.globalAlpha = (pass === 'halo' ? 0.55 : 1) * dim;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-
-    for (const traj of trajectories) {
-      if (traj.points.length < 2) continue;
-      ctx.beginPath();
-      for (let n = 0; n < traj.points.length; n++) {
-        const p = traj.points[n];
-        const x = T.sx(p.z);
-        const y = T.sy(p.x);
-        if (n === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  // The ions themselves. Every one shares a time step, so these are all the
-  // same instant - a real snapshot of the bunch, which is the thing that
-  // makes the repulsion legible: you can see them pushing each other apart.
-  if (animation.running) {
-    ctx.save();
-    ctx.fillStyle = trajColour;
-    ctx.strokeStyle = halo;
-    ctx.lineWidth = 1.5;
-    for (const traj of trajectories) {
-      // Only ions still in flight; one that has landed is drawn below.
-      if (!traj.active) continue;
-      const p = traj.state;
-      ctx.beginPath();
-      ctx.arc(T.sx(p.z), T.sy(p.x), 3.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  // Mark where a ray ended on metal. A strike is a real result, not a failure
-  // to render, so it gets an explicit symbol rather than a line that stops.
-  ctx.save();
-  ctx.globalAlpha = dim;
-  ctx.fillStyle = cssVar('--electrode-edge');
-  for (const traj of trajectories) {
-    if (traj.stop !== 'electrode' || traj.active) continue;
-    const p = traj.points[traj.points.length - 1];
-    ctx.beginPath();
-    ctx.arc(T.sx(p.z), T.sy(p.x), 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-/** Axial scale, in millimetres. */
-function drawScale(width, height, T) {
-  const { grid } = model;
-  ctx.save();
-  ctx.fillStyle = cssVar('--text-muted');
-  ctx.font = '11px ui-monospace, monospace';
-  ctx.textBaseline = 'bottom';
-
-  const totalMm = mToMm(grid.zLength);
-  const stepMm = totalMm > 200 ? 50 : totalMm > 80 ? 20 : 10;
-  for (let zmm = 0; zmm <= totalMm + 1e-9; zmm += stepMm) {
-    const x = T.sx(zmm * 1e-3);
-    ctx.fillRect(x, height - 10, 1, 5);
-    ctx.textAlign = zmm === 0 ? 'left' : 'center';
-    ctx.fillText(`${zmm.toFixed(0)}`, x, height - 12);
-  }
-  ctx.textAlign = 'right';
-  ctx.fillText('z / mm', width - 6, height - 12);
-  ctx.restore();
-}
-
-function render() {
-  if (!model) return;
-
-  const cssWidth = canvas.parentElement.clientWidth;
-  const { grid } = model;
-  const aspect = grid.zLength / (2 * grid.rLength);
-  const cssHeight = Math.max(200, Math.round(cssWidth / aspect));
-
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(cssWidth * dpr);
-  canvas.height = Math.round(cssHeight * dpr);
-  canvas.style.height = `${cssHeight}px`;
-
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssWidth, cssHeight);
-  ctx.fillStyle = cssVar('--surface-1');
-  ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-  const T = makeTransform(cssWidth, cssHeight);
-
-  if (inputs.showField.checked) drawPotential(cssWidth, cssHeight);
-  if (inputs.showContours.checked) drawContours(cssWidth, cssHeight, T);
-  drawAxis(cssWidth, cssHeight, T);
-  drawElectrodes(cssWidth, cssHeight, T);
-  drawTrajectories(cssWidth, cssHeight, T);
-  drawScale(cssWidth, cssHeight, T);
-}
-
-/* ------------------------------------------------------------------ */
-/* readout                                                             */
-/* ------------------------------------------------------------------ */
-
-function stat(label, value, suffix = '', note = '', warn = false) {
-  return `
-    <div class="stat">
-      <span class="stat-label">${label}</span>
-      <span class="stat-value${warn ? ' warn' : ''}">${value}${
-        suffix ? `<span class="suffix">${suffix}</span>` : ''
-      }</span>
-      ${note ? `<span class="stat-note">${note}</span>` : ''}
-    </div>`;
-}
-
-function drawReadout() {
-  if (stats.error) {
-    readoutEl.innerHTML = stat('Beam', 'invalid', '', stats.error, true);
-    return;
-  }
-
-  // Field and geometry changes redraw the scene without flying, so there may
-  // be no flight to summarise yet. Reporting numbers from a flight that has
-  // not happened - or has not finished - would be worse than reporting none.
-  if (!stats.flown) {
-    readoutEl.innerHTML = stat(
-      'Beam',
-      animation.running ? 'flying…' : 'not flown',
-      '',
-      animation.running
-        ? 'integrating the ions now'
-        : 'press Fly to launch the beam'
-    );
-    return;
-  }
-
-  // Measured from a probe ray near the axis, so it is a property of the lens
-  // rather than of the drawn beam.
-  const focal =
-    stats.paraxial === null
-      ? stat(
-          'Paraxial focus',
-          '—',
-          '',
-          stats.reflected > 0
-            ? 'beam is reflected — this is an ion mirror, not a lens'
-            : 'probe ray does not converge'
-        )
-      : stat(
-          'Paraxial focus',
-          stats.paraxial.mm.toFixed(1),
-          'mm',
-          'from lens centre' +
-            (stats.paraxial.extrapolated ? ' · extrapolated beyond the grid' : '')
-        );
-
-  const aberration =
-    stats.aberration === null
-      ? stat('Spherical aberration', '—', '', 'needs a transmitted off-axis ray')
-      : stat(
-          'Spherical aberration',
-          stats.aberration.toFixed(2),
-          'mm',
-          `outermost ray crosses ${Math.abs(stats.aberration).toFixed(2)} mm ` +
-            (stats.aberration < 0 ? 'short (under-corrected)' : 'long')
-        );
-
-  // The einzel lens's defining property: entrance and exit are at the same
-  // potential, so a transmitted ion must leave with the energy it arrived
-  // with. Reported as the worst case across the beam.
-  // With space charge on, a non-zero net work is CORRECT, not an error: the
-  // beam's own field does real work on its ions as it expands, converting the
-  // bunch's electrostatic energy into transverse kinetic energy. The einzel
-  // lens's no-net-work property is a property of the LENS, and it only holds
-  // for a beam whose ions do not interact. Flagging it as a discrepancy in
-  // that case would be flagging correct physics.
-  const loaded = stats.repulsion && stats.repulsion !== 'none';
-  const energy =
-    stats.keIn === null
-      ? stat('Net work', '—', '', 'nothing transmitted')
-      : stat(
-          'Net work',
-          stats.worstWork.toFixed(3),
-          'eV',
-          loaded
-            ? `on ${stats.keIn.toFixed(0)} eV in · expected: the beam's own field does work`
-            : `worst of ${stats.transmitted} transmitted, on ${stats.keIn.toFixed(0)} eV in · an einzel lens should do none`,
-          !loaded && Math.abs(stats.worstWork) > 0.01 * stats.keIn
-        );
-
-  // What the loaded beam does, which is not the same as what the lens does
-  // once space charge is on.
-  const waist =
-    stats.waist === null
-      ? stat('Beam waist', '—', '', 'no transmitted ray to measure')
-      : stats.waist.crossed
-        ? stat(
-            'Beam waist',
-            'crossover',
-            '',
-            `outer ray reaches the axis at ${stats.waist.atMm.toFixed(1)} mm`
-          )
-        : stat(
-            'Beam waist',
-            stats.waist.radiusMm.toFixed(2),
-            'mm',
-            `at ${stats.waist.atMm.toFixed(1)} mm · space charge prevents a point focus`,
-            true
-          );
-
-  const fate = [
-    `${stats.transmitted} through`,
-    stats.reflected ? `${stats.reflected} reflected` : null,
-    stats.struck ? `${stats.struck} on metal` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-
-  const driftPct = stats.drift * 100;
-
-  readoutEl.innerHTML = [
-    focal,
-    loaded ? waist : aberration,
-    energy,
-    stat('Transmitted', `${stats.transmitted}/${stats.total}`, '', fate),
-    // With repulsion on this number stops being a numerical diagnostic. The
-    // tracked quantity is ½mv² + qφ for the ELECTRODE field only; the ions'
-    // mutual potential energy is not in it, and that energy is converted into
-    // kinetic energy as the beam expands. A large "drift" is then the physics
-    // working, not the integrator failing, so it is not flagged.
-    stat(
-      'Energy drift',
-      driftPct < 0.01 ? '<0.01' : driftPct.toFixed(2),
-      '%',
-      loaded
-        ? 'expected · ion–ion potential energy is not counted in ½mv² + qφ'
-        : 'worst ½mv² + qφ deviation · grid quality, not step size',
-      !loaded && stats.drift > 0.02
-    ),
-    stat(
-      'Field solve',
-      stats.solveMs.toFixed(0),
-      'ms',
-      `voltage change ${stats.adjustMs.toFixed(1)} ms · flight ${stats.flyMs.toFixed(0)} ms`
-    ),
-  ].join('');
-
-  if (stats.voltageWarning) {
-    readoutEl.innerHTML += stat('Model warning', '!', '', stats.voltageWarning, true);
-  }
-  if (stats.warnings?.length) {
-    readoutEl.innerHTML += stat('Geometry warning', '!', '', stats.warnings[0], true);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* update cycle                                                        */
-/* ------------------------------------------------------------------ */
-
-let framePending = false;
-let resolvePending = false;
-let debounceTimer;
-
-/**
- * Schedule an update.
- *
- * The two paths are paced differently because they cost differently. A
- * voltage or beam change is a fast adjust plus a re-fly, cheap enough to run
- * on the next frame while a slider is still moving. A geometry change
- * re-solves Laplace's equation for every electrode, so it is debounced until
- * the slider settles - otherwise dragging the bore radius would queue one full
- * relaxation per pixel.
- *
- * @param {boolean} resolveField Whether the potential array must be rebuilt.
- */
-function update(resolveField) {
-  resolvePending = resolvePending || resolveField;
-
-  if (resolveField) {
-    statusEl.classList.add('busy');
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(runUpdate, 140);
-    return;
-  }
-
-  if (framePending) return;
-  framePending = true;
-  requestAnimationFrame(runUpdate);
-}
-
-function runUpdate() {
-  framePending = false;
-  clearTimeout(debounceTimer);
-
-  const doResolve = resolvePending || !model;
-  resolvePending = false;
-
-  try {
-    if (doResolve) rebuild();
-    applyVoltages();
-    render();
-    drawReadout();
-  } catch (err) {
-    readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
-    console.error(err);
-  } finally {
-    statusEl.classList.remove('busy');
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* flying                                                              */
-/* ------------------------------------------------------------------ */
-
-/** Mark the drawn trajectories as no longer matching the settings. */
-function markStale() {
-  if (trajectories.length === 0) return;
-  stale = true;
-  flyButton.classList.add('stale');
-}
-
-/**
- * Launch the beam.
- *
- * The flight is computed in full first and then revealed frame by frame. The
- * alternative - integrating one step per frame - would tie the physics time
- * step to the display refresh rate, which is a good way to get a different
- * trajectory on a different monitor.
- */
 function fly() {
   cancelAnimationFrame(animation.frame);
   animation.running = false;
 
   try {
-    if (!model) rebuild();
-    applyVoltages();
     startFlight();
   } catch (err) {
     readoutEl.innerHTML = stat('Error', 'failed', '', err.message, true);
@@ -926,27 +483,23 @@ function fly() {
     return;
   }
 
-  // Pace the display, not the physics. An ion crosses the domain in roughly
-  // zLength / (cfl * h) steps, so spreading that over a couple of seconds of
-  // frames gives a watchable flight. Getting this estimate wrong changes only
-  // how long the animation takes - never where the ions go.
-  const { grid } = model;
-  const estimate = grid.zLength / (readNumber(inputs.cfl, 0.05) * grid.step);
+  // Pace the display, not the physics. Getting this estimate wrong changes
+  // only how long the animation takes, never where the ions go.
+  const estimate = beamline.length / (readNumber(inputs.cfl, 0.05) * beamline.lengthScale);
   animation.perFrame = Math.max(1, Math.round(estimate / 120));
   animation.running = true;
 
-  flyButton.textContent = '';
   setFlyLabel('Flying…', 'ions in flight');
+  drawReadout();
   tick();
 }
 
 /**
  * Advance the flight by a chunk and draw it, once per frame.
  *
- * The ions are genuinely being integrated here, not replayed: what is on
- * screen at any moment is the state the solver has actually reached. The
- * chunk size is a display choice and has no effect on the trajectory, which
- * is what makes a live simulation trustworthy rather than merely animated.
+ * The ions are genuinely being integrated here, not replayed. The chunk size
+ * is a display choice with no effect on the trajectory, because the time step
+ * is chosen from each ion's own state rather than from wall-clock time.
  */
 function tick() {
   if (!flight) return;
@@ -966,6 +519,7 @@ function tick() {
     animation.running = false;
     finishFlight();
     drawReadout();
+    render();
     setFlyLabel('Fly ions', 'launch the beam');
     return;
   }
@@ -975,8 +529,492 @@ function tick() {
 
 function setFlyLabel(label, hint) {
   flyButton.innerHTML =
-    `<span class="fly-label">${label}</span>` +
-    `<span class="fly-hint">${hint}</span>`;
+    `<span class="fly-label">${label}</span><span class="fly-hint">${hint}</span>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* rendering                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Screen transform.
+ *
+ * The axial and transverse scales are equal by default, because stretching the
+ * transverse axis makes trajectory angles unreadable. A long column is a very
+ * thin strip at true scale, so the zoom control exists - and whenever it is
+ * not 1, the view is labelled, because an unlabelled exaggerated plot is a
+ * misleading one.
+ */
+function makeTransform(width, height, zoom) {
+  const half = height / 2;
+  const scale = width / beamline.length;
+  return {
+    sx: (z) => z * scale,
+    sy: (x) => half - x * scale * zoom,
+    scale,
+    zoom,
+  };
+}
+
+/** Half-height the view needs, in metres, at the given zoom. */
+function viewHalfHeight(zoom) {
+  return beamline.radiusLimit / zoom;
+}
+
+function drawElementField(e, T, width, height, zoom) {
+  // Only elements with an axisymmetric (z, r) map have something meaningful
+  // to paint in this view. A quadrupole's solve lives in the transverse
+  // plane; its slice is drawn in the cross-section inset instead.
+  if (!e.grid || !e.field || e.typeKey === 'quadrupole') return;
+
+  const { grid, field } = e;
+  const { nz, nr } = grid;
+
+  let maxAbs = 0;
+  for (let k = 0; k < field.phi.length; k++) {
+    const a = Math.abs(field.phi[k]);
+    if (a > maxAbs) maxAbs = a;
+  }
+  if (maxAbs === 0) return;
+
+  const neg = cssRGB('--pot-neg');
+  const zero = cssRGB('--pot-zero');
+  const pos = cssRGB('--pot-pos');
+
+  const rows = 2 * nr - 1;
+  const off = document.createElement('canvas');
+  off.width = nz;
+  off.height = rows;
+  const offCtx = off.getContext('2d');
+  const img = offCtx.createImageData(nz, rows);
+
+  for (let row = 0; row < rows; row++) {
+    const j = Math.abs(nr - 1 - row);
+    for (let i = 0; i < nz; i++) {
+      const [r, g, b] = divergingColour(field.phi[j * nz + i] / maxAbs, neg, zero, pos);
+      const p = (row * nz + i) * 4;
+      img.data[p] = r;
+      img.data[p + 1] = g;
+      img.data[p + 2] = b;
+      img.data[p + 3] = 255;
+    }
+  }
+  offCtx.putImageData(img, 0, 0);
+
+  const x0 = T.sx(e.zStart);
+  const x1 = T.sx(e.zEnd);
+  const yTop = T.sy(grid.rMax);
+  const yBot = T.sy(-grid.rMax);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(off, x0, yTop, x1 - x0, yBot - yTop);
+}
+
+function drawContours(e, T) {
+  if (!e.grid || !e.field || e.typeKey === 'quadrupole') return;
+  const { grid, field } = e;
+  const { nz, nr } = grid;
+  const phi = field.phi;
+
+  let maxAbs = 0;
+  for (let k = 0; k < phi.length; k++) maxAbs = Math.max(maxAbs, Math.abs(phi[k]));
+  if (maxAbs === 0) return;
+
+  const levels = [];
+  for (let n = 1; n <= 9; n++) {
+    levels.push((maxAbs * n) / 10, (-maxAbs * n) / 10);
+  }
+
+  ctx.save();
+  ctx.strokeStyle = cssVar('--gridline');
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+
+  for (const level of levels) {
+    for (let j = 0; j < nr - 1; j++) {
+      for (let i = 0; i < nz - 1; i++) {
+        const v00 = phi[j * nz + i];
+        const v10 = phi[j * nz + i + 1];
+        const v01 = phi[(j + 1) * nz + i];
+        const v11 = phi[(j + 1) * nz + i + 1];
+        const pts = [];
+        const cross2 = (a, b, ia, ja, ib, jb) => {
+          if ((a - level) * (b - level) >= 0) return;
+          const s = (level - a) / (b - a);
+          pts.push([ia + (ib - ia) * s, ja + (jb - ja) * s]);
+        };
+        cross2(v00, v10, i, j, i + 1, j);
+        cross2(v10, v11, i + 1, j, i + 1, j + 1);
+        cross2(v01, v11, i, j + 1, i + 1, j + 1);
+        cross2(v00, v01, i, j, i, j + 1);
+        if (pts.length < 2) continue;
+        for (let p = 0; p + 1 < pts.length; p += 2) {
+          const [a, b] = [pts[p], pts[p + 1]];
+          for (const sign of [1, -1]) {
+            ctx.moveTo(T.sx(e.zStart + grid.zAt(a[0])), T.sy(sign * grid.rAt(a[1])));
+            ctx.lineTo(T.sx(e.zStart + grid.zAt(b[0])), T.sy(sign * grid.rAt(b[1])));
+          }
+        }
+      }
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawElectrodes(T) {
+  ctx.save();
+  for (const r of beamline.outline()) {
+    ctx.fillStyle = r.ghost
+      ? cssVar('--electrode-ghost')
+      : r.wall
+        ? cssVar('--axis')
+        : cssVar('--electrode');
+    ctx.globalAlpha = r.ghost ? 0.35 : r.wall ? 0.5 : 1;
+    for (const sign of [1, -1]) {
+      const yA = T.sy(sign * r.r0);
+      const yB = T.sy(sign * r.r1);
+      ctx.fillRect(
+        T.sx(r.z0),
+        Math.min(yA, yB),
+        Math.max(1, T.sx(r.z1) - T.sx(r.z0)),
+        Math.abs(yB - yA)
+      );
+    }
+  }
+  ctx.restore();
+}
+
+function drawBoundaries(T, height) {
+  // Where one element ends and the next begins. Worth showing, because each
+  // was solved as a separate problem and the joins are where that
+  // approximation lives.
+  ctx.save();
+  ctx.strokeStyle = cssVar('--gridline');
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 3]);
+  ctx.beginPath();
+  for (const e of beamline.elements) {
+    const x = T.sx(e.zStart);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAxis(T, width) {
+  ctx.save();
+  ctx.strokeStyle = cssVar('--axis');
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, T.sy(0));
+  ctx.lineTo(width, T.sy(0));
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTrajectories(T) {
+  const trajColour = cssVar('--traj');
+  const halo = cssVar('--surface-1');
+  const dim = stale ? 0.28 : 1;
+
+  for (const pass of ['halo', 'line']) {
+    ctx.save();
+    ctx.strokeStyle = pass === 'halo' ? halo : trajColour;
+    ctx.lineWidth = pass === 'halo' ? 4 : 2;
+    ctx.globalAlpha = (pass === 'halo' ? 0.55 : 1) * dim;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (const traj of trajectories) {
+      if (traj.points.length < 2) continue;
+      ctx.beginPath();
+      for (let n = 0; n < traj.points.length; n++) {
+        const p = traj.points[n];
+        if (n === 0) ctx.moveTo(T.sx(p.z), T.sy(p.x));
+        else ctx.lineTo(T.sx(p.z), T.sy(p.x));
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (animation.running) {
+    ctx.save();
+    ctx.fillStyle = trajColour;
+    ctx.strokeStyle = halo;
+    ctx.lineWidth = 1.5;
+    for (const traj of trajectories) {
+      if (!traj.active) continue;
+      const p = traj.state;
+      ctx.beginPath();
+      ctx.arc(T.sx(p.z), T.sy(p.x), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.globalAlpha = dim;
+  ctx.fillStyle = cssVar('--electrode-edge');
+  for (const traj of trajectories) {
+    if (traj.stop !== 'electrode' || traj.active) continue;
+    const p = traj.points[traj.points.length - 1];
+    ctx.beginPath();
+    ctx.arc(T.sx(p.z), T.sy(p.x), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawScale(T, width, height) {
+  ctx.save();
+  ctx.fillStyle = cssVar('--text-muted');
+  ctx.font = '11px ui-monospace, monospace';
+  ctx.textBaseline = 'bottom';
+  const totalMm = mToMm(beamline.length);
+  const stepMm = totalMm > 400 ? 100 : totalMm > 200 ? 50 : totalMm > 80 ? 20 : 10;
+  for (let zmm = 0; zmm <= totalMm + 1e-9; zmm += stepMm) {
+    const x = T.sx(mmToM(zmm));
+    ctx.fillRect(x, height - 10, 1, 5);
+    ctx.textAlign = zmm === 0 ? 'left' : 'center';
+    ctx.fillText(`${zmm.toFixed(0)}`, x, height - 12);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillText('z / mm', width - 6, height - 12);
+  ctx.restore();
+}
+
+/**
+ * Beam cross-section, looking down the axis.
+ *
+ * The main view is the x-z plane, which cannot show that the ions now move in
+ * three dimensions. In a quadrupole they emphatically do: the field converges
+ * in one transverse plane while diverging in the other, so a beam that looks
+ * well behaved from the side can be being pulled into a line seen end-on.
+ */
+function drawCrossSection() {
+  const size = 132;
+  const dpr = window.devicePixelRatio || 1;
+  cross.width = Math.round(size * dpr);
+  cross.height = Math.round(size * dpr);
+  cross.style.width = `${size}px`;
+  cross.style.height = `${size}px`;
+  crossCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  crossCtx.clearRect(0, 0, size, size);
+  crossCtx.fillStyle = cssVar('--surface-1');
+  crossCtx.fillRect(0, 0, size, size);
+
+  // Framed on the widest bore in the line, so the scale does not jump about.
+  const limit = Math.max(...beamline.elements.map((e) => e.bore)) * 1.15;
+  const c = size / 2;
+  const k = (size / 2 - 8) / limit;
+
+  crossCtx.save();
+  crossCtx.strokeStyle = cssVar('--gridline');
+  crossCtx.lineWidth = 1;
+  crossCtx.beginPath();
+  crossCtx.moveTo(8, c);
+  crossCtx.lineTo(size - 8, c);
+  crossCtx.moveTo(c, 8);
+  crossCtx.lineTo(c, size - 8);
+  crossCtx.stroke();
+
+  // The aperture the ions are currently inside.
+  const here = trajectories.find((t) => t.active) ?? trajectories[0];
+  const zNow = here ? (here.active ? here.state.z : here.points[here.points.length - 1].z) : 0;
+  const elementHere = beamline.elementAt(zNow);
+  if (elementHere) {
+    crossCtx.strokeStyle = cssVar('--electrode');
+    crossCtx.globalAlpha = 0.6;
+    crossCtx.beginPath();
+    crossCtx.arc(c, c, elementHere.bore * k, 0, Math.PI * 2);
+    crossCtx.stroke();
+    crossCtx.globalAlpha = 1;
+  }
+  crossCtx.restore();
+
+  crossCtx.save();
+  crossCtx.fillStyle = cssVar('--traj');
+  crossCtx.strokeStyle = cssVar('--surface-1');
+  crossCtx.lineWidth = 1.2;
+  for (const traj of trajectories) {
+    const p = traj.active ? traj.state : traj.points[traj.points.length - 1];
+    if (!p) continue;
+    crossCtx.globalAlpha = traj.active ? 1 : 0.35;
+    crossCtx.beginPath();
+    crossCtx.arc(c + p.x * k, c - (p.y ?? 0) * k, 3, 0, Math.PI * 2);
+    crossCtx.fill();
+    crossCtx.stroke();
+  }
+  crossCtx.restore();
+
+  crossCtx.fillStyle = cssVar('--text-muted');
+  crossCtx.font = '10px ui-monospace, monospace';
+  crossCtx.textAlign = 'center';
+  crossCtx.fillText(
+    elementHere ? escapeHtml(elementHere.label) : 'beam cross-section',
+    c,
+    size - 4
+  );
+}
+
+function render() {
+  if (!beamline || beamline.elements.length === 0) return;
+
+  const zoom = readNumber(inputs.zoom, 1);
+  const cssWidth = canvas.parentElement.clientWidth;
+  const halfH = viewHalfHeight(zoom);
+  const aspect = beamline.length / (2 * beamline.radiusLimit) * zoom;
+  const cssHeight = Math.max(170, Math.min(480, Math.round(cssWidth / aspect)));
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssWidth * dpr);
+  canvas.height = Math.round(cssHeight * dpr);
+  canvas.style.height = `${cssHeight}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  ctx.fillStyle = cssVar('--surface-1');
+  ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+  // The transverse scale that makes the visible half-height match the view.
+  const T = {
+    sx: (z) => (z / beamline.length) * cssWidth,
+    sy: (x) => cssHeight / 2 - (x / halfH) * (cssHeight / 2),
+  };
+
+  if (inputs.showField.checked) {
+    for (const e of beamline.elements) drawElementField(e, T, cssWidth, cssHeight, zoom);
+  }
+  if (inputs.showContours.checked) {
+    for (const e of beamline.elements) drawContours(e, T);
+  }
+  drawBoundaries(T, cssHeight);
+  drawAxis(T, cssWidth);
+  drawElectrodes(T);
+  drawTrajectories(T);
+  drawScale(T, cssWidth, cssHeight);
+  drawCrossSection();
+
+  // An exaggerated transverse axis is legitimate but must never be silent.
+  const exaggerated = Math.abs(zoom - 1) > 1e-9;
+  scaleNote.hidden = !exaggerated;
+  if (exaggerated) {
+    scaleNote.textContent = `Transverse scale exaggerated ${zoom.toFixed(1)}× — angles are not true`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* readout                                                             */
+/* ------------------------------------------------------------------ */
+
+function stat(label, value, suffix = '', note = '', warn = false) {
+  return `
+    <div class="stat">
+      <span class="stat-label">${label}</span>
+      <span class="stat-value${warn ? ' warn' : ''}">${value}${
+        suffix ? `<span class="suffix">${suffix}</span>` : ''
+      }</span>
+      ${note ? `<span class="stat-note">${note}</span>` : ''}
+    </div>`;
+}
+
+function drawReadout() {
+  if (stats.error) {
+    readoutEl.innerHTML = stat('Beam', 'invalid', '', escapeHtml(stats.error), true);
+    return;
+  }
+
+  const warnings = beamline.warnings;
+
+  if (!stats.flown) {
+    readoutEl.innerHTML =
+      stat(
+        'Beam',
+        animation.running ? 'flying…' : 'not flown',
+        '',
+        animation.running ? 'integrating the ions now' : 'press Fly to launch the beam'
+      ) + warningStats(warnings);
+    return;
+  }
+
+  const loaded = stats.repulsion && stats.repulsion !== 'none';
+  const rf = beamline.shortestPeriod !== null;
+  const fate = [
+    `${stats.transmitted} through`,
+    stats.reflected ? `${stats.reflected} reflected` : null,
+    stats.struck ? `${stats.struck} on metal` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const driftPct = stats.drift * 100;
+
+  readoutEl.innerHTML =
+    [
+      stat(
+        'Transmitted',
+        `${stats.transmitted}/${stats.total}`,
+        '',
+        fate,
+        stats.transmitted === 0
+      ),
+      stats.exitRadius === null
+        ? stat('Exit radius', '—', '', 'nothing transmitted')
+        : stat(
+            'Exit radius',
+            mToMm(stats.exitRadius).toFixed(2),
+            'mm',
+            'largest surviving ion at the end of the column'
+          ),
+      stats.keIn === null
+        ? stat('Net work', '—', '', 'nothing transmitted')
+        : stat(
+            'Net work',
+            stats.worstWork.toFixed(3),
+            'eV',
+            loaded || rf
+              ? `on ${stats.keIn.toFixed(0)} eV in · expected: the field does work on the ion`
+              : `worst of ${stats.transmitted} transmitted, on ${stats.keIn.toFixed(0)} eV in`,
+            !loaded && !rf && Math.abs(stats.worstWork) > 0.02 * stats.keIn
+          ),
+      // Energy is a constant of the motion only in a static field with no
+      // ion-ion interaction. An RF element does work on the ion by design -
+      // that is how a quadrupole confines it at all - so a large figure there
+      // is the physics, not the integrator, and flagging it would be
+      // flagging correct behaviour. It is only a numerical diagnostic when
+      // the column is static and the beam non-interacting.
+      stat(
+        'Energy drift',
+        driftPct < 0.01 ? '<0.01' : driftPct.toFixed(2),
+        '%',
+        rf
+          ? 'expected · a time-dependent field does work, so energy is not conserved'
+          : loaded
+            ? 'expected · ion–ion potential energy is not counted in ½mv² + qφ'
+            : 'worst ½mv² + qφ deviation · grid quality, not step size',
+        !rf && !loaded && stats.drift > 0.05
+      ),
+      stat(
+        'Column',
+        mToMm(beamline.length).toFixed(0),
+        'mm',
+        `${beamline.elements.length} elements · ${stats.steps.toLocaleString()} steps · ` +
+          `${stats.flyMs.toFixed(0)} ms`
+      ),
+    ].join('') + warningStats(warnings);
+}
+
+function warningStats(warnings) {
+  return warnings
+    .slice(0, 3)
+    .map((w) => stat('Model warning', '!', '', escapeHtml(w), true))
+    .join('');
 }
 
 /* ------------------------------------------------------------------ */
@@ -984,19 +1022,16 @@ function setFlyLabel(label, hint) {
 /* ------------------------------------------------------------------ */
 
 const OUTPUTS = {
-  vCentre: (v) => v,
-  vOuter: (v) => v,
   rays: (v) => v,
   beamRadius: (v) => parseFloat(v).toFixed(1),
+  divergence: (v) => parseFloat(v).toFixed(1),
   beamCurrent: (v) => parseFloat(v).toFixed(1),
-  // Slider is a base-10 exponent; show the value it stands for.
   ionsPerParticle: (v) => {
     const n = 10 ** parseFloat(v);
     return n < 10 ? n.toFixed(1) : n.toExponential(1).replace('e+', 'e');
   },
-  boreRadius: (v) => parseFloat(v).toFixed(1),
-  centreLength: (v) => v,
   cfl: (v) => parseFloat(v).toFixed(2),
+  zoom: (v) => parseFloat(v).toFixed(1),
 };
 
 function syncOutputs() {
@@ -1004,10 +1039,6 @@ function syncOutputs() {
     const out = el(`${id}Out`);
     if (out) out.textContent = fmt(inputs[id].value);
   }
-
-  // Each repulsion model is driven by a different physical quantity, so only
-  // the one in use is shown. Leaving a beam current visible while the Coulomb
-  // model ignores it would invite the reader to believe it did something.
   const model = inputs.repulsion.value;
   for (const node of document.querySelectorAll('[data-model]')) {
     node.hidden = node.dataset.model !== model;
@@ -1015,22 +1046,59 @@ function syncOutputs() {
 }
 
 for (const [id, input] of Object.entries(inputs)) {
-  const needsResolve = GEOMETRY_INPUTS.includes(id);
   const displayOnly = DISPLAY_INPUTS.includes(id);
   const event = input.type === 'range' ? 'input' : 'change';
   input.addEventListener(event, () => {
     syncOutputs();
-    // Anything that is not purely cosmetic invalidates the flight already on
-    // screen. It stays visible, dimmed, until the beam is flown again.
     if (!displayOnly) markStale();
-    update(needsResolve);
+    // Mathieu numbers depend on the ion, so the inspector follows the beam.
+    if (id === 'mass' || id === 'charge') renderInspector();
+    render();
+    if (!displayOnly) drawReadout();
   });
 }
 
+// Track: select, reorder, remove.
+trackEl.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-act]');
+  if (!button) return;
+  const index = Number(button.dataset.index);
+  switch (button.dataset.act) {
+    case 'select':
+      selected = index;
+      renderTrack();
+      renderInspector();
+      break;
+    case 'left':
+      moveElement(index, -1);
+      break;
+    case 'right':
+      moveElement(index, 1);
+      break;
+    case 'remove':
+      removeElement(index);
+      break;
+  }
+});
+
+addersEl.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-add]');
+  if (button) addElement(button.dataset.add);
+});
+
+// Inspector sliders edit the selected element.
+inspectorEl.addEventListener('input', (e) => {
+  const input = e.target.closest('input[data-param]');
+  if (!input) return;
+  const key = input.dataset.param;
+  const value = parseFloat(input.value);
+  const out = inspectorEl.querySelector(`[data-out="${key}"]`);
+  if (out) out.textContent = value;
+  setParam(selected, key, value);
+});
+
 flyButton.addEventListener('click', fly);
 
-// Space is the obvious key for "go", but only when the user is not part-way
-// through typing a number into one of the fields.
 window.addEventListener('keydown', (e) => {
   if (e.key !== ' ' && e.key !== 'Enter') return;
   const tag = document.activeElement?.tagName;
@@ -1045,11 +1113,21 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(render, 100);
 });
 
-// Repaint on a theme change so canvas colours follow the CSS tokens.
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
 
+/* ------------------------------------------------------------------ */
+/* start                                                               */
+/* ------------------------------------------------------------------ */
+
+statusEl.classList.add('busy');
+beamline = defaultBeamline();
+statusEl.classList.remove('busy');
+selected = 1;
+
 syncOutputs();
-update(true);
-// Fly once on load so the page is not empty, and so the button's effect is
-// obvious before it is pressed.
+renderAdders();
+renderTrack();
+renderInspector();
+render();
+drawReadout();
 fly();

@@ -33,6 +33,7 @@
   /* marks */
   --traj: #1baf7a;
   --electrode: #52514e;
+  --electrode-ghost: #a8a69f;
   --electrode-edge: #0b0b0b;
   --axis: #c3c2b7;
 
@@ -64,6 +65,7 @@
 
     --traj: #199e70;
     --electrode: #c3c2b7;
+    --electrode-ghost: #6b6a63;
     --electrode-edge: #ffffff;
     --axis: #383835;
 
@@ -371,6 +373,231 @@ input[type="range"]:focus-visible {
 }
 
 /* ------------------------------------------------------------------ */
+/* beamline track                                                      */
+/* ------------------------------------------------------------------ */
+
+.track-wrap {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+}
+
+.track-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.track-head h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.adders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.add {
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.add:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.track {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0 0 4px;
+  list-style: none;
+  overflow-x: auto;
+}
+
+.chip {
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+/* A left edge coloured by kind, so the column is readable at a glance. */
+.chip-drift {
+  border-left: 3px solid var(--axis);
+}
+.chip-aperture {
+  border-left: 3px solid var(--pot-pos);
+}
+.chip-einzel {
+  border-left: 3px solid var(--accent);
+}
+.chip-quadrupole {
+  border-left: 3px solid var(--traj);
+}
+
+.chip.sel {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.chip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px 6px;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.chip-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chip-meta,
+.chip-len {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.chip-tools {
+  display: flex;
+  border-top: 1px solid var(--border);
+}
+
+.chip-tools button {
+  flex: 1;
+  padding: 4px 0;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: none;
+  border: 0;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.chip-tools button:last-child {
+  border-right: 0;
+}
+
+.chip-tools button:hover:not([disabled]) {
+  color: var(--text-primary);
+  background: var(--surface-1);
+}
+
+.chip-tools button[disabled] {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------ */
+/* inspector                                                           */
+/* ------------------------------------------------------------------ */
+
+.instant {
+  margin-left: 5px;
+  padding: 0 4px;
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+}
+
+.field-help {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.mathieu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.mathieu .verdict {
+  flex-basis: 100%;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+.mathieu.ok .verdict {
+  color: #0ca30c;
+}
+
+.mathieu.bad .verdict {
+  color: #d03b3b;
+}
+
+/* ------------------------------------------------------------------ */
+/* cross-section inset                                                 */
+/* ------------------------------------------------------------------ */
+
+.cross {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.scale-note {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  margin: 0;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: #d03b3b;
+  background: var(--surface-1);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+/* ------------------------------------------------------------------ */
 /* legend                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -410,6 +637,9 @@ input[type="range"]:focus-visible {
 
 .swatch-electrode {
   background: var(--electrode);
+}
+.swatch-ghost {
+  background: var(--electrode-ghost);
 }
 .swatch-neg {
   background: var(--pot-neg);

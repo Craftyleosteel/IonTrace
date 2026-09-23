@@ -4,7 +4,9 @@ This document states exactly what IonTrace computes, what it assumes, and what
 it leaves out. It is meant to be adversarial towards the code: if the code and
 this document disagree, one of them is a bug.
 
-Version 0.1 models **electrostatic ion optics in vacuum**. Nothing else.
+Version 0.2 models **ion optics in vacuum**: electrostatic and radio-frequency
+fields, three-dimensional trajectories, optional space charge, and beamlines
+assembled from interchangeable elements.
 
 ---
 
@@ -27,54 +29,85 @@ an approximation.
 
 ### 1.2 The motion
 
-$$m\frac{d^2\mathbf{r}}{dt^2} = q\,\mathbf{E}(\mathbf{r})$$
+$$m\frac{d^2\mathbf{r}}{dt^2}
+= q\Big[\mathbf{E}_{\text{electrodes}}(\mathbf{r}, t)
+      + \mathbf{E}_{\text{self}}(\mathbf{r})\Big]$$
 
-That is the complete right-hand side. There is no magnetic term, no drag, no
-ion–ion interaction and no relativistic correction. Section 5 lists what each
-omission costs.
+in three Cartesian components. The electrode term may depend on time (§8); the
+self term is the beam's own space charge and is optional (§7). There is still
+no magnetic term, no drag and no relativistic correction — §5 lists what each
+remaining omission costs.
 
-### 1.3 Conserved quantities
+### 1.3 Conserved quantities, and when they are not
 
-With a static field the total energy
+In a **static** field with **no** ion–ion interaction, the total energy
 
 $$E = \tfrac{1}{2}mv^2 + q\phi(\mathbf{r})$$
 
-is a constant of the motion. IonTrace tracks it on every flight and reports the
-worst deviation, because a single number that must not change is the most
-informative diagnostic available: a unit slip, a mis-scaled field, a bad
-interpolation and an unstable time step all show up in it.
+is a constant of the motion, and IonTrace tracks it as its single most
+informative diagnostic: a unit slip, a mis-scaled field, a bad interpolation
+and an unstable time step all show up in it.
 
-For an axisymmetric field, angular momentum about the axis
-$L_z = m r^2 \dot\theta$ is conserved, because there is no $E_\theta$ to
-produce a torque. In IonTrace $L_z$ is not merely conserved but **identically
-zero**, and structurally so: `IonState` has no azimuthal slot and `makeIon`
-sets only $v_x$ and $v_z$, so azimuthal velocity cannot be introduced. The
-orbit therefore stays in a plane containing the axis for all time and there is
-no centrifugal term. This is what makes the 2D integration exact rather than
-approximate.
+Both qualifiers matter, and the readout states which case applies rather than
+reporting a large number as though something were wrong:
 
-Note the consequence: a real beam that *does* carry angular momentum — from a
-magnetic lens upstream, a skewed source, or off-axis extraction — cannot be
-represented at all, and nothing warns. Absence of $E_\theta$ conserves $L_z$;
-it does not make it zero.
+| Condition | Is $\tfrac{1}{2}mv^2 + q\phi$ conserved? |
+|---|---|
+| Static field, no repulsion | **Yes** — a deviation is numerical error |
+| Repulsion on | No — the tracked quantity omits the ions' mutual potential energy, which converts into kinetic energy as the beam expands (§7) |
+| RF element present | No — a time-dependent field does work on the ion, which is how a quadrupole confines it at all (§8.7) |
+
+Angular momentum about the axis, $L_z = m r^2\dot\theta$, is conserved in an
+axisymmetric field because there is no $E_\theta$ to produce a torque. It is
+**not** generally zero: an ion launched with azimuthal velocity keeps it. What
+is true is that an ion launched with $L_z = 0$ in a purely axisymmetric column
+stays in a plane containing the axis for ever, which is why a lens can be
+understood in two dimensions. A quadrupole breaks the symmetry outright, so
+$L_z$ is not conserved there at all.
 
 ---
 
 ## 2. Geometry and symmetry
 
-The solved domain is two-dimensional in $(z, r)$ with rotational symmetry about
-$r = 0$.
+**Ions move in three dimensions.** The state is $(x, y, z)$ with velocity
+$(v_x, v_y, v_z)$, and that is forced by the quadrupole: its field depends on
+the azimuth, so an ion in it does not stay in a plane containing the axis.
 
-**This is not a 2D approximation of a 3D problem.** For a rotationally
-symmetric electrode set, $\partial\phi/\partial\theta = 0$ exactly, so the 3D
-Laplace equation collapses to a 2D one with no information lost. The third
-dimension is recovered by rotation. A genuinely 3D geometry — a quadrupole rod
-set, a slotted electrode, anything with azimuthal structure — cannot be
-represented this way and is out of scope for this version.
+**Fields are still solved in two dimensions**, but which two depends on the
+element:
 
-A `planar` mode also exists, treating the transverse coordinate as a Cartesian
-$y$ with no symmetry assumption. It is used by the test suite for cases with
-closed-form solutions and is not exposed in the UI.
+| Element | Solved on | Why it is exact |
+|---|---|---|
+| Einzel lens, aperture plate, drift | $(z, r)$, axisymmetric | $\partial\phi/\partial\theta = 0$ exactly, so the 3D Laplace equation collapses to 2D with nothing lost. Rotation recovers the third dimension. |
+| Quadrupole | $(x, y)$, transverse | The rods are uniform along $z$, so the potential does not depend on it. |
+
+Neither is an approximation of a 3D solve; each is a symmetry being used.
+
+A planar launch stays planar in an axisymmetric element — there is no
+azimuthal field to take the ion out of the plane — which is why the
+two-dimensional picture remains exact for a lens, and why moving to 3D changed
+nothing for the cases that never needed it. The test suite checks this
+explicitly.
+
+### 2.0 Beamlines
+
+Elements are composed into a column. Each is placed at its own $z$, and a field
+query finds the element containing that point and delegates to it in local
+coordinates. Adding a new kind of optic means describing its metal and its
+field; the composition layer does not change.
+
+**Elements are solved in isolation, not as one system.** Each is a separate
+Dirichlet problem with grounded end faces, so its fringe field is confined to
+its own footprint and stops abruptly at the boundary. The true solution for the
+whole column would let neighbouring electrodes see each other.
+
+That approximation is good when active electrodes are separated by enough
+grounded drift for the fringe to have died away — roughly one bore radius — and
+wrong when two live elements are butted together. The beamline warns rather
+than leaving it to be discovered. Solving the whole column at once is what a 3D
+code does; it is far more expensive, and it would destroy the property that
+makes this interactive, namely that only the element you changed re-solves, and
+voltages never re-solve at all.
 
 ### 2.1 The enclosure
 
@@ -394,7 +427,7 @@ trustworthy where the corresponding term is negligible.
 | Magnetic force | $q\,\mathbf{v}\times\mathbf{B}$ | Any magnetic sector, ICR cell, or fringe field from a nearby magnet. |
 | Buffer-gas collisions | drag + stochastic kicks | Any trap or guide with He/N₂ at > ~10⁻⁴ mbar. Dominates ion motion in collisional cooling. |
 | Space charge — **now modelled**, see §7 | ion–ion Coulomb | — |
-| RF / time-dependent fields | $\phi(\mathbf{r}, t)$ | Every Paul trap, quadrupole filter and ion funnel. This build solves a static field only. |
+| RF / time-dependent fields — **now modelled**, see §8 | $\phi(\mathbf{r}, t)$ | — |
 | Image charge | induced surface charge | Very close electrode approach; small for typical bore radii. |
 | Relativistic correction | $\gamma$ | Reported by `relativisticError`; warned on above 0.1 %, which for an electron is **341 eV** ($\beta = 0.037$). A 10 keV electron is already 2.9 % off. Ions are safe: a 1 keV, 100 u ion is off by $1.6\times10^{-8}$. |
 | Surface effects | patch potentials, roughness | Real instruments at high precision. |
@@ -608,7 +641,93 @@ bunch's electrostatic energy into transverse kinetic energy.
 
 ---
 
-## 8. Known limitations of this version
+## 8. The quadrupole and RF fields
+
+### 8.1 Why it is not axisymmetric
+
+The ideal linear quadrupole potential is
+
+$$\phi(x, y, t) = \big(U + V\cos\Omega t\big)\,\frac{x^2 - y^2}{r_0^2}$$
+
+positive along $x$ and negative along $y$. The azimuth is the whole point, so
+this cannot live on an axisymmetric grid at all. It is solved instead on a
+**transverse** $(x, y)$ grid, with real round rods painted rather than ideal
+hyperbolae — so the solution carries the higher multipoles a real rod set has.
+The 12-pole in particular is why the rod-to-field radius ratio $1.1487$ is an
+engineering choice and not a detail.
+
+### 8.2 Every instant is defocusing in one plane
+
+At any moment the field converges in one transverse plane and diverges in the
+other. A **DC** quadrupole is therefore always unstable in one plane — it is a
+singlet, and needs a partner of opposite sign to make a net-focusing doublet,
+which is how accelerator FODO cells work. What makes an **RF** quadrupole
+different is that the sign alternates faster than the ion can escape, so the
+time-averaged force is inward in both planes for the right parameters.
+
+### 8.3 Fast adjust with a time-dependent coefficient
+
+The two rod pairs are always driven antisymmetrically, at $+W(t)$ and $-W(t)$,
+so the field is exactly linear in $W$ and a single unit solution suffices:
+
+$$\mathbf{E}(x, y, t) = W(t)\,\mathbf{E}_{\text{unit}}(x, y),
+\qquad W(t) = U + V\cos(\Omega t + \varphi)$$
+
+Nothing is approximated by that factorisation. It is the same superposition
+used everywhere else, with a coefficient that happens to vary in time, and it
+means the RF costs no re-solve at all.
+
+### 8.4 Stability
+
+$$a = \frac{8zeU}{m r_0^2 \Omega^2}, \qquad q = \frac{4zeV}{m r_0^2 \Omega^2}$$
+
+These, not the voltages, decide whether an ion is transmitted. For an RF-only
+filter ($a = 0$) the first stability region ends at $q = 0.90803$. Since
+$q \propto 1/m$, each mass sits at a different $q$ at fixed RF, which is what
+makes the device a mass filter.
+
+**Stability is asymptotic.** It is a property of the Mathieu equation in the
+limit of many oscillations, so an ion that crosses the rods in a handful of RF
+cycles can be lost whatever its $(a, q)$ says. The shipped default gives about
+thirty cycles; at eight, most of the beam is thrown out despite sitting
+comfortably inside the stability region. This is real, not numerical, and is a
+known constraint on short filters.
+
+### 8.5 The step size must resolve the RF
+
+A time-dependent field adds a third limit to §3.5: $\Delta t \le C\,T_{RF}$,
+twenty steps per period at the default. Without it, a slow ion could take a
+step spanning several field reversals and integrate a field it never
+experienced — an unstable trajectory would look perfectly confined. The
+Runge–Kutta stages are evaluated at $t$, $t+\Delta t/2$, $t+\Delta t/2$ and
+$t+\Delta t$, which for a static field is redundant and for an RF one is the
+difference between fourth order and second.
+
+### 8.6 Hard edge, and what it costs
+
+The field is uniform along the rods and zero outside them. Real fringe fields
+at the rod ends are **not** modelled, and they matter: in a real mass filter
+the entrance fringe is a well-known cause of transmission loss, because an ion
+crosses a region where the RF is still ramping up. So transmission through this
+element is **optimistic**, and an off-axis ion's potential energy jumps at the
+rod ends because the potential is discontinuous there. The transverse dynamics
+inside the rods, which is what sets stability, are unaffected.
+
+Softening the edge with a longitudinal envelope $g(z)$ would be worse, not
+better. $g(z)(x^2-y^2)$ does not satisfy Laplace's equation unless $g'' = 0$,
+so it would trade a known approximation for a field that is not a field.
+
+### 8.7 Energy is not conserved, and should not be
+
+With a time-dependent field, $\tfrac{1}{2}mv^2 + q\phi$ is **not** a constant
+of the motion: the RF does work on the ion, which is how a quadrupole confines
+it at all. The energy-drift diagnostic of §1.3 therefore carries no information
+about numerical quality once an RF element is in the line, and the readout says
+so rather than reporting a large figure as though something were wrong.
+
+---
+
+## 9. Known limitations of this version
 
 **1. The lens does not converge at second order, and the reason is not
 staircasing.** Measured Richardson orders for `buildEinzelLens` at
@@ -649,7 +768,11 @@ which is meaningless.
 6. `optimalOmega` is derived for an empty rectangle and ignores interior
    electrodes; it costs roughly 30 % more sweeps than the empirical optimum on
    the shipped geometry. A speed matter only — the converged answer is the same.
-7. Space charge, collisions and time-dependent fields are absent — §5.
-8. Only one geometry (`einzel`) ships. The potential-array architecture is
-   geometry-agnostic; `paint()` accepts any predicate over $(z, r)$, so adding
-   an element means describing its metal, not writing new field code.
+7. Collisions, magnetic forces and image charges are absent — §5. Quadrupole
+   fringe fields are absent — §8.6.
+8. Elements are solved in isolation rather than as one column, so the field
+   where two live elements meet is not a true solution for the pair — §2.0.
+9. Four element types ship: drift, aperture plate, einzel lens and quadrupole.
+   The architecture is geometry-agnostic - `paint()` accepts any predicate over
+   the solved plane - so adding an element means describing its metal and its
+   field, not touching the composition layer.

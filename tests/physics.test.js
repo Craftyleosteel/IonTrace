@@ -119,11 +119,14 @@ function solveAgainstExact(grid, exact, opts = {}) {
  */
 function harmonicField(k) {
   return {
-    grid: { step: 1e-3, symmetry: PLANAR, z0: 0, zLength: 1, rLength: 1, nz: 3, nr: 3 },
-    fieldAtCartesian(x) {
-      return { Ex: -k * x, Ez: 0 };
+    lengthScale: 1e-3,
+    shortestPeriod: null,
+    zRange: [-1e9, 1e9],
+    strikes: () => false,
+    fieldAt3D(x) {
+      return { Ex: -k * x, Ey: 0, Ez: 0 };
     },
-    potentialAtCartesian(x) {
+    potentialAt3D(x) {
       return 0.5 * k * x * x;
     },
   };
@@ -803,7 +806,7 @@ describe('Discrete Coulomb repulsion', () => {
     // E = q / (4 pi eps0 d^2), pointing away from the other charge. Checked
     // against the closed form rather than against itself.
     const d = 1e-3;
-    const { Ex, Ez } = coulombField([0, d], [0, 0], [e, e], 1, 0);
+    const { Ex, Ez } = coulombField([0, d], [0, 0], [0, 0], [e, e], 1, 0);
     const expected = (k * e) / (d * d);
 
     assertRelClose(Ex[0], -expected, 1e-12, 'left charge pushed left');
@@ -812,7 +815,7 @@ describe('Discrete Coulomb repulsion', () => {
   });
 
   it('falls off as the inverse square of separation', () => {
-    const at = (d) => coulombField([0, d], [0, 0], [e, e], 1, 0).Ex[1];
+    const at = (d) => coulombField([0, d], [0, 0], [0, 0], [e, e], 1, 0).Ex[1];
     assertRelClose(at(2e-3), at(1e-3) / 4, 1e-12, 'doubling d quarters E');
     assertRelClose(at(3e-3), at(1e-3) / 9, 1e-12, 'tripling d gives one ninth');
   });
@@ -820,7 +823,7 @@ describe('Discrete Coulomb repulsion', () => {
   it('obeys Newton\'s third law', () => {
     // Equal and opposite forces. With unequal charges the FIELDS differ, so
     // the check has to be on q E, which is the force.
-    const { Ex } = coulombField([0, 1e-3], [0, 0], [e, 3 * e], 1, 0);
+    const { Ex } = coulombField([0, 1e-3], [0, 0], [0, 0], [e, 3 * e], 1, 0);
     assertRelClose(e * Ex[0], -(3 * e) * Ex[1], 1e-12, 'forces must balance');
   });
 
@@ -828,12 +831,13 @@ describe('Discrete Coulomb repulsion', () => {
     // The field from three charges must equal the sum of the three pairwise
     // fields computed separately.
     const xs = [0, 1e-3, 2.5e-3];
+    const ys = [0, 0, 0];
     const zs = [0, 0.5e-3, -1e-3];
     const qs = [e, e, e];
-    const all = coulombField(xs, zs, qs, 1, 0);
+    const all = coulombField(xs, ys, zs, qs, 1, 0);
 
-    const a = coulombField([xs[0], xs[1]], [zs[0], zs[1]], [qs[0], qs[1]], 1, 0);
-    const b = coulombField([xs[0], xs[2]], [zs[0], zs[2]], [qs[0], qs[2]], 1, 0);
+    const a = coulombField([xs[0], xs[1]], [ys[0], ys[1]], [zs[0], zs[1]], [qs[0], qs[1]], 1, 0);
+    const b = coulombField([xs[0], xs[2]], [ys[0], ys[2]], [zs[0], zs[2]], [qs[0], qs[2]], 1, 0);
 
     assertRelClose(all.Ex[0], a.Ex[0] + b.Ex[0], 1e-12, 'superposition in x');
     assertRelClose(all.Ez[0], a.Ez[0] + b.Ez[0], 1e-12, 'superposition in z');
@@ -842,8 +846,8 @@ describe('Discrete Coulomb repulsion', () => {
   it('scales linearly with the macro-weight', () => {
     // A particle standing for w real ions carries charge wq and mass wm, so
     // q/m is unchanged and only the mutual field scales - linearly in w.
-    const a = coulombField([0, 1e-3], [0, 0], [e, e], 1, 0).Ex[1];
-    const b = coulombField([0, 1e-3], [0, 0], [e, e], 1e6, 0).Ex[1];
+    const a = coulombField([0, 1e-3], [0, 0], [0, 0], [e, e], 1, 0).Ex[1];
+    const b = coulombField([0, 1e-3], [0, 0], [0, 0], [e, e], 1e6, 0).Ex[1];
     assertRelClose(b, 1e6 * a, 1e-12, 'weight scales the field linearly');
   });
 
@@ -852,7 +856,7 @@ describe('Discrete Coulomb repulsion', () => {
     // order 1e-3 V/m, against electrode fields of order 1e4. Getting no
     // visible repulsion from a handful of real ions is the correct answer,
     // not a defect - this pins that expectation.
-    const { Ex } = coulombField([0, 3e-3], [0, 0], [e, e], 1, 0);
+    const { Ex } = coulombField([0, 3e-3], [0, 0], [0, 0], [e, e], 1, 0);
     assert(
       Math.abs(Ex[1]) < 1e-3,
       `two real ions 3 mm apart should barely interact, got ${Ex[1]} V/m`
@@ -860,7 +864,7 @@ describe('Discrete Coulomb repulsion', () => {
   });
 
   it('exerts no force on an isolated particle', () => {
-    const { Ex, Ez } = coulombField([1e-3], [0], [e], 1e6, 0);
+    const { Ex, Ez } = coulombField([1e-3], [0], [0], [e], 1e6, 0);
     assertClose(Ex[0], 0, 0, 'a lone particle has nothing to push against');
     assertClose(Ez[0], 0, 0, 'a lone particle has nothing to push against');
   });
@@ -870,7 +874,7 @@ describe('Discrete Coulomb repulsion', () => {
     // the pair apart with energy from nowhere. With softening it stays finite
     // and, crucially, still matches Coulomb at long range.
     const eps = 1e-4;
-    const close = coulombField([0, 1e-9], [0, 0], [e, e], 1, eps).Ex[1];
+    const close = coulombField([0, 1e-9], [0, 0], [0, 0], [e, e], 1, eps).Ex[1];
     assert(Number.isFinite(close), 'softened force must stay finite');
     const bound = (k * e) / (eps * eps);
     assert(
@@ -878,7 +882,7 @@ describe('Discrete Coulomb repulsion', () => {
       `softened force ${close} exceeds its own bound ${bound}`
     );
 
-    const far = coulombField([0, 5e-3], [0, 0], [e, e], 1, eps).Ex[1];
+    const far = coulombField([0, 5e-3], [0, 0], [0, 0], [e, e], 1, eps).Ex[1];
     const unsoftened = (k * e) / (5e-3 * 5e-3);
     assertRelClose(far, unsoftened, 1e-3, 'softening must not alter long range');
   });
@@ -886,7 +890,7 @@ describe('Discrete Coulomb repulsion', () => {
   it('attracts opposite charges', () => {
     // The sign convention has to work for a negative ion too, or an anion
     // beam would implode.
-    const { Ex } = coulombField([0, 1e-3], [0, 0], [e, -e], 1, 0);
+    const { Ex } = coulombField([0, 1e-3], [0, 0], [0, 0], [e, -e], 1, 0);
     // Particle 1 is negative and sits to the right of a positive charge, so
     // the FIELD there points right (away from the positive charge) while the
     // force qE on it points left, back towards the positive charge.
@@ -1147,7 +1151,7 @@ describe('Integrators against an analytic solution', () => {
   const omega = Math.sqrt((charge * k) / mass);
   const amplitude = 1e-3; // m
 
-  const start = { mass, charge, x: amplitude, z: 0, vx: 0, vz: 0, t: 0 };
+  const start = { mass, charge, x: amplitude, y: 0, z: 0, vx: 0, vy: 0, vz: 0, t: 0 };
   const exactX = (t) => amplitude * Math.cos(omega * t);
   const exactVx = (t) => -amplitude * omega * Math.sin(omega * t);
 
@@ -1215,11 +1219,14 @@ describe('Integrators against an analytic solution', () => {
     // coding error, not a truncation error.
     const a = 9.6486e8;
     const uniform = {
-      grid: { step: 1e-3 },
-      fieldAtCartesian: () => ({ Ex: (a * mass) / charge, Ez: 0 }),
-      potentialAtCartesian: (x) => (-a * mass * x) / charge,
+      lengthScale: 1e-3,
+      shortestPeriod: null,
+      zRange: [-1e9, 1e9],
+      strikes: () => false,
+      fieldAt3D: () => ({ Ex: (a * mass) / charge, Ey: 0, Ez: 0 }),
+      potentialAt3D: (x) => (-a * mass * x) / charge,
     };
-    const ion = { mass, charge, x: 0, z: 0, vx: 0, vz: 4392.7, t: 0 };
+    const ion = { mass, charge, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 4392.7, t: 0 };
     const dt = 1e-8;
     const steps = 200;
     const T = dt * steps;

@@ -166,8 +166,8 @@ export class Field {
     return (
       z >= grid.z0 &&
       z <= grid.z0 + grid.zLength &&
-      r >= 0 &&
-      r <= grid.rLength
+      r >= grid.r0 &&
+      r <= grid.r0 + grid.rLength
     );
   }
 
@@ -178,7 +178,7 @@ export class Field {
   #locate(z, r) {
     const { grid } = this;
     const gz = (z - grid.z0) / grid.step;
-    const gr = r / grid.step;
+    const gr = (r - grid.r0) / grid.step;
 
     // Clamp so a particle exactly on the far edge still lands in a valid cell.
     let i = Math.floor(gz);
@@ -260,5 +260,98 @@ export class Field {
   /** Potential in the meridional plane at signed transverse position x. */
   potentialAtCartesian(x, z) {
     return this.potentialAt(z, this.grid.symmetry === PLANAR ? x : Math.abs(x));
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* three-dimensional interface                                      */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Field at a point in space, in Cartesian components.
+   *
+   * The SOLVE stays two-dimensional: for a rotationally symmetric electrode
+   * set the potential genuinely does not depend on the azimuth, so nothing is
+   * gained by storing it in three dimensions. What the third dimension buys is
+   * the ability to carry ions that leave the meridional plane - which they
+   * must, once a non-axisymmetric element such as a quadrupole is in the line.
+   *
+   * The radial field is resolved onto x and y by its direction cosines. On the
+   * axis it is exactly zero, so there is no direction to resolve and none is
+   * needed.
+   *
+   * `t` is accepted and ignored: a solved electrode field is static. Elements
+   * with time-dependent voltages implement this method themselves.
+   */
+  fieldAt3D(x, y, z) {
+    if (this.grid.symmetry === PLANAR) {
+      // Planar mode has no azimuth to resolve; the transverse axis is x and
+      // y is simply not represented.
+      const { Ez, Er } = this.fieldAt(z, x);
+      return { Ex: Er, Ey: 0, Ez };
+    }
+    const r = Math.hypot(x, y);
+    const { Ez, Er } = this.fieldAt(z, r);
+    if (r === 0) return { Ex: 0, Ey: 0, Ez };
+    return { Ex: (Er * x) / r, Ey: (Er * y) / r, Ez };
+  }
+
+  /** Potential at a point in space, in volts. */
+  potentialAt3D(x, y, z) {
+    if (this.grid.symmetry === PLANAR) return this.potentialAt(z, x);
+    return this.potentialAt(z, Math.hypot(x, y));
+  }
+
+  /** Axial extent of the modelled region, in metres. */
+  get zRange() {
+    return [this.grid.z0, this.grid.z0 + this.grid.zLength];
+  }
+
+  /**
+   * Finest spatial detail the field can represent, in metres.
+   *
+   * The integrator uses this to bound how far an ion may travel per step. It
+   * is the grid step here; a composed beamline reports the finest step of any
+   * element in it.
+   */
+  get lengthScale() {
+    return this.grid.step;
+  }
+
+  /**
+   * Shortest period of any time-dependent voltage, in seconds, or null when
+   * everything is static.
+   *
+   * A solved electrode field never varies in time. Elements driven at radio
+   * frequency override this so the integrator can keep its step short enough
+   * to resolve the oscillation rather than alias it.
+   */
+  get shortestPeriod() {
+    return null;
+  }
+
+  /** Largest transverse distance from the axis the domain represents. */
+  get radiusLimit() {
+    return this.grid.rMax;
+  }
+
+  /**
+   * True if a point lies in metal the ion has struck.
+   *
+   * Nodes on an open face are excluded: they carry a fixed potential because
+   * the Laplace problem needs the domain closed, but they are the entrance
+   * and exit apertures, not a surface.
+   */
+  strikes(x, y, z) {
+    const { grid } = this;
+    const r = grid.symmetry === PLANAR ? x : Math.hypot(x, y);
+    // Past the outer wall counts as a strike: that wall is real metal, and a
+    // step that overshoots it must not be reported as an escape.
+    if (r > grid.rMax || r < grid.rMin) return true;
+    const i = Math.round((z - grid.z0) / grid.step);
+    const j = Math.round((r - grid.r0) / grid.step);
+    if (i < 0 || j < 0 || i >= grid.nz || j >= grid.nr) return false;
+    if (i === 0 && grid.openFaces?.zMin) return false;
+    if (i === grid.nz - 1 && grid.openFaces?.zMax) return false;
+    return grid.isElectrode(i, j);
   }
 }

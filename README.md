@@ -7,19 +7,44 @@ resulting field.
 Built for physical chemists and ion opticians who want to see where their ions
 go without installing anything.
 
-**Status: v0.1.** Electrostatic optics in vacuum, one geometry (einzel lens).
-The physics that is present is validated; the physics that is absent is
+**Status: v0.2.** Electrostatic and RF optics in vacuum, three-dimensional
+trajectories, optional space charge, and beamlines assembled from drifts,
+aperture plates, einzel lenses and quadrupoles. The physics that is present is
+validated; the physics that is absent is
 [documented](docs/PHYSICS.md#5-what-is-deliberately-absent).
 
 ---
+
+## Building a beamline
+
+The main view is an editable column. Add elements, reorder them, remove them,
+and fly ions through the result:
+
+| Element | What it is |
+|---|---|
+| **Drift** | Field-free tube. Separates active elements so their fringe fields do not overlap. |
+| **Aperture plate** | A charged plate with a hole. Not a passive opening — the equipotentials bulge through it, so it acts as a lens. |
+| **Einzel lens** | Three coaxial cylinders, outer two grounded. Does no net work on a transmitted ion, and focuses for either polarity. |
+| **Quadrupole** | Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both. |
+
+Elements carry their own local field solve, so **only the element you change
+re-solves**, and voltages never re-solve at all.
 
 ## What it computes
 
 $$\nabla^2\phi = 0 \quad\text{between electrodes}, \qquad
 m\ddot{\mathbf{r}} = q\mathbf{E}, \qquad \mathbf{E} = -\nabla\phi$$
 
-Geometry is axisymmetric, so the solve is two-dimensional in $(z, r)$ and
-rotation supplies the third dimension exactly — not as an approximation.
+**Ions move in three dimensions.** That is forced by the quadrupole: its field
+depends on the azimuth, so an ion in it does not stay in a plane containing the
+axis.
+
+**Fields are still solved in two dimensions**, but which two depends on the
+element. Einzel lenses, aperture plates and drifts are axisymmetric, so
+$\partial\phi/\partial\theta = 0$ exactly and rotation supplies the third
+dimension. A quadrupole's rods are uniform along $z$, so it is solved on a
+*transverse* $(x, y)$ grid instead. Neither is an approximation of a 3D solve;
+each is a symmetry being used.
 
 **Space charge is included.** The beam repels itself, driven by a beam
 *current* rather than by how many rays you happen to draw. Note that a ray
@@ -33,8 +58,14 @@ $$E_r(r) = \frac{\lambda_{\text{enc}}(r)}{2\pi\varepsilon_0 r},
 Because the force on each ion depends on where the others are at that instant,
 the whole beam is integrated in lockstep on a shared time step.
 
-**Not included:** magnetic forces, buffer-gas collisions, RF/time-dependent
-fields, image charges, relativistic correction. Each omission and its
+**RF fields are included.** A quadrupole's rod pairs are driven at
+$W(t) = U + V\cos(\Omega t + \varphi)$, and because the pairs are always
+driven antisymmetrically the field is exactly linear in $W$ - one solved map,
+scaled by a coefficient that varies in time, with no re-solve. Mathieu $a$ and
+$q$ are reported next to the controls that set them.
+
+**Not included:** magnetic forces, buffer-gas collisions, image charges,
+quadrupole fringe fields, relativistic correction. Each omission and its
 consequences are listed in [docs/PHYSICS.md](docs/PHYSICS.md).
 
 ## Architecture
@@ -98,6 +129,8 @@ output:
 | Integrators | analytic simple harmonic motion; orders 4 and 2 confirmed |
 | Space charge | closed-form uniform-beam field; cylindrical shell theorem; zero at zero current |
 | Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection reported as reflection, focus independent of ion mass |
+| Quadrupole | closed-form $(x^2-y^2)/r_0^2$ potential; four-fold symmetry; Mathieu $a$, $q$ and their scalings; stable ion transmits and unstable one is lost |
+| Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for
 physical reasons rather than because an output number moved. The sharpest of
@@ -114,7 +147,7 @@ they found, including the parts that are still wrong.
 
 ## Known limitations
 
-Read [docs/PHYSICS.md §7](docs/PHYSICS.md) before trusting a number. The
+Read [docs/PHYSICS.md §9](docs/PHYSICS.md) before trusting a number. The
 headline ones:
 
 - **Transmission is systematically pessimistic.** Electrode strikes resolve to
@@ -128,6 +161,12 @@ headline ones:
 - **Biasing the entrance or exit electrode** puts a spurious field across the
   drift regions, because the domain end faces act as grounded plates. The UI
   flags it.
+- **Quadrupole fringe fields are absent.** The rods have a hard edge, so
+  transmission through one is optimistic — entrance fringe loss is a real and
+  well-known effect in mass filters.
+- **Elements are solved in isolation**, so the field where two live elements
+  meet is not a true solution for the pair. Leave a drift between them; the
+  readout warns when you do not.
 
 ## Layout
 

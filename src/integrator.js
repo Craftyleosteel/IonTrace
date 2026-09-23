@@ -57,60 +57,81 @@ import {
  * costs accuracy: the space-charge part of the motion is effectively second
  * order even though the electrode part stays fourth.
  */
-export function accelerationAt(field, qOverM, x, z, extra) {
-  const { Ex, Ez } = field.fieldAtCartesian(x, z);
+export function accelerationAt(field, qOverM, x, y, z, t, extra) {
+  const E = field.fieldAt3D(x, y, z, t);
   if (extra) {
-    return { ax: qOverM * (Ex + extra.Ex), az: qOverM * (Ez + extra.Ez) };
+    return {
+      ax: qOverM * (E.Ex + extra.Ex),
+      ay: qOverM * (E.Ey + (extra.Ey ?? 0)),
+      az: qOverM * (E.Ez + extra.Ez),
+    };
   }
-  return { ax: qOverM * Ex, az: qOverM * Ez };
+  return { ax: qOverM * E.Ex, ay: qOverM * E.Ey, az: qOverM * E.Ez };
 }
 
 /**
  * One classical fourth-order Runge-Kutta step.
  *
- * The state is (x, z, vx, vz) and the derivative is
- * (vx, vz, q Ex / m, q Ez / m). Because the acceleration depends only on
- * position, each stage needs exactly one field evaluation.
+ * The state is (x, y, z, vx, vy, vz) and the derivative is
+ * (vx, vy, vz, q Ex / m, q Ey / m, q Ez / m). Each stage needs exactly one
+ * field evaluation.
+ *
+ * Stages are evaluated at t, t + dt/2, t + dt/2 and t + dt. For a static field
+ * that is redundant; for a radio-frequency one it is the difference between
+ * fourth order and second.
  */
 export function stepRK4(field, ion, dt, extra) {
   const qm = ion.charge / ion.mass;
-  const { x, z, vx, vz } = ion;
+  const { x, z, vx, vz, t } = ion;
+  const y = ion.y ?? 0;
+  const vy = ion.vy ?? 0;
+  const h = 0.5 * dt;
 
-  const a1 = accelerationAt(field, qm, x, z, extra);
-  const k1 = { dx: vx, dz: vz, dvx: a1.ax, dvz: a1.az };
+  const a1 = accelerationAt(field, qm, x, y, z, t, extra);
+  const k1 = { dx: vx, dy: vy, dz: vz, dvx: a1.ax, dvy: a1.ay, dvz: a1.az };
 
-  const a2 = accelerationAt(field, qm, x + 0.5 * dt * k1.dx, z + 0.5 * dt * k1.dz, extra);
+  const a2 = accelerationAt(
+    field, qm, x + h * k1.dx, y + h * k1.dy, z + h * k1.dz, t + h, extra
+  );
   const k2 = {
-    dx: vx + 0.5 * dt * k1.dvx,
-    dz: vz + 0.5 * dt * k1.dvz,
-    dvx: a2.ax,
-    dvz: a2.az,
+    dx: vx + h * k1.dvx,
+    dy: vy + h * k1.dvy,
+    dz: vz + h * k1.dvz,
+    dvx: a2.ax, dvy: a2.ay, dvz: a2.az,
   };
 
-  const a3 = accelerationAt(field, qm, x + 0.5 * dt * k2.dx, z + 0.5 * dt * k2.dz, extra);
+  const a3 = accelerationAt(
+    field, qm, x + h * k2.dx, y + h * k2.dy, z + h * k2.dz, t + h, extra
+  );
   const k3 = {
-    dx: vx + 0.5 * dt * k2.dvx,
-    dz: vz + 0.5 * dt * k2.dvz,
-    dvx: a3.ax,
-    dvz: a3.az,
+    dx: vx + h * k2.dvx,
+    dy: vy + h * k2.dvy,
+    dz: vz + h * k2.dvz,
+    dvx: a3.ax, dvy: a3.ay, dvz: a3.az,
   };
 
-  const a4 = accelerationAt(field, qm, x + dt * k3.dx, z + dt * k3.dz, extra);
+  const a4 = accelerationAt(
+    field, qm, x + dt * k3.dx, y + dt * k3.dy, z + dt * k3.dz, t + dt, extra
+  );
   const k4 = {
     dx: vx + dt * k3.dvx,
+    dy: vy + dt * k3.dvy,
     dz: vz + dt * k3.dvz,
-    dvx: a4.ax,
-    dvz: a4.az,
+    dvx: a4.ax, dvy: a4.ay, dvz: a4.az,
   };
 
   const sixth = dt / 6;
+  const w = (p, q, r, s) => sixth * (p + 2 * q + 2 * r + s);
+
   return {
     ...ion,
-    x: x + sixth * (k1.dx + 2 * k2.dx + 2 * k3.dx + k4.dx),
-    z: z + sixth * (k1.dz + 2 * k2.dz + 2 * k3.dz + k4.dz),
-    vx: vx + sixth * (k1.dvx + 2 * k2.dvx + 2 * k3.dvx + k4.dvx),
-    vz: vz + sixth * (k1.dvz + 2 * k2.dvz + 2 * k3.dvz + k4.dvz),
-    t: ion.t + dt,
+    x: x + w(k1.dx, k2.dx, k3.dx, k4.dx),
+    y: y + w(k1.dy, k2.dy, k3.dy, k4.dy),
+    z: z + w(k1.dz, k2.dz, k3.dz, k4.dz),
+    vx: vx + w(k1.dvx, k2.dvx, k3.dvx, k4.dvx),
+    vy: vy + w(k1.dvy, k2.dvy, k3.dvy, k4.dvy),
+    vz: vz + w(k1.dvz, k2.dvz, k3.dvz, k4.dvz),
+    t: t + dt,
   };
 }
 
@@ -126,18 +147,25 @@ export function stepRK4(field, ion, dt, extra) {
  */
 export function stepVerlet(field, ion, dt, extra) {
   const qm = ion.charge / ion.mass;
-  const a0 = accelerationAt(field, qm, ion.x, ion.z, extra);
+  const y0 = ion.y ?? 0;
+  const vy0 = ion.vy ?? 0;
+  const half = 0.5 * dt * dt;
 
-  const x = ion.x + ion.vx * dt + 0.5 * a0.ax * dt * dt;
-  const z = ion.z + ion.vz * dt + 0.5 * a0.az * dt * dt;
+  const a0 = accelerationAt(field, qm, ion.x, y0, ion.z, ion.t, extra);
 
-  const a1 = accelerationAt(field, qm, x, z, extra);
+  const x = ion.x + ion.vx * dt + half * a0.ax;
+  const y = y0 + vy0 * dt + half * a0.ay;
+  const z = ion.z + ion.vz * dt + half * a0.az;
+
+  const a1 = accelerationAt(field, qm, x, y, z, ion.t + dt, extra);
 
   return {
     ...ion,
     x,
+    y,
     z,
     vx: ion.vx + 0.5 * (a0.ax + a1.ax) * dt,
+    vy: vy0 + 0.5 * (a0.ay + a1.ay) * dt,
     vz: ion.vz + 0.5 * (a0.az + a1.az) * dt,
     t: ion.t + dt,
   };
@@ -154,7 +182,8 @@ export const DEFAULT_CFL = 0.05;
 
 /** Kinetic energy in joules. */
 export function kineticEnergy(ion) {
-  return 0.5 * ion.mass * (ion.vx * ion.vx + ion.vz * ion.vz);
+  const vy = ion.vy ?? 0;
+  return 0.5 * ion.mass * (ion.vx * ion.vx + vy * vy + ion.vz * ion.vz);
 }
 
 /**
@@ -165,7 +194,10 @@ export function kineticEnergy(ion) {
  * a mis-scaled field, a unit slip and a bad interpolation all at once.
  */
 export function totalEnergy(field, ion) {
-  return kineticEnergy(ion) + ion.charge * field.potentialAtCartesian(ion.x, ion.z);
+  return (
+    kineticEnergy(ion) +
+    ion.charge * field.potentialAt3D(ion.x, ion.y ?? 0, ion.z, ion.t)
+  );
 }
 
 /**
@@ -181,16 +213,28 @@ export function totalEnergy(field, ion) {
  * `cfl` below 1 keeps the ion sampling the field several times per cell.
  */
 export function suggestTimeStep(field, ion, cfl = DEFAULT_CFL) {
-  const h = field.grid.step;
+  const h = field.lengthScale;
   const qm = ion.charge / ion.mass;
-  const { ax, az } = accelerationAt(field, qm, ion.x, ion.z);
+  const y = ion.y ?? 0;
+  const vy = ion.vy ?? 0;
+  const { ax, ay, az } = accelerationAt(field, qm, ion.x, y, ion.z, ion.t);
 
-  const speed = Math.hypot(ion.vx, ion.vz);
-  const accel = Math.hypot(ax, az);
+  const speed = Math.hypot(ion.vx, vy, ion.vz);
+  const accel = Math.hypot(ax, ay, az);
 
   const byTravel = speed > 0 ? (cfl * h) / speed : Infinity;
   const byAccel = accel > 0 ? Math.sqrt((2 * cfl * h) / accel) : Infinity;
-  const dt = Math.min(byTravel, byAccel);
+  // A time-dependent field imposes its own limit: the step must resolve the
+  // fastest oscillation present, or the ion samples an aliased field rather
+  // than the real one. Without this an RF quadrupole would look stable at any
+  // amplitude simply because the step skipped over the field's reversals.
+  //
+  // At the default cfl this is twenty steps per RF period. Resolving the
+  // oscillation is not the same as resolving the grid: an ion can be moving
+  // slowly enough that the travel limit permits a step spanning several
+  // reversals, and that step would integrate a field the ion never saw.
+  const byPeriod = field.shortestPeriod ? cfl * field.shortestPeriod : Infinity;
+  const dt = Math.min(byTravel, byAccel, byPeriod);
 
   // A completely motionless ion in a null field has no natural scale; fall
   // back to something finite so the caller's loop still terminates.
@@ -226,18 +270,7 @@ export function flyIon(field, ion, opts = {}) {
   const maxTime = opts.maxTime ?? Infinity;
   const recordEvery = opts.recordEvery ?? 1;
 
-  const { grid } = field;
-  const zMin = grid.z0;
-  const zMax = grid.z0 + grid.zLength;
-  const rMax = grid.rLength;
-
-  // Cylindrical geometry folds the signed transverse coordinate onto a
-  // radius; planar geometry does not, because there its transverse axis runs
-  // from 0 to rLength with no symmetry about zero. Folding it anyway would
-  // mirror the electrode map about y = 0 and let an ion below the floor keep
-  // flying through an extrapolated field.
-  const planar = grid.symmetry === PLANAR;
-  const transverse = (x) => (planar ? x : Math.abs(x));
+  const [zMin, zMax] = field.zRange;
 
   let current = { ...ion };
   const points = [current];
@@ -252,17 +285,15 @@ export function flyIon(field, ion, opts = {}) {
     const dt = suggestTimeStep(field, current, cfl);
     const next = step(field, current, dt);
 
-    const r = transverse(next.x);
-
-    // Metal is tested first. The outer radial wall is real hardware, so a
-    // step that overshoots it must be a strike and not an escape - and since
-    // electrodeHit already ignores the open end faces, testing it first
-    // cannot steal a legitimate exit.
+    // Metal is tested first. The outer wall is real hardware, so a step that
+    // overshoots it must be a strike and not an escape - and since `strikes`
+    // already ignores the open end faces, testing it first cannot steal a
+    // legitimate exit.
     //
     // Resolution is one grid node, which biases every aperture *inward* by
     // h/2 rather than merely blurring it: transmission is systematically
     // pessimistic. See docs/PHYSICS.md section 3.6.
-    if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
+    if (field.strikes(next.x, next.y ?? 0, next.z)) {
       current = next;
       stop = 'electrode';
       points.push(current);
@@ -355,12 +386,8 @@ export function createFlight(field, ions, opts = {}) {
   const beamCurrent = opts.beamCurrent ?? 0;
   const ionsPerParticle = opts.ionsPerParticle ?? 1;
 
-  const { grid } = field;
-  const zMin = grid.z0;
-  const zMax = grid.z0 + grid.zLength;
-  const rMax = grid.rLength;
-  const planar = grid.symmetry === PLANAR;
-  const transverse = (x) => (planar ? x : Math.abs(x));
+  const [zMin, zMax] = field.zRange;
+  const planar = field.grid?.symmetry === PLANAR;
 
   // Ring model only: each ion's share of the beam current is fixed at launch
   // from its starting radius and conserved thereafter.
@@ -384,10 +411,10 @@ export function createFlight(field, ions, opts = {}) {
   // Ring model: inside one grid step of the axis the ring sampling has no
   // resolution anyway, and 1/r would otherwise be dominated by discretisation
   // noise.
-  const ringSoftening = grid.step / 2;
+  const ringSoftening = field.lengthScale / 2;
   // Discrete model: bounds the 1/r^2 force during a close pass, which a finite
   // time step would otherwise turn into energy from nowhere.
-  const coulombSoftening = opts.softening ?? grid.step;
+  const coulombSoftening = opts.softening ?? field.lengthScale;
 
   const flight = {
     tracks,
@@ -426,9 +453,8 @@ export function createFlight(field, ions, opts = {}) {
       for (let k = 0; k < live.length; k++) {
         const t = live[k];
         const next = step(field, t.state, dt, extras[k]);
-        const r = transverse(next.x);
 
-        if (r > rMax || r < 0 || electrodeHit(grid, next.z, r)) {
+        if (field.strikes(next.x, next.y ?? 0, next.z)) {
           t.state = next;
           t.stop = 'electrode';
           t.active = false;
@@ -461,18 +487,23 @@ export function createFlight(field, ions, opts = {}) {
   function selfFields(live) {
     if (repulsion === 'coulomb' && ionsPerParticle !== 0 && live.length > 1) {
       // Every particle is a point charge and feels every other one directly.
-      const { Ex, Ez } = coulombField(
+      const { Ex, Ey, Ez } = coulombField(
         live.map((t) => t.state.x),
+        live.map((t) => t.state.y ?? 0),
         live.map((t) => t.state.z),
         live.map((t) => t.state.charge),
         ionsPerParticle,
         coulombSoftening
       );
-      return live.map((_, k) => (Ex[k] === 0 && Ez[k] === 0 ? null : { Ex: Ex[k], Ez: Ez[k] }));
+      return live.map((_, k) =>
+        Ex[k] === 0 && Ey[k] === 0 && Ez[k] === 0
+          ? null
+          : { Ex: Ex[k], Ey: Ey[k], Ez: Ez[k] }
+      );
     }
 
     if (repulsion === 'beam' && beamCurrent !== 0) {
-      const radii = live.map((t) => Math.abs(t.state.x));
+      const radii = live.map((t) => Math.hypot(t.state.x, t.state.y ?? 0));
       const liveShares = live.map((t) => shares[t.index]);
       // The density is set by how fast the beam is moving HERE: a decelerated
       // beam is a denser one, which is why space charge bites hardest in the
@@ -485,11 +516,12 @@ export function createFlight(field, ions, opts = {}) {
       return live.map((t, k) => {
         if (Er[k] === 0) return null;
         const x = t.state.x;
-        // Resolve the radial self-field onto the signed transverse axis.
-        return {
-          Ex: planar ? Er[k] : Er[k] * (Math.abs(x) > 0 ? Math.sign(x) : 0),
-          Ez: 0,
-        };
+        const y = t.state.y ?? 0;
+        if (planar) return { Ex: Er[k], Ey: 0, Ez: 0 };
+        // Resolve the radial self-field onto x and y by direction cosines.
+        const r = Math.hypot(x, y);
+        if (r === 0) return null;
+        return { Ex: (Er[k] * x) / r, Ey: (Er[k] * y) / r, Ez: 0 };
       });
     }
 

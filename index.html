@@ -6,7 +6,7 @@
     <title>IonTrace - ion trajectory simulation</title>
     <meta
       name="description"
-      content="Open source electrostatic ion trajectory simulation. Solves Laplace's equation on a potential array and integrates Newton's second law."
+      content="Open source ion optics in the browser. Build a beamline from einzel lenses, aperture plates and quadrupoles, and fly ions through it in 3D."
     />
     <link rel="stylesheet" href="css/style.css" />
   </head>
@@ -15,9 +15,10 @@
       <div class="masthead-inner">
         <h1>IonTrace</h1>
         <p class="tagline">
-          Electrostatic ion optics in the browser. Laplace solved on a potential
-          array, trajectories integrated from <em>m</em>&thinsp;<em>a</em> =
-          <em>q</em>&thinsp;<em>E</em>.
+          Build a beamline, then fly ions through it. Fields are solved from
+          Laplace's equation; motion is integrated from
+          <em>m</em>&thinsp;<em>a</em> = <em>q</em>&thinsp;<em>E</em> in three
+          dimensions.
         </p>
       </div>
     </header>
@@ -32,26 +33,8 @@
           <span class="fly-hint">launch the beam</span>
         </button>
 
-        <section class="group">
-          <h2>Electrode voltages</h2>
-          <p class="hint">
-            Free to change. Each electrode's field was solved once at 1&nbsp;V;
-            new voltages are a weighted sum of those solutions, so nothing is
-            re-solved.
-          </p>
-
-          <label class="field">
-            <span class="field-label">Centre electrode<span class="unit">V</span></span>
-            <input id="vCentre" type="range" min="-4000" max="4000" step="50" value="-2000" />
-            <output id="vCentreOut">-2000</output>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Entrance &amp; exit<span class="unit">V</span></span>
-            <input id="vOuter" type="range" min="-1000" max="1000" step="50" value="0" />
-            <output id="vOuterOut">0</output>
-          </label>
-        </section>
+        <!-- Parameters of whichever element is selected in the track. -->
+        <section class="group" id="inspector" aria-live="polite"></section>
 
         <section class="group">
           <h2>Ion beam</h2>
@@ -68,37 +51,43 @@
 
           <label class="field">
             <span class="field-label">Kinetic energy<span class="unit">eV</span></span>
-            <input id="energy" type="number" min="0.1" step="100" value="1000" />
+            <input id="energy" type="number" min="0.1" step="10" value="50" />
           </label>
 
           <label class="field">
-            <span class="field-label">Rays</span>
+            <span class="field-label">Ions</span>
             <input id="rays" type="range" min="1" max="21" step="2" value="9" />
             <output id="raysOut">9</output>
           </label>
 
           <label class="field">
             <span class="field-label">Beam radius<span class="unit">mm</span></span>
-            <input id="beamRadius" type="range" min="0.5" max="5.5" step="0.5" value="4" />
-            <output id="beamRadiusOut">4.0</output>
+            <input id="beamRadius" type="range" min="0.1" max="6" step="0.1" value="1.5" />
+            <output id="beamRadiusOut">1.5</output>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Divergence<span class="unit">°</span></span>
+            <input id="divergence" type="range" min="0" max="5" step="0.1" value="0" />
+            <output id="divergenceOut">0.0</output>
           </label>
         </section>
 
         <section class="group">
           <h2>Repulsion</h2>
           <p class="hint">
-            <strong>Coulomb</strong> treats each trajectory as one ion, feeling
-            every other ion directly — a countable bunch.
-            <strong>Beam</strong> treats each as a <em>ring</em> of charge and
-            uses Gauss's law on the enclosed current — a continuous beam.
+            <strong>Coulomb</strong> treats each trajectory as one ion feeling
+            every other directly. <strong>Beam</strong> treats each as a
+            <em>ring</em> of charge and uses Gauss's law on the enclosed
+            current.
           </p>
 
           <label class="field">
             <span class="field-label">Model</span>
             <select id="repulsion">
-              <option value="coulomb" selected>Coulomb — discrete ions</option>
+              <option value="none" selected>None</option>
+              <option value="coulomb">Coulomb — discrete ions</option>
               <option value="beam">Beam — continuous current</option>
-              <option value="none">None</option>
             </select>
           </label>
 
@@ -110,46 +99,10 @@
             <output id="ionsPerParticleOut">1e6</output>
           </label>
 
-          <p class="hint" data-model="coulomb">
-            Each drawn particle stands for this many real ions. At 1 the
-            repulsion between a handful of elementary charges is far too small
-            to see — which is the correct answer, and why particle codes
-            weight.
-          </p>
-
           <label class="field" data-model="beam">
             <span class="field-label">Beam current<span class="unit">µA</span></span>
             <input id="beamCurrent" type="range" min="0" max="50" step="0.5" value="5" />
             <output id="beamCurrentOut">5.0</output>
-          </label>
-        </section>
-
-        <section class="group">
-          <h2>Lens geometry</h2>
-          <p class="hint">
-            Changing these rebuilds the potential array and re-solves Laplace's
-            equation for every electrode.
-          </p>
-
-          <label class="field">
-            <span class="field-label">Bore radius<span class="unit">mm</span></span>
-            <input id="boreRadius" type="range" min="3" max="10" step="0.5" value="6" />
-            <output id="boreRadiusOut">6.0</output>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Centre length<span class="unit">mm</span></span>
-            <input id="centreLength" type="range" min="5" max="40" step="1" value="20" />
-            <output id="centreLengthOut">20</output>
-          </label>
-
-          <label class="field">
-            <span class="field-label">Grid step<span class="unit">mm</span></span>
-            <select id="gridStep">
-              <option value="1">1.0 — fast</option>
-              <option value="0.5" selected>0.5 — default</option>
-              <option value="0.25">0.25 — fine</option>
-            </select>
           </label>
         </section>
 
@@ -173,12 +126,19 @@
 
         <section class="group">
           <h2>Display</h2>
+          <label class="field">
+            <span class="field-label">
+              Transverse zoom<span class="unit">× true scale</span>
+            </span>
+            <input id="zoom" type="range" min="1" max="8" step="0.5" value="1" />
+            <output id="zoomOut">1.0</output>
+          </label>
           <label class="check">
             <input id="showField" type="checkbox" checked />
             <span>Potential map</span>
           </label>
           <label class="check">
-            <input id="showContours" type="checkbox" checked />
+            <input id="showContours" type="checkbox" />
             <span>Equipotentials</span>
           </label>
         </section>
@@ -190,13 +150,26 @@
       <section class="viewport">
         <div class="canvas-frame">
           <canvas id="scene" role="img"
-            aria-label="Cross-section of a three-cylinder einzel lens with ion trajectories overlaid on the electrostatic potential."></canvas>
+            aria-label="Side view of the beamline with ion trajectories overlaid on the electrostatic potential."></canvas>
+          <canvas id="cross" class="cross" role="img"
+            aria-label="Beam cross-section, looking along the axis."></canvas>
           <p id="status" class="status" role="status">Solving…</p>
+          <p id="scaleNote" class="scale-note" hidden></p>
         </div>
 
-        <div class="legend" aria-hidden="false">
+        <!-- The beamline itself: elements in order, left to right. -->
+        <div class="track-wrap">
+          <div class="track-head">
+            <h2>Beamline</h2>
+            <div class="adders" id="adders"></div>
+          </div>
+          <ol class="track" id="track" aria-label="Beamline elements"></ol>
+        </div>
+
+        <div class="legend">
           <span class="key"><i class="swatch swatch-traj"></i>Ion trajectory</span>
           <span class="key"><i class="swatch swatch-electrode"></i>Electrode</span>
+          <span class="key"><i class="swatch swatch-ghost"></i>Out-of-plane rod</span>
           <span class="key ramp">
             <i class="swatch swatch-neg"></i>negative
             <i class="swatch swatch-zero"></i>0&nbsp;V
@@ -211,37 +184,34 @@
           <div class="notes-body">
             <p>
               Motion follows <em>m</em>&thinsp;d²<em>r</em>/d<em>t</em>² =
-              <em>q</em>&thinsp;<em>E</em>(<em>r</em>) with
-              <em>E</em> = −∇<em>φ</em>, where <em>φ</em> solves Laplace's
-              equation in the charge-free space between electrodes. Geometry is
-              axisymmetric, so the solve is two-dimensional in
-              (<em>z</em>,&nbsp;<em>r</em>) and rotation supplies the third
-              dimension exactly.
+              <em>q</em>&thinsp;<em>E</em>(<em>r</em>,&nbsp;<em>t</em>) in three
+              dimensions. Einzel lenses and aperture plates are axisymmetric, so
+              their fields are solved on a two-dimensional (<em>z</em>,&nbsp;<em>r</em>)
+              grid and rotation supplies the third dimension exactly. A
+              quadrupole is <em>not</em> axisymmetric, so it is solved on a
+              transverse (<em>x</em>,&nbsp;<em>y</em>) grid instead.
             </p>
             <p>
-              Deliberately absent from this build: magnetic forces, buffer-gas
-              collisions, space charge between ions, image charges, surface
-              roughness and relativistic correction. Each omission is listed with
-              its consequences in
+              <strong>Each element is solved in isolation</strong>, with grounded
+              end faces, so its fringe field stops at its own boundary. Leave a
+              drift between active elements; the readout warns when you do not.
+              Quadrupole rods are modelled with a hard edge, so entrance and exit
+              fringe fields — a real cause of transmission loss in a mass filter —
+              are absent.
+            </p>
+            <p>
+              Also absent: magnetic forces, buffer-gas collisions, image charges
+              and relativistic correction. Each omission and its consequences are
+              listed in
               <a href="https://github.com/Craftyleosteel/IonTrace/blob/main/docs/PHYSICS.md"
                 >docs/PHYSICS.md</a
-              >, along with the known limitations of what <em>is</em> modelled.
-              Results are only
-              trustworthy in the regime where those terms are negligible: dilute,
-              non-relativistic beams in good vacuum.
+              >.
             </p>
           </div>
         </details>
       </section>
     </main>
 
-    <!--
-      The physics reference points at GitHub rather than at the file in this
-      repository. GitHub Pages serves a .md file as text/markdown, which a
-      browser downloads instead of rendering; GitHub's own view renders both
-      the prose and the LaTeX. The test runner is a real page, so it stays
-      relative and works from any fork or local server.
-    -->
     <footer class="colophon">
       <a href="https://github.com/Craftyleosteel/IonTrace/blob/main/docs/PHYSICS.md">
         Physics reference

@@ -40,8 +40,15 @@ export class PotentialArray {
    * @param {number} opts.step   Grid step h in metres (uniform in both axes).
    * @param {string} [opts.symmetry] CYLINDRICAL (default) or PLANAR.
    * @param {number} [opts.z0]   Physical z of node i = 0, in metres.
+   * @param {number} [opts.r0]   Physical transverse coordinate of node j = 0.
+   *                             Must be 0 in cylindrical mode, where j = 0 is
+   *                             the symmetry axis by definition. In planar
+   *                             mode it may be negative, which is what lets a
+   *                             transverse (x, y) plane straddle the origin -
+   *                             needed for a quadrupole, whose four rods sit
+   *                             on both sides of it.
    */
-  constructor({ nz, nr, step, symmetry = CYLINDRICAL, z0 = 0 }) {
+  constructor({ nz, nr, step, symmetry = CYLINDRICAL, z0 = 0, r0 = 0 }) {
     if (!Number.isInteger(nz) || !Number.isInteger(nr)) {
       throw new Error('Grid dimensions must be integers');
     }
@@ -53,11 +60,18 @@ export class PotentialArray {
       throw new Error(`Unknown symmetry: ${symmetry}`);
     }
 
+    if (symmetry === CYLINDRICAL && r0 !== 0) {
+      throw new Error(
+        'Cylindrical symmetry requires r0 = 0; row j = 0 is the axis itself'
+      );
+    }
+
     this.nz = nz;
     this.nr = nr;
     this.step = step;
     this.symmetry = symmetry;
     this.z0 = z0;
+    this.r0 = r0;
 
     /** Per-node owning electrode index, or NO_ELECTRODE for a free node. */
     this.electrodeId = new Int32Array(nz * nr).fill(NO_ELECTRODE);
@@ -95,7 +109,7 @@ export class PotentialArray {
 
   /** Physical r (or y) of row j, metres. */
   rAt(j) {
-    return j * this.step;
+    return this.r0 + j * this.step;
   }
 
   /** Total extent along z, metres. */
@@ -106,6 +120,16 @@ export class PotentialArray {
   /** Total extent along r, metres. */
   get rLength() {
     return (this.nr - 1) * this.step;
+  }
+
+  /** Lowest transverse coordinate the domain represents, metres. */
+  get rMin() {
+    return this.r0;
+  }
+
+  /** Highest transverse coordinate the domain represents, metres. */
+  get rMax() {
+    return this.r0 + this.rLength;
   }
 
   /** True if node (i, j) is a fixed-potential electrode node. */

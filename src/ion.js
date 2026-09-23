@@ -18,16 +18,35 @@ import {
 /**
  * Build an ion state in SI units from practical units.
  *
+ * The state is three-dimensional. `y` and `azimuth` default to zero, which
+ * launches the ion in the x-z plane; for an axisymmetric element it then
+ * stays there for ever, because the field has no azimuthal component to take
+ * it out. That is why the 2D picture remains exact for a lens, and why adding
+ * the third dimension changes nothing for the cases that never needed it.
+ *
  * @param {object} spec
  * @param {number} spec.mass      Mass in daltons (u).
  * @param {number} spec.charge    Charge state in elementary charges (signed).
  * @param {number} spec.energy    Initial kinetic energy in eV.
  * @param {number} [spec.x]       Initial transverse offset in mm (signed).
+ * @param {number} [spec.y]       Initial second transverse offset in mm.
  * @param {number} [spec.z]       Initial axial position in mm.
- * @param {number} [spec.angle]   Launch angle from the z axis, in degrees.
+ * @param {number} [spec.angle]   Polar launch angle from the z axis, degrees.
+ * @param {number} [spec.azimuth] Direction of the transverse velocity in the
+ *                                x-y plane, degrees. Only meaningful when
+ *                                `angle` is non-zero.
  * @returns {import('./integrator.js').IonState}
  */
-export function makeIon({ mass, charge, energy, x = 0, z = 0, angle = 0 }) {
+export function makeIon({
+  mass,
+  charge,
+  energy,
+  x = 0,
+  y = 0,
+  z = 0,
+  angle = 0,
+  azimuth = 0,
+}) {
   if (!(mass > 0)) throw new Error('Ion mass must be positive');
   if (charge === 0) throw new Error('A neutral particle feels no electric force');
   if (energy < 0) throw new Error('Kinetic energy must be non-negative');
@@ -35,6 +54,7 @@ export function makeIon({ mass, charge, energy, x = 0, z = 0, angle = 0 }) {
   const massKg = amuToKg(mass);
   const speed = speedFromKineticEnergy(eVToJoules(energy), massKg);
   const theta = (angle * Math.PI) / 180;
+  const phi = (azimuth * Math.PI) / 180;
 
   const err = relativisticError(speed);
   if (err > 1e-3) {
@@ -44,12 +64,16 @@ export function makeIon({ mass, charge, energy, x = 0, z = 0, angle = 0 }) {
     );
   }
 
+  const transverse = speed * Math.sin(theta);
+
   return {
     mass: massKg,
     charge: chargesToCoulombs(charge),
     x: mmToM(x),
+    y: mmToM(y),
     z: mmToM(z),
-    vx: speed * Math.sin(theta),
+    vx: transverse * Math.cos(phi),
+    vy: transverse * Math.sin(phi),
     vz: speed * Math.cos(theta),
     t: 0,
   };
