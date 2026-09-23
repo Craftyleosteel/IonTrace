@@ -92,19 +92,16 @@
         <section class="group" id="inspector" aria-live="polite" hidden></section>
 
         <!--
-          How the field is solved. A property of the whole column rather than
-          of any one element, so it lives here and is always visible.
+          How the field is solved, and whether the ions see each other.
+
+          Folded into the ion panel rather than standing on its own: both
+          switches are about what the BEAM experiences, and having them on
+          screen while you are placing hardware is clutter. Click the ions and
+          they are the first thing there.
         -->
-        <section class="group" id="fieldPanel">
+        <section class="group" id="fieldPanel" hidden>
           <h2>Physics</h2>
 
-          <!--
-            Space charge was buried in a collapsed panel that only appeared
-            while the source was selected, so the commonest surprise in the
-            whole simulator - "why doesn't my beam spread out?" - had its
-            answer hidden. It belongs here, always visible, with the column's
-            other physics switch.
-          -->
           <label class="field">
             <span class="field-label">Ion–ion repulsion</span>
             <select id="repulsion">
@@ -135,33 +132,6 @@
           <p class="hint" id="fringeNote"></p>
         </section>
 
-        <!--
-          What the diagram draws. Three ways of showing the same solved field,
-          each answering a different question: where the potential is high,
-          where the surfaces of constant potential run, and which way a charge
-          is pushed. Kept out here rather than folded away, because they are
-          how you see what an element is doing.
-        -->
-        <section class="group" id="viewPanel">
-          <h2>Show</h2>
-          <label class="check">
-            <input id="showField" type="checkbox" checked />
-            <span>Potential map</span>
-          </label>
-          <label class="check">
-            <input id="showContours" type="checkbox" />
-            <span>Equipotentials</span>
-          </label>
-          <label class="check">
-            <input id="showLines" type="checkbox" />
-            <span>Field lines</span>
-          </label>
-          <p class="hint">
-            Field lines run along <strong>E</strong>, from positive metal to
-            negative, and cross equipotentials at right angles. They are where
-            a fringe field reaching out of an element is easiest to see.
-          </p>
-        </section>
 
         <!-- Beam settings. Shown only while the source is selected. -->
         <section class="group" id="beamPanel" hidden>
@@ -218,6 +188,34 @@
             </label>
 
           </details>
+        </section>
+
+        <!--
+          What the diagram draws. Three ways of showing the same solved field,
+          each answering a different question: where the potential is high,
+          where the surfaces of constant potential run, and which way a charge
+          is pushed. Kept out here rather than folded away, because they are
+          how you see what an element is doing.
+        -->
+        <section class="group" id="viewPanel">
+          <h2>Show</h2>
+          <label class="check">
+            <input id="showField" type="checkbox" checked />
+            <span>Potential map</span>
+          </label>
+          <label class="check">
+            <input id="showContours" type="checkbox" />
+            <span>Equipotentials</span>
+          </label>
+          <label class="check">
+            <input id="showLines" type="checkbox" />
+            <span>Field lines</span>
+          </label>
+          <p class="hint">
+            Field lines run along <strong>E</strong>, from positive metal to
+            negative, and cross equipotentials at right angles. They are where
+            a fringe field reaching out of an element is easiest to see.
+          </p>
         </section>
       </aside>
 

@@ -646,8 +646,12 @@ input[type="range"]:focus-visible {
 */
 .flow {
   overflow: auto;
-  max-height: 46vh;
-  min-height: 150px;
+  /* Tall enough for four or five lanes before it starts scrolling. Every exit
+     takes a lane, so a single deflector with both branches open already needs
+     three, and a column with two junctions needs five. */
+  max-height: 60vh;
+  min-height: 210px;
+  resize: vertical;
   padding: 4px 0 2px;
   overscroll-behavior: contain;
 }

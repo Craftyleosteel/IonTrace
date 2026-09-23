@@ -1595,6 +1595,40 @@ describe('Branching columns', () => {
     assert(bl.childAt(sw, 'bend') === bent, 'and nothing moved');
   });
 
+  it('gives every exit a place of its own to be dropped on', () => {
+    /*
+      What a drop has to be scored against.
+
+      Picking the nearest ELEMENT and then its first free port was fine while
+      everything had one exit. A deflector has three, pointing three different
+      ways, so the nearest element does not say where a dropped item goes: it
+      landed on whichever port happened to be free first, which from the
+      outside looks like the drop going somewhere at random. Every exit has a
+      position - the frame a child hanging there would start at - and those
+      are far enough apart to tell one from another.
+    */
+    const { bl, sw } = switched();
+    const places = exitsOf(sw).map((x) => ({
+      port: x.port,
+      o: compose(sw.nominalFrame, x.transform).o,
+    }));
+    assert(places.length === 3, 'three exits to aim at');
+    for (let i = 0; i < places.length; i++) {
+      for (let j = i + 1; j < places.length; j++) {
+        const d = Math.hypot(
+          places[i].o[0] - places[j].o[0],
+          places[i].o[1] - places[j].o[1],
+          places[i].o[2] - places[j].o[2]
+        );
+        assert(
+          d > mmToM(20),
+          `${places[i].port} and ${places[j].port} are only ${mToMm(d).toFixed(1)} mm apart`
+        );
+      }
+    }
+    void bl;
+  });
+
   it('keeps the element list in the order the beam visits it', () => {
     const { bl } = switched();
     for (const e of bl.elements) {

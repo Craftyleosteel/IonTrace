@@ -34,7 +34,7 @@ import {
   ATOMIC_MASS_UNIT,
 } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
-import { toGlobal, toLocal, forwardOf } from './frames.js';
+import { toGlobal, toLocal, forwardOf, compose } from './frames.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -61,6 +61,7 @@ const fringeNote = el('fringeNote');
 const repulsionNote = el('repulsionNote');
 const flowEl = el('flow');
 const readoutHint = el('readoutHint');
+const fieldPanel = el('fieldPanel');
 
 const inputs = {
   mass: el('mass'),
@@ -400,24 +401,34 @@ function dropTargetAt(g, dragged = null) {
     bury(dragged);
   }
 
+  /*
+    Scored over EXITS, not over elements.
+
+    Finding the nearest element and then taking its first free port was fine
+    while every element had one exit. A deflector has three, pointing three
+    different ways, so "nearest element" does not say where the thing goes -
+    drop anywhere near a deflector and it attached to whichever port happened
+    to be free first, which from the outside looks like the drop landing
+    somewhere at random.
+
+    Every exit has a place: the frame a child hanging there would start at.
+    Scoring on those means the drop goes where it was aimed, and means the
+    indicator drawn at that exit is telling the truth.
+  */
   let best = null;
   let bestD = Infinity;
   for (const e of beamline.elements) {
     if (forbidden.has(e)) continue;
-    const n = e.curved ? 16 : 2;
-    for (let k = 0; k <= n; k++) {
-      const f = k / n;
-      const p = toGlobal(e.frame, e.pathPoint ? e.pathPoint(f) : [0, 0, f * e.length]);
-      const d = Math.hypot(p[0] - g[0], p[1] - g[1], p[2] - g[2]);
+    for (const exit of exitsOf(e)) {
+      const o = compose(e.nominalFrame, exit.transform).o;
+      const d = Math.hypot(o[0] - g[0], o[1] - g[1], o[2] - g[2]);
       if (d < bestD) {
         bestD = d;
-        best = e;
+        best = { parent: e, port: exit.port };
       }
     }
   }
-  if (!best) return null;
-  const free = exitsOf(best).find((x) => !beamline.childAt(best, x.port));
-  return { parent: best, port: (free ?? exitsOf(best)[0]).port };
+  return best;
 }
 
 function select(next) {
@@ -605,19 +616,34 @@ const FLOW = { w: 210, h: 66, gapX: 62, gapY: 26, pad: 18 };
  */
 function flowLayout() {
   const pos = new Map();
+  const sockets = new Map();
   let lane = 0;
 
+  /*
+    Every exit gets a lane of its own, whether or not anything is bolted to it.
+
+    Allocating lanes only to exits that HAVE children was wrong in a way the
+    picture made obvious: a deflector has three ways out, so with one branch
+    built the other two sockets were both placed at the same half-row offset
+    from their parent and drawn on top of each other, three labels in one
+    illegible pile. An empty exit takes up room on a real beamline and it takes
+    up room here.
+  */
   const place = (e, col) => {
-    const kids = exitsOf(e)
-      .map((x) => beamline.childAt(e, x.port))
-      .filter(Boolean);
-    let row;
-    if (kids.length === 0) {
-      row = lane++;
-    } else {
-      const rows = kids.map((k) => place(k, col + 1));
-      row = rows.reduce((a, b) => a + b, 0) / rows.length;
+    const rows = [];
+    for (const exit of exitsOf(e)) {
+      const child = beamline.childAt(e, exit.port);
+      if (child) {
+        rows.push(place(child, col + 1));
+      } else {
+        const row = lane++;
+        sockets.set(`${beamline.elements.indexOf(e)}:${exit.port}`, { col: col + 1, row, exit });
+        rows.push(row);
+      }
     }
+    // Centred on what leaves it, so a junction sits between its branches
+    // rather than level with one of them.
+    const row = rows.length ? rows.reduce((a, b) => a + b, 0) / rows.length : lane++;
     pos.set(e, { col, row });
     return row;
   };
@@ -625,7 +651,12 @@ function flowLayout() {
   for (const r of beamline.roots()) place(r, 1);
   // The source occupies column zero, level with whatever it feeds.
   const first = beamline.roots()[0];
-  return { pos, sourceRow: first ? pos.get(first).row : 0, lanes: Math.max(lane, 1) };
+  return {
+    pos,
+    sockets,
+    sourceRow: first ? pos.get(first).row : 0,
+    lanes: Math.max(lane, 1),
+  };
 }
 
 const flowX = (col) => FLOW.pad + col * (FLOW.w + FLOW.gapX);
@@ -642,8 +673,13 @@ function renderFlow() {
   // voltage or flying the beam all redraw this, and having the panel jump back
   // to the top left every time would make a long column unusable.
   const { scrollLeft, scrollTop } = flowEl;
-  const { pos, sourceRow, lanes } = flowLayout();
-  const cols = Math.max(2, ...[...pos.values()].map((p) => p.col + 1));
+  const { pos, sockets, sourceRow, lanes } = flowLayout();
+  // Wide enough for the sockets too, which sit one column past their parent.
+  const cols = Math.max(
+    2,
+    ...[...pos.values()].map((p) => p.col + 1),
+    ...[...sockets.values()].map((s) => s.col + 1)
+  );
   const width = flowX(cols) + FLOW.pad;
   const height = flowY(lanes) + FLOW.pad;
   const idx = selectedIndex();
@@ -702,21 +738,31 @@ function renderFlow() {
           );
         }
       } else {
-        // An unused exit, drawn as a socket you can start a line on.
-        const row = junction && exit.port !== exitsOf(e)[0].port ? p.row + 0.5 : p.row;
-        const ex = x + FLOW.w + FLOW.gapX / 2;
-        const ey = flowY(row) + FLOW.h / 2;
+        // An unused exit, on its own lane, drawn as a socket to start a line
+        // from. Placed in the column a child would occupy so the chart reads
+        // the same whether an exit is filled or not.
+        const s = sockets.get(`${i}:${exit.port}`);
+        if (!s) continue;
+        const ex = flowX(s.col);
+        const ey = flowY(s.row) + FLOW.h / 2;
         parts.push(
           `<path class="link open" d="${flowLink(x + FLOW.w, y + FLOW.h / 2, ex, ey)}"/>`,
           `<g class="socket ${
             pendingPort?.parent === e && pendingPort?.port === exit.port ? 'armed' : ''
           }" data-act="port" data-index="${i}" data-port="${exit.port}">
-             <rect x="${ex}" y="${ey - 13}" width="${FLOW.w * 0.62}" height="26" rx="13"/>
-             <text x="${ex + 12}" y="${ey + 4}">+ ${escapeHtml(
+             <rect x="${ex}" y="${ey - 15}" width="${FLOW.w * 0.8}" height="30" rx="15"/>
+             <text x="${ex + 14}" y="${ey + 5}">+ ${escapeHtml(
                junction ? exit.label.toLowerCase() : 'add'
              )}</text>
            </g>`
         );
+        if (junction) {
+          parts.push(
+            `<text class="port" x="${x + FLOW.w + 8}" y="${ey - 20}">${escapeHtml(
+              exit.label
+            )}</text>`
+          );
+        }
       }
     }
 
@@ -791,7 +837,10 @@ function renderInspector() {
   addPanel.hidden = selection !== null;
   beamPanel.hidden = !isSource;
   inspectorEl.hidden = selection === null;
-  // The flight readout belongs to the ions, so it appears with them.
+  // Both of these are about the beam rather than the column, so they appear
+  // with it: the physics switches above the ion settings, the flight readout
+  // below them.
+  fieldPanel.hidden = !isSource;
   readoutEl.hidden = !isSource;
   readoutHint.hidden = isSource;
 
@@ -1765,6 +1814,32 @@ function drawContours(e, T) {
 }
 
 /**
+ * Below what field strength a line has no direction worth following.
+ *
+ * Taken from the MEAN field over the element, not the peak. The peak sits on a
+ * sharp electrode rim, where the field genuinely diverges as the grid is
+ * refined (§11 of docs/PHYSICS.md) - so a threshold set as a fraction of it is
+ * set by a singularity, and scales with the grid step rather than with the
+ * physics. Measured: it came out high enough to stop every line within a
+ * millimetre of the metal, leaving the bore and the drift blank.
+ *
+ * A mean is still pulled up by that rim, but only in proportion to how many
+ * nodes are near it, which is few.
+ */
+function fieldFloor(field) {
+  let sum = 0;
+  let n = 0;
+  for (let k = 0; k < field.Ez.length; k++) {
+    const m = Math.hypot(field.Ez[k], field.Er[k]);
+    if (m > 0) {
+      sum += m;
+      n++;
+    }
+  }
+  return n ? (sum / n) * 0.02 : 0;
+}
+
+/**
  * Field lines: curves everywhere tangent to E.
  *
  * Traced rather than contoured. Starting from a seed, each step moves one
@@ -1784,27 +1859,18 @@ function drawContours(e, T) {
  * both cases tracing in the r-z slice would draw something that is not there.
  */
 function drawFieldLines(e, T) {
-  if (!e.grid || !e.field || e.typeKey === 'quadrupole' || e.typeKey === 'bender') return;
+  if (!e.grid || !e.field) return;
+  // A quadrupole's or multipole's field lies in the plane TRANSVERSE to the
+  // beam, so it does not appear in either of these views at all - drawing
+  // anything for it here would be drawing a field that is not in this plane.
+  // Those are handled in the cross-section instead.
+  if (e.typeKey === 'quadrupole' || e.typeKey === 'multipole') return;
+  if (e.typeKey === 'bender') return drawBenderFieldLines(e, T);
   const { grid, field } = e;
   const h = grid.step * 0.5;
   const maxSteps = Math.round((grid.zLength / h) * 1.5);
 
-  /*
-    Where the field is too weak to have a direction, stop.
-
-    An einzel has a null on its axis between the two gaps, and a fixed
-    threshold in volts per metre does not know that: at a millivolt per metre
-    the direction is round-off, and a line traced through it wanders off at any
-    angle it likes. Measured before this, the worst tangent was 66 degrees away
-    from the field it was meant to be following. Scaled to the strongest field
-    this element actually has, a thousandth of it is safely into the noise.
-  */
-  let strongest = 0;
-  for (let k = 0; k < field.Ez.length; k++) {
-    const m = Math.hypot(field.Ez[k], field.Er[k]);
-    if (m > strongest) strongest = m;
-  }
-  const floor = strongest * 1e-3;
+  const floor = fieldFloor(field);
   if (!(floor > 0)) return;
 
   // One line per cell of this lattice, so density is even rather than
@@ -1860,6 +1926,93 @@ function drawFieldLines(e, T) {
         else ctx.lineTo(x, y);
       });
     }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Field lines inside a quadrupole deflector.
+ *
+ * Worth a separate routine because a deflector is the one element whose field
+ * and whose trajectory share a plane, and that plane is the one being drawn.
+ * Everything else here is either axisymmetric, so its field lies in the r-z
+ * slice, or transverse, so it does not appear in this view at all. A deflector
+ * is neither: its field is a quadrupole lying flat in the bend plane, and the
+ * lines running from the positive electrodes to the negative ones ARE the
+ * thing that turns the beam.
+ *
+ * Drawn only in the pane that shows that plane. Rolled to bend vertically, the
+ * field is in y-z and drawing it on the top view would be drawing a field
+ * edge-on and pretending it was in the page.
+ */
+function drawBenderFieldLines(e, T) {
+  const { grid, field } = e;
+  const roll = ((e.params.bendPlane ?? 0) * Math.PI) / 180;
+  const cosR = Math.cos(roll);
+  const sinR = Math.sin(roll);
+
+  // Does this pane show the plane the bend happens in? The pane's transverse
+  // axis is x for the top view and y for the side.
+  const inThisPane = Math.abs(T.axis === 0 ? cosR : sinR);
+  if (inThisPane < 0.7) return;
+
+  const floor = fieldFloor(field);
+  if (!(floor > 0)) return;
+
+  const extent = -grid.z0;
+  const a = mmToM(
+    e.params.apertureRadius + e.params.electrodeThickness + e.params.boxClearance
+  );
+  const h = grid.step * 0.5;
+  const maxSteps = Math.round((4 * extent) / h);
+  const cell = grid.step * 8;
+  const claimed = new Set();
+  const key = (z, x) => `${Math.round(z / cell)},${Math.round(x / cell)}`;
+
+  /** Bend-plane (Z, X) to a point in the element's own frame. */
+  const toLocal3 = (Z, X) => [X * cosR, X * sinR, Z + a];
+
+  const lines = [];
+  for (let Z = -extent + cell; Z < extent; Z += cell) {
+    for (let X = -extent + cell; X < extent; X += cell) {
+      if (claimed.has(key(Z, X))) continue;
+      if (field.strikes(X, 0, Z)) continue;
+      const pts = [];
+      for (const sense of [1, -1]) {
+        let pz = Z;
+        let px = X;
+        const side = [];
+        for (let n = 0; n < maxSteps; n++) {
+          const { Ez, Er } = field.fieldAt(pz, px);
+          const mag = Math.hypot(Ez, Er);
+          if (!(mag > floor)) break;
+          side.push([pz, px]);
+          claimed.add(key(pz, px));
+          pz += (sense * h * Ez) / mag;
+          px += (sense * h * Er) / mag;
+          if (Math.abs(pz) > extent || Math.abs(px) > extent) break;
+          if (field.strikes(px, 0, pz)) break;
+        }
+        if (sense === 1) pts.push(...side.reverse());
+        else pts.push(...side.slice(1));
+      }
+      if (pts.length > 3) lines.push(pts);
+    }
+  }
+  if (lines.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = cssVar('--accent');
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const pts of lines) {
+    pts.forEach(([Z, X], i) => {
+      const [sx, sy] = T.project(toGlobal(e.frame, toLocal3(Z, X)));
+      if (i === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    });
   }
   ctx.stroke();
   ctx.restore();
