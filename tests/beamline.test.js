@@ -12,7 +12,7 @@
 
 import { describe, it, assert, assertClose, assertRelClose } from './harness.js';
 
-import { Beamline } from '../src/beamline.js';
+import { Beamline, exitsOf } from '../src/beamline.js';
 import {
   createElement,
   ELEMENT_TYPES,
@@ -1069,6 +1069,144 @@ describe('Elements as placed from the toolbar', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* branching                                                           */
+/* ------------------------------------------------------------------ */
+
+describe('Branching columns', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+  const V = () => startingParams('bender', SPEC).voltage;
+
+  /** Source, deflector, and a line on each of its exits. */
+  function switched() {
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V() }),
+    ]);
+    const sw = bl.elements[1];
+    bl.add(createElement('drift', { length: 30, bore: 5 }), 2, { parent: sw, port: 'bend' });
+    bl.add(createElement('drift', { length: 40, bore: 5 }), 3, { parent: sw, port: 'straight' });
+    return { bl, sw };
+  }
+
+  it('gives a deflector two exits and a plain element one', () => {
+    const b = createElement('bender', { voltage: V() });
+    assert(exitsOf(b).length === 2, 'a deflector is a junction');
+    assert(
+      exitsOf(b).map((x) => x.port).join(',') === 'bend,straight',
+      'bent first, because that is the reason it is in the line'
+    );
+    assert(exitsOf(createElement('drift', {})).length === 1, 'a drift is not');
+  });
+
+  it('places each branch where its own exit points', () => {
+    const { bl, sw } = switched();
+    const bent = bl.childAt(sw, 'bend');
+    const straight = bl.childAt(sw, 'straight');
+
+    // The bend leaves sideways; the straight path carries on down the axis.
+    assertClose(forwardOf(bent.frame)[0], -1, 1e-12, 'the bent branch turns');
+    assertClose(forwardOf(straight.frame)[2], 1, 1e-12, 'the straight one does not');
+    assertClose(straight.frame.o[0], 0, 1e-12, 'and stays on the original axis');
+    // Straight through the box is 2a; round the bend is a quarter arc of a.
+    const a = mmToM(19 + 9 + 1);
+    assertRelClose(straight.zStart - sw.zStart, 2 * a, 1e-9, 'straight path length');
+    assertRelClose(bent.zStart - sw.zStart, (Math.PI / 2) * a, 1e-9, 'bent path length');
+  });
+
+  it('reports an open end for every unused exit', () => {
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V() }),
+    ]);
+    const ends = bl.openEnds();
+    assert(ends.length === 2, `a bare deflector has two open ends, got ${ends.length}`);
+    const { bl: full } = switched();
+    assert(full.openEnds().length === 2, 'and so does one with a line on each');
+    assert(
+      full.openEnds().every((e) => e.element.typeKey === 'drift'),
+      'though now they are at the ends of those lines'
+    );
+  });
+
+  it('switches the beam with the voltage, not with the topology', () => {
+    // The point of the whole thing. The hardware does not move; the field
+    // decides which way the ions go.
+    const { bl, sw } = switched();
+    const where = () => {
+      const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 9, radius: 1 }), {
+        cfl: 0.05,
+        maxSteps: 400000,
+      });
+      const out = tracks.filter((t) => t.stop === 'exited');
+      const tally = {};
+      for (const t of out) {
+        const p = t.points.at(-1);
+        const e = bl.endNearest(p.x, p.y ?? 0, p.z);
+        const key = e ? bl.elements.indexOf(e.element) : -1;
+        tally[key] = (tally[key] ?? 0) + 1;
+      }
+      return tally;
+    };
+
+    const bentIdx = bl.elements.indexOf(bl.childAt(sw, 'bend'));
+    const straightIdx = bl.elements.indexOf(bl.childAt(sw, 'straight'));
+
+    sw.setVoltage(0);
+    const off = where();
+    assert(off[straightIdx] === 9, `unpowered should go straight, got ${JSON.stringify(off)}`);
+
+    sw.setVoltage(V());
+    const on = where();
+    assert(on[bentIdx] === 9, `matched should bend, got ${JSON.stringify(on)}`);
+  });
+
+  it('counts only ions that reach the end being aimed at', () => {
+    // Otherwise a search told to maximise transmission would discover that a
+    // deflector transmits everything at zero volts - straight out the back -
+    // and switch it off. That is not tuning a beamline.
+    const { bl, sw } = switched();
+    const ions = () => discBeam({ ...SPEC, count: 9, radius: 1 });
+
+    assert(bl.mainEnd, 'the column names the end it is aimed at');
+    assert(bl.mainEnd.element === bl.childAt(sw, 'bend'), 'which is down the bend');
+
+    sw.setVoltage(0);
+    assert(scoreBeamline(bl, ions).transmitted === 0, 'straight through scores nothing');
+    sw.setVoltage(V());
+    assert(scoreBeamline(bl, ions).transmitted === 9, 'round the bend scores everything');
+  });
+
+  it('takes an orphaned branch with the junction it hung from', () => {
+    const { bl, sw } = switched();
+    assert(bl.elements.length === 4, 'four to begin with');
+    bl.remove(bl.elements.indexOf(sw));
+    // The first branch inherits the deflector's place; the second had nothing
+    // left to hang from, so it goes too rather than floating free.
+    assert(bl.elements.length === 2, `expected 2 left, got ${bl.elements.length}`);
+    assert(bl.roots().length === 1, 'and the column is still one tree');
+  });
+
+  it('refuses to move an element below itself', () => {
+    const { bl, sw } = switched();
+    const bent = bl.childAt(sw, 'bend');
+    assert(!bl.reparent(sw, bent, 'out'), 'that would cut the tree loose from the source');
+    assert(bl.childAt(sw, 'bend') === bent, 'and nothing moved');
+  });
+
+  it('keeps the element list in the order the beam visits it', () => {
+    const { bl } = switched();
+    for (const e of bl.elements) {
+      const p = e.from?.parent;
+      if (!p) continue;
+      assert(
+        bl.elements.indexOf(p) < bl.elements.indexOf(e),
+        `${e.label} is listed before the element it hangs from`
+      );
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* fringe fields                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1095,22 +1233,46 @@ describe('Column solves and fringe fields', () => {
   }
 
   it('groups only the elements that can share an r-z grid', () => {
-    const els = [
+    // Through a Beamline, because a run is a chain along a BRANCH: the
+    // grouping is read off the topology, not off positions in an array.
+    const bl = new Beamline([
       createElement('drift', { length: 20, bore: 6 }),
       createElement('einzel', { gridStep: 0.8 }),
       createElement('drift', { length: 20, bore: 6 }),
       createElement('bender', { voltage: 40 }),
       createElement('drift', { length: 20, bore: 6 }),
       createElement('aperture', PLATE),
-    ];
+    ]);
+    const runs = axisymmetricRuns(bl.elements);
     assert(
-      JSON.stringify(axisymmetricRuns(els)) === JSON.stringify([[0, 2], [4, 5]]),
-      `runs should split at the deflector, got ${JSON.stringify(axisymmetricRuns(els))}`
+      JSON.stringify(runs) === JSON.stringify([[0, 1, 2], [4, 5]]),
+      `runs should split at the deflector, got ${JSON.stringify(runs)}`
     );
     // A deflector is in a grounded box of its own, so ending a run there is
     // not an approximation - its field really does stop.
-    assert(!canShareGrid(els[3]), 'a deflector cannot share an r-z grid');
-    assert(canShareGrid(els[1]), 'a lens can');
+    assert(!canShareGrid(bl.elements[3]), 'a deflector cannot share an r-z grid');
+    assert(canShareGrid(bl.elements[1]), 'a lens can');
+  });
+
+  it('does not join two branches leaving the same junction', () => {
+    // They sit next to each other in the array and point in different
+    // directions. Painting both onto one r-z grid would put one branch's
+    // hardware on top of the other's.
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 6 }),
+      createElement('bender', { voltage: 40 }),
+    ]);
+    const sw = bl.elements[1];
+    const a = bl.add(createElement('aperture', PLATE), 2, { parent: sw, port: 'bend' });
+    const b = bl.add(createElement('aperture', PLATE), 3, { parent: sw, port: 'straight' });
+
+    const runs = axisymmetricRuns(bl.elements);
+    const ia = bl.elements.indexOf(a);
+    const ib = bl.elements.indexOf(b);
+    assert(
+      !runs.some((r) => r.includes(ia) && r.includes(ib)),
+      `the two branches must not share a grid, got ${JSON.stringify(runs)}`
+    );
   });
 
   it('excludes a misaligned element, which is no longer a body of revolution', () => {
@@ -1351,7 +1513,11 @@ describe('Voltage optimiser', () => {
     const dead = scoreBeamline(bentColumn(0), beam());
 
     assert(good.transmitted === good.count, `matched should transmit all, got ${good.transmitted}`);
-    assert(dead.transmitted === 0, 'an unpowered deflector transmits nothing');
+    // An unpowered deflector still passes the beam - straight through, out of
+    // the far side of its box. It scores nothing because it delivered nothing
+    // to the end being aimed at, which is what "transmitted" has to mean once
+    // a column can branch.
+    assert(dead.transmitted === 0, 'an unpowered deflector delivers nothing to the bend');
     assert(good.score > dead.score, 'transmitting must outscore not transmitting');
 
     // The partial-credit and beam-size terms together must never be able to
@@ -1386,7 +1552,7 @@ describe('Voltage optimiser', () => {
     const bl = bentColumn(0);
     const knobs = tunableKnobs(bl, SPEC);
     const before = scoreBeamline(bl, beam());
-    assert(before.transmitted === 0, 'starts with the beam lost');
+    assert(before.transmitted === 0, 'starts with nothing reaching the bend');
 
     const result = await optimizeVoltages(bl, beam(), knobs, { passes: 1, coarse: 11, levels: 2 });
 

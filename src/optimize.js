@@ -181,10 +181,23 @@ export function scoreBeamline(beamline, makeIons, opts = {}) {
   const n = ions.length;
   if (n === 0) return { score: 0, transmitted: 0, count: 0, exitRadius: null };
 
+  /*
+    Transmitted WHERE.
+
+    On a straight column that question does not arise. On a branching one it
+    is the whole question: a deflector with hardware on both exits transmits
+    everything at zero volts, straight out the back, and a search told merely
+    to maximise transmission would discover that and switch the deflector off.
+    That is not tuning a beamline, it is unplugging it.
+
+    So an ion counts only if it leaves by the end being aimed at - the main
+    line unless the caller names another.
+  */
+  const { target = beamline.mainEnd, ...flightOpts } = opts;
   const { tracks } = flyBeam(beamline, ions, {
     cfl: 0.05,
     maxSteps: 200000,
-    ...opts,
+    ...flightOpts,
   });
 
   const last = beamline.elements[beamline.elements.length - 1];
@@ -196,13 +209,24 @@ export function scoreBeamline(beamline, makeIons, opts = {}) {
 
   for (const t of tracks) {
     const end = t.points[t.points.length - 1];
-    if (t.stop === 'exited') {
+    const arrived =
+      t.stop === 'exited' &&
+      (!target ||
+        (() => {
+          const e = beamline.endNearest(end.x, end.y ?? 0, end.z);
+          return e && e.element === target.element && e.port === target.port;
+        })());
+
+    if (arrived) {
       transmitted++;
       // Transverse to the EXIT axis, not to the global z. After a bend those
       // are different directions, and the distance from the origin is mostly
       // the bend offset - a number that says nothing about the beam.
       const [ex, ey] = toLocal(exit, [end.x, end.y ?? 0, end.z]);
       sumR2 += ex * ex + ey * ey;
+    } else if (t.stop === 'exited') {
+      // Out of the instrument, but not where it was wanted. No credit, and no
+      // partial credit either - it did not get "most of the way" anywhere.
     } else {
       // How far down the column it got, as a fraction of the path length.
       // `locate` returns null for a point already outside every element, which

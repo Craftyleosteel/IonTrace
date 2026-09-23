@@ -30,6 +30,14 @@ and fly ions through the result:
 | **Quadrupole** | Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both. |
 | **Quadrupole deflector** | Four curved electrodes in a grounded box, at $\pm V$ on the diagonals, turning the beam 90°. Not a sector: the field is a quadrupole *in* the bend plane, so the two axes couple and the path is not an arc. Rolls to any angle, so the column can turn left, down, or anywhere between. |
 
+**A column can branch.** A quadrupole deflector has two exits — bent and
+straight through — so you can bolt a line to each and use it as a beam switch,
+which is what these devices are for. Which branch the ions actually take is
+decided by the field, not by the diagram: 9 of 9 go straight through at 0 V,
+9 of 9 round the bend at the matched voltage, and a half-set voltage puts them
+on the electrodes. The beamline panel draws the tree, with an empty socket on
+every unused exit to start a new line from.
+
 Elements carry their own local field solve, so **only the element you change
 re-solves**, and voltages never re-solve at all.
 
@@ -175,6 +183,7 @@ output:
 | Starting values | every element type transmits when placed, for ions from 4 u at 10 eV to 1000 u at 2 keV and for both polarities; `amplitudeForQ` inverts the Mathieu relation |
 | Folded columns | a column bent through two right angles transmits; no branch of it claims another's ions; the beam is measured transversely to the axis it is actually on |
 | Fringe fields | decay inside a grounded pipe matches $e^{-2.405z/R}$; a grounded plate measurably shields a charged one; a column solve agrees with the isolated solve where it should (an einzel, to 0.00 %) |
+| Branching | each branch is placed where its own exit points, with the right path length; the beam switches with the voltage; an orphaned branch leaves with its junction; no element can be moved below itself |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for

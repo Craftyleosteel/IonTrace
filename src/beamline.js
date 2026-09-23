@@ -105,7 +105,7 @@ export class Beamline {
   /** The column solve covering an element, if there is one. */
   runFor(index) {
     if (!this.fringe) return null;
-    return this.runs.find((r) => index >= r.from && index <= r.to) ?? null;
+    return this.runs.find((r) => r.indices.includes(index)) ?? null;
   }
 
   /*
@@ -114,39 +114,201 @@ export class Beamline {
     not in `layout`: layout runs on every drag, and a Laplace solve must not.
   */
 
-  add(element, index = this.elements.length) {
+  /**
+   * Put an element into the column.
+   *
+   * Topology is carried by `element.from = {parent, port}` - an object
+   * reference, not an index, so splicing the array cannot silently re-wire the
+   * tree. With no `attach` given the element is appended to the end of the
+   * line that runs through whatever is currently last, which is what a plain
+   * "add this" means when there is only one line.
+   *
+   * Anything already hanging from that port is pushed downstream and becomes
+   * the new element's own child, so inserting in the middle of a branch splices
+   * rather than truncates.
+   */
+  add(element, index = this.elements.length, attach = null) {
     element.align ??= { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
+
+    const parent = attach ? attach.parent : this.elements[index - 1] ?? null;
+    const port = attach ? attach.port : firstFreePort(this, parent);
+    element.from = { parent, port };
+
+    // Whatever was on that port now hangs off the new element instead.
+    const displaced = parent ? this.childAt(parent, port) : this.roots()[0] ?? null;
     this.elements.splice(index, 0, element);
+    if (displaced && displaced !== element) {
+      displaced.from = { parent: element, port: exitsOf(element)[0].port };
+    }
+
     this.layout();
     this.rebuildRuns();
     return element;
   }
 
+  /**
+   * Take an element out, joining what was above it to what was below.
+   *
+   * Its first child inherits its place on the parent's port. Any OTHER
+   * children - a second branch off a deflector - lose their mount, so they are
+   * removed with it. Silently orphaning a whole branch would be worse.
+   */
   remove(index) {
-    const [removed] = this.elements.splice(index, 1);
+    const removed = this.elements[index];
+    if (!removed) return null;
+
+    const kids = this.childrenOf(removed);
+    const heir = kids[0] ?? null;
+    if (heir) heir.from = { ...removed.from };
+    for (const other of kids.slice(1)) this.#detach(other);
+
+    this.elements.splice(this.elements.indexOf(removed), 1);
     this.layout();
     this.rebuildRuns();
     return removed;
   }
 
+  /** Remove an element and everything hanging below it. */
+  #detach(element) {
+    for (const child of this.childrenOf(element)) this.#detach(child);
+    const i = this.elements.indexOf(element);
+    if (i >= 0) this.elements.splice(i, 1);
+  }
+
+  /**
+   * Swap an element with the one before or after it on its own branch.
+   *
+   * Only along a branch: "upstream" of a junction is ambiguous, and swapping
+   * across one would mean re-parenting a whole subtree into a different line.
+   */
   move(index, delta) {
-    const target = index + delta;
-    if (target < 0 || target >= this.elements.length) return false;
-    const [e] = this.elements.splice(index, 1);
-    this.elements.splice(target, 0, e);
+    const e = this.elements[index];
+    if (!e) return false;
+
+    const parent = e.from?.parent ?? null;
+    if (delta < 0) {
+      if (!parent) return false;
+      const grand = parent.from?.parent ?? null;
+      const kids = this.childrenOf(e);
+      if (this.childrenOf(parent).length > 1) return false;
+      // e takes the parent's mount; the parent hangs off e.
+      e.from = { ...parent.from };
+      parent.from = { parent: e, port: exitsOf(e)[0].port };
+      for (const k of kids) k.from = { parent, port: exitsOf(parent)[0].port };
+      void grand;
+    } else {
+      const next = this.childrenOf(e)[0];
+      if (!next) return false;
+      if (this.childrenOf(e).length > 1) return false;
+      const kids = this.childrenOf(next);
+      next.from = { ...e.from };
+      e.from = { parent: next, port: exitsOf(next)[0].port };
+      for (const k of kids) k.from = { parent: e, port: exitsOf(e)[0].port };
+    }
+
+    this.#reorder();
     this.layout();
     this.rebuildRuns();
     return true;
   }
 
   replace(index, element) {
-    element.align ??= this.elements[index]?.align ?? {
-      dx: 0, dy: 0, tiltX: 0, tiltY: 0,
-    };
+    const old = this.elements[index];
+    element.align ??= old?.align ?? { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
+    element.from = old?.from ?? { parent: null, port: 'out' };
+    // Children were mounted on the old object, so point them at the new one -
+    // and at a port it actually has, since a rebuild can change the geometry
+    // but never the kind of element.
+    for (const child of this.childrenOf(old)) child.from.parent = element;
     this.elements[index] = element;
     this.layout();
     this.rebuildRuns();
     return element;
+  }
+
+  /**
+   * Hang an element off a different exit, taking its line with it.
+   *
+   * Dropping a piece of hardware somewhere else is the one editing gesture a
+   * tree needs that a list did not. Two rules keep it from producing something
+   * that is not a column:
+   *
+   *   - nothing may be moved below itself, which would cut a loop out of the
+   *     tree and leave it unreachable from the source;
+   *   - a junction with both branches built is not moved, because there is no
+   *     single answer to what happens to the branch that is left behind.
+   *
+   * Otherwise the gap it leaves heals - its own continuation takes its place -
+   * and whatever was on the destination port is pushed down to hang off it.
+   */
+  reparent(element, parent, port) {
+    if (!element || element === parent) return false;
+    for (let p = parent; p; p = p.from?.parent) if (p === element) return false;
+    if (this.childrenOf(element).length > 1) return false;
+
+    const heir = this.childrenOf(element)[0] ?? null;
+    if (heir) heir.from = { ...element.from };
+
+    const displaced = parent
+      ? this.childAt(parent, port)
+      : this.roots().find((r) => r !== element) ?? null;
+
+    element.from = { parent, port };
+    if (displaced && displaced !== element) {
+      displaced.from = { parent: element, port: exitsOf(element)[0].port };
+    }
+
+    this.#reorder();
+    this.layout();
+    this.rebuildRuns();
+    return true;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* topology                                                          */
+  /* ---------------------------------------------------------------- */
+
+  /** Elements with nothing upstream of them. Normally exactly one. */
+  roots() {
+    return this.elements.filter((e) => !e.from?.parent);
+  }
+
+  childrenOf(element) {
+    if (!element) return this.roots();
+    return this.elements.filter((e) => e.from?.parent === element);
+  }
+
+  childAt(element, port) {
+    return this.elements.find((e) => e.from?.parent === element && e.from.port === port) ?? null;
+  }
+
+  /** Every exit with nothing bolted to it: the open ends of the column. */
+  openEnds() {
+    const out = [];
+    for (const e of this.elements) {
+      for (const exit of exitsOf(e)) {
+        if (!this.childAt(e, exit.port)) {
+          out.push({ element: e, port: exit.port, frame: compose(e.nominalFrame, exit.transform) });
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Put `elements` back into depth-first order, so display follows the beam. */
+  #reorder() {
+    const seen = new Set();
+    const order = [];
+    const walk = (e) => {
+      if (!e || seen.has(e)) return;
+      seen.add(e);
+      order.push(e);
+      for (const exit of exitsOf(e)) walk(this.childAt(e, exit.port));
+    };
+    for (const r of this.roots()) walk(r);
+    // Anything unreachable keeps its place rather than vanishing.
+    for (const e of this.elements) if (!seen.has(e)) order.push(e);
+    this.elements = order;
   }
 
   /**
@@ -158,25 +320,81 @@ export class Beamline {
    * of the column.
    */
   layout() {
-    let cursor = identityFrame();
-    let path = 0;
+    // Depth first, because a branch continues from where its junction left
+    // off. The recursion is over the tree, not the array: array order is for
+    // display and is kept in step by `#reorder`.
+    let longest = 0;
+    let main = identityFrame();
+    let mainEnd = null;
 
-    for (const e of this.elements) {
+    const place = (e, cursor, path, isMain) => {
       e.nominalFrame = cursor;
       e.frame = compose(cursor, misalignment(e.align));
       // Distance along the REFERENCE PATH, not along z. For a straight column
       // the two coincide, which is why the name survives; once a bender is in
       // the line, z stops being meaningful and arc length is what orders the
-      // elements.
+      // elements. On a branching column it is distance from the source along
+      // this element's OWN branch.
       e.zStart = path;
-      path += e.length;
-      e.zEnd = path;
-      cursor = compose(cursor, e.exitTransform ?? straightExit(e.length));
-    }
+      e.zEnd = path + e.length;
 
-    this.exitFrame = cursor;
-    this.length = path;
+      const exits = exitsOf(e);
+      for (let k = 0; k < exits.length; k++) {
+        const exit = exits[k];
+        const next = compose(cursor, exit.transform);
+        const child = this.childAt(e, exit.port);
+        // The main line is whatever you reach by always taking the first exit,
+        // which for a deflector is the bend - the reason it is there.
+        const onMain = isMain && k === 0;
+        if (child) {
+          place(child, next, path + exit.length, onMain);
+        } else if (onMain) {
+          main = next;
+          mainEnd = { element: e, port: exit.port };
+          longest = Math.max(longest, path + exit.length);
+        } else {
+          longest = Math.max(longest, path + exit.length);
+        }
+      }
+      if (exits.length === 0) longest = Math.max(longest, e.zEnd);
+    };
+
+    for (const r of this.roots()) place(r, identityFrame(), 0, r === this.roots()[0]);
+
+    this.exitFrame = main;
+    /**
+     * The open end the column is "aimed at".
+     *
+     * Reached by always taking an element's first exit, which for a deflector
+     * is the bend - the reason it is in the line at all. A branching column
+     * has several open ends, so anything that has to mean "out" rather than
+     * "out of something" needs one of them named, and this is it.
+     */
+    this.mainEnd = mainEnd;
+    this.length = longest;
     return this;
+  }
+
+  /**
+   * Which open end an ion left through, by proximity.
+   *
+   * Not by "is it past the plane": on a branching column an ion can be past
+   * more than one exit plane at once - the two ends of a switch face different
+   * ways, and a point far downstream of one may be nominally ahead of the
+   * other as well. Where it actually came out is the end it is nearest.
+   */
+  endNearest(x, y, z) {
+    let best = null;
+    let bestD = Infinity;
+    for (const end of this.openEnds()) {
+      const o = end.frame.o;
+      const d = (x - o[0]) ** 2 + ((y ?? 0) - o[1]) ** 2 + (z - o[2]) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = end;
+      }
+    }
+    return best;
   }
 
   /**
@@ -197,6 +415,9 @@ export class Beamline {
     for (const e of this.elements) {
       if (s >= e.zStart && s < e.zEnd) return e;
     }
+    // Ambiguous once the column branches - two elements on different branches
+    // sit at the same distance from the source - so this returns the first
+    // match and is only used where a single line is assumed.
     const last = this.elements[this.elements.length - 1];
     if (last && s === last.zEnd) return last;
     return null;
@@ -303,18 +524,18 @@ export class Beamline {
     if (this.locate([x, y, z])) return 'inside';
     const g = [x, y, z];
 
-    const last = this.elements[this.elements.length - 1];
-    if (last) {
-      const exitO = toGlobal(last.frame, [0, 0, last.length]);
-      const f = forwardOf(last.frame);
-      const ahead =
-        (g[0] - exitO[0]) * f[0] +
-        (g[1] - exitO[1]) * f[1] +
-        (g[2] - exitO[2]) * f[2];
+    // Past ANY open end counts as having left. A branching column has several,
+    // and a deflector used as a switch has one on whichever port nothing is
+    // bolted to - an ion going that way has genuinely left the instrument, not
+    // wandered out of it.
+    for (const end of this.openEnds()) {
+      const o = end.frame.o;
+      const f = forwardOf(end.frame);
+      const ahead = (g[0] - o[0]) * f[0] + (g[1] - o[1]) * f[1] + (g[2] - o[2]) * f[2];
       if (ahead >= 0) return 'exited';
     }
 
-    const first = this.elements[0];
+    const first = this.roots()[0];
     if (first) {
       const entryO = first.frame.o;
       const f = forwardOf(first.frame);
@@ -512,6 +733,33 @@ export class Beamline {
 /** The exit placement of a straight element of the given length. */
 export function straightExit(length) {
   return { o: [0, 0, length], m: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+}
+
+/**
+ * The ways out of an element.
+ *
+ * Almost everything has one, and says so by not mentioning it: a lens passes
+ * the beam straight on, displaced by its own length. A deflector declares two,
+ * because it is a junction - see `exits` in elements/bender.js.
+ */
+export function exitsOf(element) {
+  if (Array.isArray(element?.exits) && element.exits.length) return element.exits;
+  return [
+    {
+      port: 'out',
+      label: 'Out',
+      length: element.length,
+      transform: element.exitTransform ?? straightExit(element.length),
+    },
+  ];
+}
+
+/** The first exit of `parent` with nothing already on it. */
+function firstFreePort(beamline, parent) {
+  if (!parent) return 'out';
+  const exits = exitsOf(parent);
+  const free = exits.find((x) => !beamline.childAt(parent, x.port));
+  return (free ?? exits[0]).port;
 }
 
 /**

@@ -148,6 +148,43 @@ sits where the field changes at 20 V/mm. `grid.spans()` exists to make these
 comparisons tolerant, and a test asserts that an element paints identically
 wherever it is placed.
 
+### 2.0.1 A column is a tree, and a deflector is a junction
+
+A quadrupole deflector has **two ways out**. At its matched voltage it turns
+the beam through a right angle; turned off, the beam goes straight through the
+box and out the opposite face. That is not a modelling convenience — it is how
+these devices are used, as a switch that sends a beam down one of two lines
+without moving any hardware. The box has apertures on all four faces, which is
+the four-fold symmetry of the electrodes rather than a special case.
+
+So elements form a tree: each carries `from = {parent, port}`, and a deflector
+can have hardware bolted to both of its exits. **Which branch the ions take is
+decided by the field, not by the topology.** Measured on a switch with a line
+on each exit: 9 of 9 out the straight branch at 0 V, 9 of 9 round the bend at
+the matched 40 V, and nothing out of either at half or one and a half times it
+— that last being the honest answer, since a partly-deflected beam lands on the
+electrodes.
+
+Three consequences worth stating:
+
+**"Transmitted" needs a destination.** On a straight column the question does
+not arise. On a branching one it is the whole question: a deflector with
+hardware on both exits transmits everything at zero volts, straight out the
+back. A search told merely to maximise transmission would discover that and
+switch the deflector off — which is not tuning a beamline, it is unplugging it.
+So the column names a **main end**, reached by always taking an element's first
+exit, and the optimiser counts only ions that arrive there.
+
+**Path distance no longer identifies a place.** Two elements on different
+branches sit at the same distance from the source. `zStart` is still distance
+along *that element's own branch*, which is what progress metrics need, but
+anything that has to point at a location uses the frame, not the number.
+
+**A run of shared field solves is a chain, not a slice.** Two branches leaving
+one junction are adjacent in the element array and point in different
+directions; painting both onto one $r$–$z$ grid would put one branch's hardware
+on top of the other's. §10's runs follow the tree.
+
 ### 2.1 The enclosure
 
 An unbounded Dirichlet problem has no unique solution on a finite grid, so the

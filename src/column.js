@@ -94,22 +94,46 @@ export function canShareGrid(e) {
  * its own end caps removed is not the same as solving it with them.
  */
 export function axisymmetricRuns(elements) {
+  /*
+    Chains, not array slices. A run has to be elements that genuinely follow
+    one another along ONE branch: two lines leaving the same deflector sit
+    beside each other in the array but point in different directions, and
+    painting them onto one r-z grid would place hardware from one branch on
+    top of the other.
+  */
+  const parentOf = (e) => e.from?.parent ?? null;
+  const childrenOf = (e) => elements.filter((c) => parentOf(c) === e);
+
+  /** The single continuation of `e`, if it has exactly one and it can share. */
+  const soleHeir = (e) => {
+    const kids = childrenOf(e).filter(canShareGrid);
+    return childrenOf(e).length === 1 && kids.length === 1 ? kids[0] : null;
+  };
+
   const runs = [];
-  let from = -1;
-  for (let i = 0; i <= elements.length; i++) {
-    const ok = i < elements.length && canShareGrid(elements[i]);
-    if (ok && from === -1) from = i;
-    if (!ok && from !== -1) {
-      runs.push([from, i - 1]);
-      from = -1;
+  const claimed = new Set();
+  for (const e of elements) {
+    if (!canShareGrid(e) || claimed.has(e)) continue;
+    // Start only at the head of a chain: either nothing usable above, or the
+    // element above has more than one child and so cannot be joined to.
+    const up = parentOf(e);
+    if (up && canShareGrid(up) && soleHeir(up) === e) continue;
+
+    const chain = [e];
+    claimed.add(e);
+    for (let next = soleHeir(e); next && !claimed.has(next); next = soleHeir(next)) {
+      chain.push(next);
+      claimed.add(next);
     }
+    runs.push(chain);
   }
+
   // A stretch of nothing but drift has no electrode that can ever hold a
   // voltage, so its solution is zero everywhere and solving it is pure cost.
   // The elements' own (empty) fields say the same thing for free.
-  return runs.filter(([a, b]) =>
-    elements.slice(a, b + 1).some((e) => e.typeKey !== 'drift')
-  );
+  return runs
+    .filter((chain) => chain.some((e) => e.typeKey !== 'drift'))
+    .map((chain) => chain.map((e) => elements.indexOf(e)));
 }
 
 /**
@@ -121,9 +145,11 @@ export function axisymmetricRuns(elements) {
  * @returns {{field: Field, grid: PotentialArray, from: number, to: number,
  *            z0: number, z1: number, sync: () => void, warnings: string[]}}
  */
-export function buildRunField(elements, [from, to], solverOpts = {}) {
+export function buildRunField(elements, indices, solverOpts = {}) {
   const warnings = [];
-  const run = elements.slice(from, to + 1);
+  const run = indices.map((i) => elements[i]);
+  const from = indices[0];
+  const to = indices[indices.length - 1];
 
   // Where the run sits along the reference orbit. Elements are laid end to
   // end, so the run spans one contiguous interval of path length.
@@ -169,7 +195,7 @@ export function buildRunField(elements, [from, to], solverOpts = {}) {
     const offset = e.zStart - z0;
     for (const part of e.parts) {
       // Namespaced, so two lenses in a run keep their own centre electrodes.
-      const name = `${from + k}:${part.name}`;
+      const name = `${indices[k]}:${part.name}`;
       const id = grid.addElectrode(name);
       ids.push({ name, id, part, element: e });
 
@@ -228,5 +254,5 @@ export function buildRunField(elements, [from, to], solverOpts = {}) {
     );
   }
 
-  return { field, grid, from, to, z0, z1, sync, warnings };
+  return { field, grid, indices, from, to, z0, z1, sync, warnings };
 }

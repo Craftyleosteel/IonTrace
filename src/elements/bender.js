@@ -259,14 +259,21 @@ export function createBender(params = {}, solverOpts = {}) {
    *
    * The hole is as wide as the channel it feeds: the electrodes stop `gapAngle`
    * short of each axis, so the clear width where the channel meets the box is
-   * `outer sin(gap)` either side. The beam enters through the -Z face and
-   * leaves through the -X one.
+   * `outer sin(gap)` either side.
+   *
+   * There are FOUR of them, one on each face. That is not generosity, it is
+   * the symmetry of the device: the electrodes stop short of both axes in both
+   * directions, so the box has a clear channel along each. It is also what
+   * makes the thing a switch rather than a corner. Turned off, the beam goes
+   * in one face and straight out of the opposite one; turned on, it leaves
+   * through a side. Cutting only the two holes the bend needs would wall off
+   * the straight path and quietly destroy every ion that took it.
    */
   const holeHalf = outer * Math.sin(gap);
   const rim = step * 1.5;
   const inAperture = (X, Z) =>
-    (Z < -extent + rim && Math.abs(X) < holeHalf) ||
-    (X < -extent + rim && Math.abs(Z) < holeHalf);
+    (Math.abs(Z) > extent - rim && Math.abs(X) < holeHalf) ||
+    (Math.abs(X) > extent - rim && Math.abs(Z) < holeHalf);
 
   return {
     type: 'bender',
@@ -287,6 +294,43 @@ export function createBender(params = {}, solverOpts = {}) {
       compose(rollFrame(roll), compose(translation(-a, 0, a), yawFrame(Math.PI / 2))),
       inverse(rollFrame(roll))
     ),
+
+    /**
+     * Two ways out, which is what makes this element a junction.
+     *
+     * A quadrupole deflector at its matched voltage turns the beam through a
+     * right angle. Turned off, the beam goes straight through the box and out
+     * the far side. That is not a modelling convenience - it is how these
+     * things are used, as a switch that sends a beam down one of two lines
+     * without moving any hardware.
+     *
+     * So the element has two exits and a column can have hardware bolted to
+     * both. Which one the ions actually take is decided by the field, not by
+     * the topology: set the voltage and fly, and the beam goes where the
+     * physics sends it. A branch with nothing attached is simply an open port
+     * the beam may leave through.
+     *
+     * The straight path is 2a long - in at one face of the box, out at the
+     * opposite one - while the bent path is the quarter arc of radius a. They
+     * are different distances, which is why each exit carries its own.
+     */
+    exits: [
+      {
+        port: 'bend',
+        label: 'Bent',
+        length,
+        transform: compose(
+          compose(rollFrame(roll), compose(translation(-a, 0, a), yawFrame(Math.PI / 2))),
+          inverse(rollFrame(roll))
+        ),
+      },
+      {
+        port: 'straight',
+        label: 'Straight through',
+        length: 2 * a,
+        transform: translation(0, 0, 2 * a),
+      },
+    ],
 
     pathPoint(f) {
       const t = (f * Math.PI) / 2;
@@ -378,15 +422,16 @@ export function createBender(params = {}, solverOpts = {}) {
         points: [corner(x0, z0), corner(x1, z0), corner(x1, z1), corner(x0, z1)],
         wall: true,
       });
-      out.push(wall(-extent, extent, extent - t, extent)); // far side
-      out.push(wall(extent - t, extent, -extent, extent)); // far side
-      // The entrance (-Z) and exit (-X) faces are drawn in two pieces, with the
-      // beam hole between them, so the picture shows the same apertures the
-      // collision test uses.
-      out.push(wall(-extent, -holeHalf, -extent, -extent + t));
-      out.push(wall(holeHalf, extent, -extent, -extent + t));
-      out.push(wall(-extent, -extent + t, -extent, -holeHalf));
-      out.push(wall(-extent, -extent + t, holeHalf, extent));
+      // All four faces in two pieces each, with the beam hole between them, so
+      // the picture shows the same apertures the collision test uses.
+      for (const near of [true, false]) {
+        const a0 = near ? -extent : extent - t;
+        const a1 = near ? -extent + t : extent;
+        out.push(wall(-extent, -holeHalf, a0, a1)); // a Z face
+        out.push(wall(holeHalf, extent, a0, a1));
+        out.push(wall(a0, a1, -extent, -holeHalf)); // an X face
+        out.push(wall(a0, a1, holeHalf, extent));
+      }
 
       return out;
     },

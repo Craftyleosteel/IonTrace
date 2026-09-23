@@ -14,7 +14,7 @@
  * and only the element that changed is ever re-solved, never the whole line.
  */
 
-import { Beamline } from './beamline.js';
+import { Beamline, exitsOf } from './beamline.js';
 import {
   ELEMENT_TYPES,
   createElement,
@@ -231,16 +231,35 @@ function setParam(index, key, value) {
   drawReadout();
 }
 
-function addElement(type) {
+/**
+ * Place an element.
+ *
+ * `attach` names the exit it hangs from. Without one it goes on the first free
+ * exit of whatever is selected, or the end of the line if nothing is - which
+ * is what "add this" means when there is only one line to add it to.
+ */
+function addElement(type, attach = null) {
   const after = selectedIndex();
   const index = after >= 0 ? after + 1 : beamline.elements.length;
   statusEl.classList.add('busy');
   // Matched to the beam that is in the source right now, so a deflector
   // dropped in from the toolbar actually deflects.
-  beamline.add(createElement(type, startingParams(type, beamSpec())), index);
+  const placed = beamline.add(
+    createElement(type, startingParams(type, beamSpec())),
+    index,
+    attach
+  );
   statusEl.classList.remove('busy');
-  selection = { kind: 'element', index };
+  selection = { kind: 'element', index: beamline.elements.indexOf(placed) };
   afterStructureChange();
+}
+
+/** The exit a new element should hang from, given what is selected. */
+function defaultAttach() {
+  const e = beamline.elements[selectedIndex()];
+  if (!e) return null;
+  const free = exitsOf(e).find((x) => !beamline.childAt(e, x.port));
+  return free ? { parent: e, port: free.port } : null;
 }
 
 function removeElement(index) {
@@ -328,40 +347,31 @@ function onSourceHandle(px, py) {
 }
 
 /**
- * Distance along the reference path nearest a world point.
+ * Where a drop lands: the exit of the element nearest the cursor.
  *
- * Used to decide where a dragged element would land. Once the column can bend
- * there is no coordinate to compare against, so the drop position comes from
- * the closest point on the orbit itself.
+ * Path distance used to answer this, which worked while a column was a line.
+ * On a tree two elements on different branches sit at the same distance from
+ * the source, so distance no longer identifies a place. Proximity in the view
+ * does, and it is also what the gesture means - drop it next to that one.
  */
-function nearestPathDistance(g) {
-  let best = Infinity;
-  let bestS = 0;
+function dropTargetAt(g) {
+  let best = null;
+  let bestD = Infinity;
   for (const e of beamline.elements) {
     const n = e.curved ? 16 : 2;
     for (let k = 0; k <= n; k++) {
       const f = k / n;
-      const p = toGlobal(
-        e.frame,
-        e.pathPoint ? e.pathPoint(f) : [0, 0, f * e.length]
-      );
-      const d = Math.hypot(p[0] - g[0], p[2] - g[2]);
-      if (d < best) {
-        best = d;
-        bestS = e.zStart + f * e.length;
+      const p = toGlobal(e.frame, e.pathPoint ? e.pathPoint(f) : [0, 0, f * e.length]);
+      const d = Math.hypot(p[0] - g[0], p[1] - g[1], p[2] - g[2]);
+      if (d < bestD) {
+        bestD = d;
+        best = e;
       }
     }
   }
-  return bestS;
-}
-
-/** Where an element dropped at this path distance would be inserted. */
-function dropIndexAtS(s) {
-  for (let i = 0; i < beamline.elements.length; i++) {
-    const e = beamline.elements[i];
-    if (s < e.zStart + e.length / 2) return i;
-  }
-  return beamline.elements.length;
+  if (!best) return null;
+  const free = exitsOf(best).find((x) => !beamline.childAt(best, x.port));
+  return { parent: best, port: (free ?? exitsOf(best)[0]).port };
 }
 
 function select(next) {
@@ -426,7 +436,7 @@ canvas.addEventListener('pointermove', (e) => {
   }
 
   if (Math.hypot(px - drag.startPx, py - drag.startPy) > 5) drag.moved = true;
-  drag.dropIndex = dropIndexAtS(nearestPathDistance(worldAt(px, py)));
+  drag.dropTo = dropTargetAt(worldAt(px, py));
   render();
 });
 
@@ -441,15 +451,11 @@ function endDrag(e) {
     /* already released */
   }
 
-  if (finished.kind === 'element' && finished.moved) {
-    let target = finished.dropIndex ?? finished.from;
-    // Removing the element first shifts everything after it down one.
-    if (target > finished.from) target -= 1;
-    if (target !== finished.from) {
-      const [moved] = beamline.elements.splice(finished.from, 1);
-      beamline.elements.splice(target, 0, moved);
-      beamline.layout();
-      selection = { kind: 'element', index: target };
+  if (finished.kind === 'element' && finished.moved && finished.dropTo) {
+    const moved = beamline.elements[finished.from];
+    const { parent, port } = finished.dropTo;
+    if (moved && parent !== moved && beamline.reparent(moved, parent, port)) {
+      selection = { kind: 'element', index: beamline.elements.indexOf(moved) };
       afterStructureChange();
       return;
     }
@@ -493,33 +499,73 @@ function summarise(e) {
   }
 }
 
+/**
+ * The beamline, drawn as what it now is: a tree.
+ *
+ * A column used to be a list, and a list rendered as a list. Once a deflector
+ * can have hardware on both of its exits the shape on screen has to be the
+ * shape of the thing - otherwise two branches appear as one line and the
+ * picture lies about where the beam can go.
+ *
+ * Every element is followed by its children, indented under the port they hang
+ * from. A port with nothing on it is drawn as an empty socket you can add to,
+ * which is how a second branch gets started at all.
+ */
 function renderTrack() {
   const idx = selectedIndex();
-  const chips = beamline.elements
-    .map((e, i) => {
-      const last = beamline.elements.length - 1;
-      const off = Math.hypot(e.align.dx, e.align.dy);
-      return `
-        <li class="chip ${i === idx ? 'sel' : ''} chip-${e.typeKey}">
-          <button class="chip-body" data-act="select" data-index="${i}">
-            <span class="chip-name">${escapeHtml(e.label)}${
-              off > 0 ? ' <span class="nudged" title="Misaligned">off</span>' : ''
-            }</span>
-            <span class="chip-meta">${escapeHtml(summarise(e))}</span>
-            <span class="chip-len">${mToMm(e.length).toFixed(0)} mm</span>
-          </button>
-          <span class="chip-tools">
-            <button data-act="left" data-index="${i}" ${i === 0 ? 'disabled' : ''}
-              title="Move upstream" aria-label="Move ${escapeHtml(e.label)} upstream">◀</button>
-            <button data-act="right" data-index="${i}" ${i === last ? 'disabled' : ''}
-              title="Move downstream" aria-label="Move ${escapeHtml(e.label)} downstream">▶</button>
-            <button data-act="remove" data-index="${i}"
-              ${beamline.elements.length <= 1 ? 'disabled' : ''}
-              title="Remove" aria-label="Remove ${escapeHtml(e.label)}">×</button>
-          </span>
-        </li>`;
-    })
-    .join('');
+
+  const chip = (e) => {
+    const i = beamline.elements.indexOf(e);
+    const off = Math.hypot(e.align.dx, e.align.dy);
+    const kids = beamline.childrenOf(e);
+    return `
+      <li class="chip ${i === idx ? 'sel' : ''} chip-${e.typeKey}">
+        <button class="chip-body" data-act="select" data-index="${i}">
+          <span class="chip-name">${escapeHtml(e.label)}${
+            off > 0 ? ' <span class="nudged" title="Misaligned">off</span>' : ''
+          }</span>
+          <span class="chip-meta">${escapeHtml(summarise(e))}</span>
+          <span class="chip-len">${mToMm(e.length).toFixed(0)} mm</span>
+        </button>
+        <span class="chip-tools">
+          <button data-act="left" data-index="${i}"
+            ${e.from?.parent ? '' : 'disabled'}
+            title="Move upstream" aria-label="Move ${escapeHtml(e.label)} upstream">◀</button>
+          <button data-act="right" data-index="${i}" ${kids.length === 1 ? '' : 'disabled'}
+            title="Move downstream" aria-label="Move ${escapeHtml(e.label)} downstream">▶</button>
+          <button data-act="remove" data-index="${i}"
+            ${beamline.elements.length <= 1 ? 'disabled' : ''}
+            title="Remove" aria-label="Remove ${escapeHtml(e.label)}">×</button>
+        </span>
+      </li>`;
+  };
+
+  /** One element and everything below it. */
+  const branch = (e) => {
+    const exits = exitsOf(e);
+    // A single unnamed exit is just "what comes next" and needs no label; a
+    // junction does, or the two lines below it are indistinguishable.
+    const junction = exits.length > 1;
+    const below = exits
+      .map((exit) => {
+        const child = beamline.childAt(e, exit.port);
+        const i = beamline.elements.indexOf(e);
+        const head = junction
+          ? `<li class="port-label">${escapeHtml(exit.label)}</li>`
+          : '';
+        const body = child
+          ? branch(child)
+          : `<li class="port-open">
+               <button data-act="port" data-index="${i}" data-port="${exit.port}"
+                       title="Start a line on this exit">
+                 + ${escapeHtml(junction ? exit.label.toLowerCase() : 'add here')}
+               </button>
+             </li>`;
+        return head + body;
+      })
+      .join('');
+    return chip(e) + (below ? `<li><ul class="track-sub">${below}</ul></li>` : '');
+  };
 
   // The source is part of the column as far as selection goes.
   trackEl.innerHTML =
@@ -529,7 +575,11 @@ function renderTrack() {
          <span class="chip-meta">${escapeHtml(summariseBeam())}</span>
          <span class="chip-len">entrance</span>
        </button>
-     </li>` + chips;
+     </li>` +
+    (beamline.roots().map(branch).join('') ||
+      `<li class="port-open">
+         <button data-act="port" data-index="-1" data-port="out">+ add an element</button>
+       </li>`);
 
   autoAlignBtn.hidden = !beamline.misaligned;
 }
@@ -1593,14 +1643,17 @@ function drawSource(T) {
 
 /** Where a dragged or dropped element would land. */
 function drawDropIndicator(T) {
-  if (!drag || drag.dropIndex == null) return;
+  if (!drag || !drag.dropTo) return;
   if (drag.kind === 'element' && !drag.moved) return;
 
-  const i = drag.dropIndex;
-  const at =
-    i >= beamline.elements.length
-      ? { frame: beamline.exitFrame, r: beamline.radiusLimit }
-      : { frame: beamline.elements[i].frame, r: beamline.elements[i].outerRadius };
+  // Marked at the exit it will hang from, which is where it will actually
+  // appear - on a branching column "after element i" is not a place.
+  const parent = drag.dropTo.parent;
+  const exit = exitsOf(parent).find((x) => x.port === drag.dropTo.port) ?? exitsOf(parent)[0];
+  const at = {
+    frame: compose(parent.nominalFrame, exit.transform),
+    r: parent.outerRadius,
+  };
 
   const a = T.project(toGlobal(at.frame, across(T, at.r * 1.4)));
   const b = T.project(toGlobal(at.frame, across(T, -at.r * 1.4)));
@@ -2109,7 +2162,34 @@ function handleAction(act, index) {
   }
 }
 
+/**
+ * The exit a toolbar click will attach to, if one has been chosen.
+ *
+ * Clicking an empty socket in the track arms it; the next element placed goes
+ * there and it disarms. Without this, starting a second branch would need
+ * drag-and-drop onto a diagram where the two lines may overlap.
+ */
+let pendingPort = null;
+
+function armPort(next) {
+  pendingPort = next;
+  for (const b of trackEl.querySelectorAll('button[data-act="port"]')) {
+    const mine =
+      next &&
+      beamline.elements[Number(b.dataset.index)] === next.parent &&
+      b.dataset.port === next.port;
+    b.classList.toggle('armed', Boolean(mine));
+  }
+}
+
 trackEl.addEventListener('click', (e) => {
+  const port = e.target.closest('button[data-act="port"]');
+  if (port) {
+    const parent = beamline.elements[Number(port.dataset.index)] ?? null;
+    const already = pendingPort?.parent === parent && pendingPort?.port === port.dataset.port;
+    armPort(already ? null : { parent, port: port.dataset.port });
+    return;
+  }
   const button = e.target.closest('button[data-act]');
   if (button) handleAction(button.dataset.act, Number(button.dataset.index));
 });
@@ -2121,7 +2201,10 @@ inspectorEl.addEventListener('click', (e) => {
 
 toolsEl.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-add]');
-  if (button) addElement(button.dataset.add);
+  if (!button) return;
+  const attach = pendingPort ?? defaultAttach();
+  pendingPort = null;
+  addElement(button.dataset.add, attach);
 });
 
 toolsEl.addEventListener('dragstart', (e) => {
@@ -2138,7 +2221,7 @@ canvas.addEventListener('dragover', (e) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
   const { px, py } = pointerPos(e);
-  drag = { kind: 'insert', dropIndex: dropIndexAtS(nearestPathDistance(worldAt(px, py))) };
+  drag = { kind: 'insert', dropTo: dropTargetAt(worldAt(px, py)) };
   render();
 });
 
@@ -2152,17 +2235,14 @@ canvas.addEventListener('dragleave', () => {
 canvas.addEventListener('drop', (e) => {
   e.preventDefault();
   const type = e.dataTransfer.getData('text/iontrace-element');
-  const index = drag?.dropIndex ?? beamline.elements.length;
+  const attach = drag?.dropTo ?? null;
   drag = null;
   if (!type || !ELEMENT_TYPES[type]) {
     render();
     return;
   }
-  statusEl.classList.add('busy');
-  beamline.add(createElement(type, startingParams(type, beamSpec())), index);
-  statusEl.classList.remove('busy');
-  selection = { kind: 'element', index };
-  afterStructureChange();
+  pendingPort = null;
+  addElement(type, attach);
 });
 
 autoAlignBtn.addEventListener('click', () => {
