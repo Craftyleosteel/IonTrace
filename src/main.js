@@ -34,9 +34,7 @@ const readoutEl = el('readout');
 const trackEl = el('track');
 const inspectorEl = el('inspector');
 const addPanel = el('addPanel');
-const addType = el('addType');
-const addGo = el('addGo');
-const addBlurb = el('addBlurb');
+const toolsEl = el('tools');
 const beamPanel = el('beamPanel');
 const autoAlignBtn = el('autoAlign');
 const scaleNote = el('scaleNote');
@@ -515,15 +513,25 @@ function summariseBeam() {
   );
 }
 
-function renderAddMenu() {
-  addType.innerHTML = Object.entries(ELEMENT_TYPES)
-    .map(([type, spec]) => `<option value="${type}">${escapeHtml(spec.label)}</option>`)
+/**
+ * The placement toolbar.
+ *
+ * Generated from the element registry, so a new kind of optic appears here
+ * the moment it is registered - there is no list of element types anywhere in
+ * the UI to forget to update. Each button both clicks to append and drags to
+ * place at a chosen point on the beamline.
+ */
+function renderTools() {
+  toolsEl.innerHTML = Object.entries(ELEMENT_TYPES)
+    .map(
+      ([type, spec]) => `
+        <button class="tool" data-add="${type}" draggable="true"
+                title="${escapeHtml(spec.blurb)} — click to append, or drag onto the beamline">
+          <svg viewBox="0 0 32 18" aria-hidden="true">${spec.icon ?? ''}</svg>
+          <span>${escapeHtml(spec.label)}</span>
+        </button>`
+    )
     .join('');
-  updateAddBlurb();
-}
-
-function updateAddBlurb() {
-  addBlurb.textContent = ELEMENT_TYPES[addType.value]?.blurb ?? '';
 }
 
 /**
@@ -1710,8 +1718,51 @@ inspectorEl.addEventListener('click', (e) => {
   if (button) handleAction(button.dataset.act, Number(button.dataset.index));
 });
 
-addType.addEventListener('change', updateAddBlurb);
-addGo.addEventListener('click', () => addElement(addType.value));
+toolsEl.addEventListener('click', (e) => {
+  const button = e.target.closest('button[data-add]');
+  if (button) addElement(button.dataset.add);
+});
+
+toolsEl.addEventListener('dragstart', (e) => {
+  const button = e.target.closest('button[data-add]');
+  if (!button) return;
+  e.dataTransfer.setData('text/iontrace-element', button.dataset.add);
+  e.dataTransfer.effectAllowed = 'copy';
+});
+
+/* Dropping a tool onto the beamline places it where it was dropped, rather
+   than at the end. The insertion point comes from the closest point on the
+   reference orbit, so it works after the column bends. */
+canvas.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  const { px, py } = pointerPos(e);
+  drag = { kind: 'insert', dropIndex: dropIndexAtS(nearestPathDistance(worldAt(px, py))) };
+  render();
+});
+
+canvas.addEventListener('dragleave', () => {
+  if (drag?.kind === 'insert') {
+    drag = null;
+    render();
+  }
+});
+
+canvas.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const type = e.dataTransfer.getData('text/iontrace-element');
+  const index = drag?.dropIndex ?? beamline.elements.length;
+  drag = null;
+  if (!type || !ELEMENT_TYPES[type]) {
+    render();
+    return;
+  }
+  statusEl.classList.add('busy');
+  beamline.add(createElement(type), index);
+  statusEl.classList.remove('busy');
+  selection = { kind: 'element', index };
+  afterStructureChange();
+});
 
 autoAlignBtn.addEventListener('click', () => {
   beamline.autoAlign();
@@ -1777,7 +1828,7 @@ statusEl.classList.remove('busy');
 selection = null;
 
 syncOutputs();
-renderAddMenu();
+renderTools();
 renderTrack();
 renderInspector();
 render();

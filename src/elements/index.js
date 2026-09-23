@@ -19,8 +19,26 @@ import { createBender, BENDER_DEFAULTS } from './bender.js';
 
 /** @typedef {{key: string, label: string, unit?: string, min: number, max: number, step: number, rebuild: boolean, help?: string}} FieldSpec */
 
+/**
+ * Toolbar glyphs, drawn on a 32x18 canvas with the beam running left to right.
+ *
+ * Each one shows the element's actual cross-section rather than an abstract
+ * symbol, so the toolbar reads as a picture of what will be placed: two rails
+ * for a drift, a plate with a hole, three cylinders, four rods, a curve.
+ */
+const ICONS = {
+  drift: '<path d="M2 4h28M2 14h28"/>',
+  aperture: '<path d="M16 1v6M16 11v6"/><path d="M2 9h28" opacity=".35"/>',
+  einzel: '<path d="M3 4h7M3 14h7M13 4h6M13 14h6M22 4h7M22 14h7"/>',
+  quadrupole:
+    '<circle cx="9" cy="5" r="2.6"/><circle cx="23" cy="5" r="2.6"/>' +
+    '<circle cx="9" cy="13" r="2.6"/><circle cx="23" cy="13" r="2.6"/>',
+  bender: '<path d="M2 14h9a10 10 0 0 0 10-10v-2"/><path d="M18 4l3 -3 3 3" fill="none"/>',
+};
+
 export const ELEMENT_TYPES = {
   drift: {
+    icon: ICONS.drift,
     label: 'Drift',
     blurb: 'Field-free tube. Separates active elements so their fringe fields do not overlap.',
     create: createDrift,
@@ -32,6 +50,7 @@ export const ELEMENT_TYPES = {
   },
 
   aperture: {
+    icon: ICONS.aperture,
     label: 'Aperture plate',
     blurb:
       'A charged plate with a hole. Not a passive opening — the equipotentials bulge through it, so it acts as a lens.',
@@ -46,6 +65,7 @@ export const ELEMENT_TYPES = {
   },
 
   einzel: {
+    icon: ICONS.einzel,
     label: 'Einzel lens',
     blurb:
       'Three coaxial cylinders, outer two grounded. Does no net work on a transmitted ion, and focuses for either polarity.',
@@ -60,6 +80,7 @@ export const ELEMENT_TYPES = {
   },
 
   bender: {
+    icon: ICONS.bender,
     label: 'Bender',
     blurb:
       'Two curved plates that turn the beam. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
@@ -76,6 +97,7 @@ export const ELEMENT_TYPES = {
   },
 
   quadrupole: {
+    icon: ICONS.quadrupole,
     label: 'Quadrupole',
     blurb:
       'Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both.',

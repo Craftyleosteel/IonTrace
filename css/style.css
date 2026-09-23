@@ -120,6 +120,94 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* placement toolbar                                                   */
+/* ------------------------------------------------------------------ */
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.toolbar-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toolbar-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.toolbar-right {
+  margin-left: auto;
+}
+
+.tool {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: grab;
+}
+
+.tool:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.tool:active {
+  cursor: grabbing;
+  transform: translateY(1px);
+}
+
+.tool:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tool svg {
+  width: 32px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+@media (max-width: 720px) {
+  /* Labels are the first thing to go; the glyphs still identify each tool. */
+  .tool span {
+    display: none;
+  }
+  .tool {
+    padding: 6px 8px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* layout                                                              */
 /* ------------------------------------------------------------------ */
 

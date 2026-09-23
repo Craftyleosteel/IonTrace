@@ -23,6 +23,24 @@
       </div>
     </header>
 
+    <!--
+      Placement toolbar. Kept at the top and always visible, because adding an
+      element is the one action that should never be more than one click away
+      - it is how a beamline gets built at all. Each button is also draggable
+      onto the beamline, to place an element somewhere other than the end.
+    -->
+    <nav class="toolbar" aria-label="Add elements to the beamline">
+      <div class="toolbar-inner">
+        <span class="toolbar-label">Add</span>
+        <div class="tools" id="tools"></div>
+        <div class="toolbar-right">
+          <button class="ghost-btn" id="autoAlign" type="button" hidden>
+            Auto-align
+          </button>
+        </div>
+      </div>
+    </nav>
+
     <main class="layout">
       <!-- ---------------------------------------------------------- -->
       <!-- controls                                                    -->
@@ -44,14 +62,14 @@
           <span class="fly-hint">launch the beam</span>
         </button>
 
+        <!-- Shown only when nothing is selected, so the panel is never empty. -->
         <section class="group" id="addPanel">
-          <h2>Add to the beamline</h2>
-          <label class="field">
-            <span class="field-label">Element</span>
-            <select id="addType"></select>
-          </label>
-          <button class="add-go" id="addGo" type="button">Add to beamline</button>
-          <p class="hint" id="addBlurb"></p>
+          <h2>Build a beamline</h2>
+          <p class="hint">
+            Add elements from the toolbar above, or drag one onto the beamline
+            to place it at a particular point. Click anything in the view to
+            select it and see its settings.
+          </p>
         </section>
 
         <!-- Whatever is selected: an element, or the ion source. -->
@@ -167,9 +185,6 @@
         <div class="track-wrap">
           <div class="track-head">
             <h2>Beamline</h2>
-            <button class="ghost-btn" id="autoAlign" type="button" hidden>
-              Auto-align
-            </button>
           </div>
           <ol class="track" id="track" aria-label="Beamline elements"></ol>
           <p class="hint track-hint">
