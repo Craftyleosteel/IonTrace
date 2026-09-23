@@ -135,6 +135,34 @@
           <p class="hint" id="fringeNote"></p>
         </section>
 
+        <!--
+          What the diagram draws. Three ways of showing the same solved field,
+          each answering a different question: where the potential is high,
+          where the surfaces of constant potential run, and which way a charge
+          is pushed. Kept out here rather than folded away, because they are
+          how you see what an element is doing.
+        -->
+        <section class="group" id="viewPanel">
+          <h2>Show</h2>
+          <label class="check">
+            <input id="showField" type="checkbox" checked />
+            <span>Potential map</span>
+          </label>
+          <label class="check">
+            <input id="showContours" type="checkbox" />
+            <span>Equipotentials</span>
+          </label>
+          <label class="check">
+            <input id="showLines" type="checkbox" />
+            <span>Field lines</span>
+          </label>
+          <p class="hint">
+            Field lines run along <strong>E</strong>, from positive metal to
+            negative, and cross equipotentials at right angles. They are where
+            a fringe field reaching out of an element is easiest to see.
+          </p>
+        </section>
+
         <!-- Beam settings. Shown only while the source is selected. -->
         <section class="group" id="beamPanel" hidden>
           <label class="field">
@@ -189,14 +217,6 @@
               <input id="cfl" type="number" min="0.01" max="0.3" step="0.01" value="0.05" />
             </label>
 
-            <label class="check">
-              <input id="showField" type="checkbox" checked />
-              <span>Potential map</span>
-            </label>
-            <label class="check">
-              <input id="showContours" type="checkbox" />
-              <span>Equipotentials</span>
-            </label>
           </details>
         </section>
       </aside>
@@ -238,15 +258,18 @@
         <div class="track-wrap">
           <div class="track-head">
             <h2>Beamline</h2>
+            <!-- The flow chart leads, because a column that can branch has a
+                 shape and the shape is the point. The list is still there for
+                 a straight line, where it is more compact. -->
             <div class="tabs" role="tablist" aria-label="Beamline view">
-              <button class="tab sel" id="tabList" type="button" role="tab"
-                      aria-selected="true">List</button>
-              <button class="tab" id="tabFlow" type="button" role="tab"
-                      aria-selected="false">Flow chart</button>
+              <button class="tab sel" id="tabFlow" type="button" role="tab"
+                      aria-selected="true">Flow chart</button>
+              <button class="tab" id="tabList" type="button" role="tab"
+                      aria-selected="false">List</button>
             </div>
           </div>
-          <ol class="track" id="track" aria-label="Beamline elements"></ol>
-          <div class="flow" id="flow" aria-label="Beamline flow chart" hidden></div>
+          <ol class="track" id="track" aria-label="Beamline elements" hidden></ol>
+          <div class="flow" id="flow" aria-label="Beamline flow chart"></div>
           <p class="hint track-hint">
             Click anything to select it and see its settings; click empty space
             to deselect. Drag an element on the diagram to hang it somewhere

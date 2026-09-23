@@ -78,10 +78,11 @@ const inputs = {
   cfl: el('cfl'),
   showField: el('showField'),
   showContours: el('showContours'),
+  showLines: el('showLines'),
 };
 
 /** Controls that change only how the scene is drawn, never the physics. */
-const DISPLAY_INPUTS = ['showField', 'showContours'];
+const DISPLAY_INPUTS = ['showField', 'showContours', 'showLines'];
 
 /* ------------------------------------------------------------------ */
 /* colour                                                              */
@@ -148,6 +149,8 @@ let flightOpts = null;
 let flightStarted = 0;
 let animation = { running: false, frame: 0, perFrame: 40 };
 let stale = false;
+/** A geometry rebuild waiting on an idle timer. See GEOMETRY_DELAY. */
+let geometryTimer = null;
 
 const readNumber = (input, fallback) => {
   const v = parseFloat(input.value);
@@ -358,10 +361,24 @@ function onSourceHandle(px, py) {
  * the source, so distance no longer identifies a place. Proximity in the view
  * does, and it is also what the gesture means - drop it next to that one.
  */
-function dropTargetAt(g) {
+function dropTargetAt(g, dragged = null) {
+  // An element cannot be dropped onto itself or onto anything hanging below
+  // it - that would cut a loop out of the tree - so those are not offered as
+  // targets. Without this the nearest element to a small drag is the dragged
+  // one, the move is refused, and the gesture appears to do nothing.
+  const forbidden = new Set();
+  if (dragged) {
+    const bury = (x) => {
+      forbidden.add(x);
+      for (const c of beamline.childrenOf(x)) bury(c);
+    };
+    bury(dragged);
+  }
+
   let best = null;
   let bestD = Infinity;
   for (const e of beamline.elements) {
+    if (forbidden.has(e)) continue;
     const n = e.curved ? 16 : 2;
     for (let k = 0; k <= n; k++) {
       const f = k / n;
@@ -379,6 +396,10 @@ function dropTargetAt(g) {
 }
 
 function select(next) {
+  // A geometry rebuild waiting on a timer belongs to the element that was
+  // selected when it was scheduled, so it is dropped rather than applied to
+  // whatever is selected now.
+  cancelGeometry();
   selection = next;
   renderTrack();
   renderInspector();
@@ -440,7 +461,7 @@ canvas.addEventListener('pointermove', (e) => {
   }
 
   if (Math.hypot(px - drag.startPx, py - drag.startPy) > 5) drag.moved = true;
-  drag.dropTo = dropTargetAt(worldAt(px, py));
+  drag.dropTo = dropTargetAt(worldAt(px, py), beamline.elements[drag.from]);
   render();
 });
 
@@ -1668,6 +1689,107 @@ function drawContours(e, T) {
 }
 
 /**
+ * Field lines: curves everywhere tangent to E.
+ *
+ * Traced rather than contoured. Starting from a seed, each step moves one
+ * fraction of a grid cell along the unit field vector, which is the definition
+ * of a field line and needs no marching-squares machinery. Both directions are
+ * followed from each seed, so a line runs from the positive metal it leaves to
+ * the negative metal it lands on rather than stopping at an arbitrary point.
+ *
+ * Seeded on a coarse lattice rather than on the electrodes. Electrode surfaces
+ * are where the field is strongest, so seeding there crowds every line into
+ * the gaps and leaves the interesting part - what escapes into the drift -
+ * empty. A lattice covers both, and duplicate lines through the same cell are
+ * dropped so the strong regions do not end up solid black.
+ *
+ * Axisymmetric elements only. A quadrupole's field lies in the transverse
+ * plane, not this one, and a deflector's bend plane is drawn edge-on, so in
+ * both cases tracing in the r-z slice would draw something that is not there.
+ */
+function drawFieldLines(e, T) {
+  if (!e.grid || !e.field || e.typeKey === 'quadrupole' || e.typeKey === 'bender') return;
+  const { grid, field } = e;
+  const h = grid.step * 0.5;
+  const maxSteps = Math.round((grid.zLength / h) * 1.5);
+
+  /*
+    Where the field is too weak to have a direction, stop.
+
+    An einzel has a null on its axis between the two gaps, and a fixed
+    threshold in volts per metre does not know that: at a millivolt per metre
+    the direction is round-off, and a line traced through it wanders off at any
+    angle it likes. Measured before this, the worst tangent was 66 degrees away
+    from the field it was meant to be following. Scaled to the strongest field
+    this element actually has, a thousandth of it is safely into the noise.
+  */
+  let strongest = 0;
+  for (let k = 0; k < field.Ez.length; k++) {
+    const m = Math.hypot(field.Ez[k], field.Er[k]);
+    if (m > strongest) strongest = m;
+  }
+  const floor = strongest * 1e-3;
+  if (!(floor > 0)) return;
+
+  // One line per cell of this lattice, so density is even rather than
+  // following field strength.
+  const cell = grid.step * 7;
+  const claimed = new Set();
+  const key = (z, r) => `${Math.round(z / cell)},${Math.round(r / cell)}`;
+
+  const lines = [];
+  for (let z = grid.z0 + cell; z < grid.z0 + grid.zLength; z += cell) {
+    for (let r = grid.rMin + cell * 0.5; r < grid.rMax; r += cell) {
+      if (claimed.has(key(z, r))) continue;
+      const pts = [];
+      for (const sense of [1, -1]) {
+        let pz = z;
+        let pr = r;
+        const side = [];
+        for (let n = 0; n < maxSteps; n++) {
+          const { Ez, Er } = field.fieldAt(pz, pr);
+          const mag = Math.hypot(Ez, Er);
+          // A field line has no direction where there is no field.
+          if (!(mag > floor)) break;
+          side.push([pz, pr]);
+          claimed.add(key(pz, pr));
+          pz += (sense * h * Ez) / mag;
+          pr += (sense * h * Er) / mag;
+          if (pz < grid.z0 || pz > grid.z0 + grid.zLength) break;
+          if (pr < grid.rMin || pr > grid.rMax) break;
+          if (field.strikes(pr, 0, pz)) break;
+        }
+        // The backward half is walked outwards from the seed, so it has to be
+        // reversed before being joined to the forward half.
+        if (sense === 1) pts.push(...side.reverse());
+        else pts.push(...side.slice(1));
+      }
+      if (pts.length > 3) lines.push(pts);
+    }
+  }
+  if (lines.length === 0) return;
+
+  ctx.save();
+  withElementTransform(e, T, () => {});
+  ctx.strokeStyle = cssVar('--accent');
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const pts of lines) {
+    for (const sign of [1, -1]) {
+      pts.forEach((p, i) => {
+        const x = p[0] * T.scale;
+        const y = -sign * p[1] * T.scale;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
  * Electrodes, as polygons in global space.
  *
  * Filled as paths rather than axis-aligned rectangles, because once the
@@ -2172,6 +2294,9 @@ function drawPane(T, width) {
   if (inputs.showContours.checked) {
     for (const e of beamline.elements) drawContours(e, T);
   }
+  if (inputs.showLines.checked) {
+    for (const e of beamline.elements) drawFieldLines(e, T);
+  }
   drawBoundaries(T);
   drawReferencePath(T);
   drawElectrodes(T);
@@ -2618,21 +2743,54 @@ function readTyped(input) {
 }
 
 /**
+ * How long a geometry edit waits before the element is rebuilt.
+ *
+ * Geometry changes the boundary, so it needs a fresh Laplace solve, and that
+ * is not free: measured, a drift rebuilds in 0.2 ms, an aperture plate in 5, a
+ * lens in 24, a deflector in 62 and an RF quadrupole in 122. Re-solving on
+ * every keystroke would stall on the slower ones and would also solve for the
+ * wrong thing on the way - typing "15" means solving for 1 first.
+ *
+ * So geometry edits are applied after a short idle instead of being held back
+ * until the field is left. Long enough that a burst of typing or a held-down
+ * stepper arrow collapses into one solve; short enough that the hardware
+ * visibly follows the number.
+ */
+const GEOMETRY_DELAY = 140;
+
+/** Cancel a geometry rebuild that has not happened yet. */
+function cancelGeometry() {
+  clearTimeout(geometryTimer);
+  geometryTimer = null;
+}
+
+/**
  * Apply what a typed inspector field says.
  *
  * `live` distinguishes a keystroke from a commit. A voltage only rescales
- * stored solutions, so it can follow every keystroke and the picture updates
- * as the number is typed. Geometry needs a fresh Laplace solve, and re-solving
- * once per character while someone types "15" would solve for 1 first - slow,
- * and briefly wrong. Those wait for the field to be committed: blur, Enter, or
- * the stepper arrows.
+ * stored solutions, so it follows every keystroke directly. Geometry takes the
+ * scheduled path above, so the drawing still follows what is being typed - the
+ * plate really does get thicker as the number goes up - without a solve per
+ * character.
  */
 function applyTypedField(input, live) {
   const key = input.dataset.param;
   if (key) {
-    if (live && input.dataset.rebuild === '1') return;
     const value = readTyped(input);
     if (value === null) return;
+    const geometry = input.dataset.rebuild === '1';
+    if (geometry && live) {
+      // Pinned to the element selected NOW: the rebuild happens later, and by
+      // then the selection may have moved on.
+      const index = selectedIndex();
+      cancelGeometry();
+      geometryTimer = setTimeout(() => {
+        geometryTimer = null;
+        if (index === selectedIndex()) setParam(index, key, value);
+      }, GEOMETRY_DELAY);
+      return;
+    }
+    cancelGeometry();
     setParam(selectedIndex(), key, value);
     return;
   }
@@ -2702,7 +2860,7 @@ selection = null;
 syncOutputs();
 describeFringe();
 renderTools();
-renderTrack();
+showFlow(true);
 renderInspector();
 render();
 drawReadout();
