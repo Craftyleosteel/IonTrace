@@ -42,6 +42,7 @@ import {
   misalignment,
   forwardOf,
 } from './frames.js';
+import { axisymmetricRuns, buildRunField } from './column.js';
 
 /**
  * How far past its own outer radius an element may still claim a strike.
@@ -57,19 +58,74 @@ const CLAIM_MARGIN = 1.6;
 export class Beamline {
   constructor(elements = []) {
     this.elements = [];
+    /**
+     * Whether neighbouring elements are solved together.
+     *
+     * Off, every element is solved alone behind grounded end faces, which
+     * both omits its fringe field and silently shields it. On, stretches of
+     * axisymmetric elements share one grid and the field flows between them.
+     * See src/column.js.
+     *
+     * Not a rendering option: it changes the field the ions fly through.
+     */
+    this.fringe = false;
+    this.runs = [];
+    this.runWarnings = [];
     for (const e of elements) this.add(e);
   }
+
+  /**
+   * Turn column solves on or off, re-solving as needed.
+   *
+   * Costs a Laplace solve per run, so it is called on a structural change or
+   * when the setting is flipped - never from `layout`, which runs on every
+   * drag.
+   */
+  setFringe(on) {
+    this.fringe = Boolean(on);
+    this.rebuildRuns();
+  }
+
+  rebuildRuns() {
+    this.runs = [];
+    this.runWarnings = [];
+    if (!this.fringe) return;
+    for (const run of axisymmetricRuns(this.elements)) {
+      const built = buildRunField(this.elements, run);
+      this.runs.push(built);
+      this.runWarnings.push(...built.warnings);
+    }
+  }
+
+  /** Re-apply element voltages to the column solves. No re-solve. */
+  syncRuns() {
+    for (const r of this.runs) r.sync();
+  }
+
+  /** The column solve covering an element, if there is one. */
+  runFor(index) {
+    if (!this.fringe) return null;
+    return this.runs.find((r) => index >= r.from && index <= r.to) ?? null;
+  }
+
+  /*
+    The four structural changes. Each re-lays the column and, when column
+    solves are on, re-solves them - which is why `rebuildRuns` lives here and
+    not in `layout`: layout runs on every drag, and a Laplace solve must not.
+  */
 
   add(element, index = this.elements.length) {
     element.align ??= { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
     this.elements.splice(index, 0, element);
     this.layout();
+    this.rebuildRuns();
     return element;
   }
 
   remove(index) {
     const [removed] = this.elements.splice(index, 1);
     this.layout();
+    this.rebuildRuns();
     return removed;
   }
 
@@ -79,6 +135,7 @@ export class Beamline {
     const [e] = this.elements.splice(index, 1);
     this.elements.splice(target, 0, e);
     this.layout();
+    this.rebuildRuns();
     return true;
   }
 
@@ -88,6 +145,7 @@ export class Beamline {
     };
     this.elements[index] = element;
     this.layout();
+    this.rebuildRuns();
     return element;
   }
 
@@ -188,11 +246,30 @@ export class Beamline {
   /* the interface the integrator flies through                       */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Local coordinates within the column solve covering `hit`, if any.
+   *
+   * A run spans several elements, so the point has to be expressed relative
+   * to the run's own start rather than the element's. Every element in a run
+   * is axisymmetric and unmisaligned, so their frames differ only by a shift
+   * along the axis, and that shift is the difference of their path positions.
+   */
+  #runLocal(hit) {
+    const run = this.runFor(hit.index);
+    if (!run) return null;
+    const zl = hit.local[2] + (hit.element.zStart - run.z0);
+    return { run, x: hit.local[0], y: hit.local[1], z: zl };
+  }
+
   fieldAt3D(x, y, z, t) {
     const hit = this.locate([x, y, z]);
     if (!hit) return { Ex: 0, Ey: 0, Ez: 0 };
     const { element, local } = hit;
-    const e = element.fieldAt(local[0], local[1], local[2], t);
+
+    const r = this.#runLocal(hit);
+    const e = r
+      ? r.run.field.fieldAt3D(r.x, r.y, r.z)
+      : element.fieldAt(local[0], local[1], local[2], t);
     const g = vectorToGlobal(element.frame, [e.Ex, e.Ey, e.Ez]);
     return { Ex: g[0], Ey: g[1], Ez: g[2] };
   }
@@ -200,6 +277,8 @@ export class Beamline {
   potentialAt3D(x, y, z, t) {
     const hit = this.locate([x, y, z]);
     if (!hit) return 0;
+    const r = this.#runLocal(hit);
+    if (r) return r.run.field.potentialAt3D(r.x, r.y, r.z);
     return hit.element.potentialAt(hit.local[0], hit.local[1], hit.local[2], t);
   }
 
@@ -277,10 +356,16 @@ export class Beamline {
       for (const w of e.warnings ?? []) out.push(`${e.label}: ${w}`);
     }
 
+    out.push(...this.runWarnings);
+
     for (let i = 1; i < this.elements.length; i++) {
       const a = this.elements[i - 1];
       const b = this.elements[i];
       if (a.type === 'drift' || b.type === 'drift') continue;
+      // With column solves on, a shared grid IS a true solution for the pair -
+      // that is the whole point of it - so this only applies to neighbours the
+      // run did not cover.
+      if (this.runFor(i) && this.runFor(i) === this.runFor(i - 1)) continue;
       out.push(
         `${a.label} and ${b.label} are adjacent with no drift between them. ` +
           'Each was solved in isolation with grounded end faces, so the field ' +

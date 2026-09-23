@@ -96,10 +96,17 @@ query finds the element containing that point and delegates to it in local
 coordinates. Adding a new kind of optic means describing its metal and its
 field; the composition layer does not change.
 
-**Elements are solved in isolation, not as one system.** Each is a separate
-Dirichlet problem with grounded end faces, so its fringe field is confined to
-its own footprint and stops abruptly at the boundary. The true solution for the
-whole column would let neighbouring electrodes see each other.
+**By default, elements are solved in isolation, not as one system.** Each is a
+separate Dirichlet problem with grounded end faces, so its fringe field is
+confined to its own footprint and stops abruptly at the boundary.
+
+That default can be turned off. With fringe fields enabled, stretches of
+axisymmetric elements are solved together on one grid and neighbouring
+electrodes do see each other — including the case that matters most, a grounded
+plate shielding a charged one. **§10** covers what changes, by how much, and
+why superposition cannot substitute for it. The rest of this section describes
+the isolated model, which remains the default and is what the accuracy figures
+below refer to.
 
 **How good is that?** Measured, by building the same column both ways and
 comparing the on-axis potential:
@@ -122,10 +129,12 @@ it. A drift between two live elements still helps, because a real grounded
 drift tube genuinely shields, which is exactly what the isolation approximation
 is pretending.
 
-Solving the whole column at once is what a 3D code does; it is far more
-expensive, and it would destroy the property that makes this interactive,
-namely that only the element you changed re-solves, and voltages never re-solve
-at all.
+Solving the whole column at once in three dimensions is what a general-purpose
+code does, and it would destroy the property that makes this interactive:
+only the element you changed re-solves, and voltages never re-solve at all.
+Solving an *axisymmetric run* at once is far cheaper — the symmetry is still
+being used, so it is one more $r$–$z$ problem rather than a 3D one — and that
+is what §10 does. Voltages stay fast adjust even there.
 
 **A related trap, now fixed and worth recording.** Node coordinates are
 accumulated as `z0 + i·h`, while geometry is written as `mm × 10⁻³`. Those two
@@ -963,7 +972,120 @@ belong behind a button labelled "best transmission".
 
 ---
 
-## 10. Starting values
+## 10. Fringe fields and column solves
+
+### 10.1 An isolated element does not merely omit its fringe — it shields it
+
+Every element is normally solved on its own grid, closed by grounded faces at
+each end. Those faces are a numerical device: Laplace's equation needs a closed
+boundary. But physically they are a **grounded plate a few millimetres from the
+hardware**, and a grounded plate is precisely what stops a fringe field. The
+isolated model therefore does not simply truncate the fringe; it terminates it,
+with the wrong thing, at an arbitrary distance.
+
+Turning fringe fields on solves stretches of neighbouring elements on one grid.
+The internal faces vanish, and the field flows out of each element into
+whatever is actually next to it.
+
+### 10.2 Why superposition cannot do this
+
+The cheap alternative — solve each element alone, then add the fields where
+they overlap — cannot show shielding, and shielding is the point.
+
+A grounded electrode contributes **nothing** to a superposition: it is at zero
+volts, so its unit solution enters the sum multiplied by zero. Yet placing one
+next to a charged lens changes that lens's field completely, because it changes
+the **boundary** of the lens's own problem. Charge rearranges on both.
+
+Superposition is exact over *electrode voltages on a fixed set of conductors* —
+that is the fast adjust this whole simulator rests on (§3.2). It is not valid
+over *geometry*. Adding a conductor is a different problem, not a larger sum.
+So: one grid, all the metal on it, one solve.
+
+### 10.3 What sets the decay: the pipe, not the source
+
+Inside a grounded pipe of radius $R$, a disturbance at one end dies along the
+axis as the lowest Bessel mode,
+
+$$\phi(z) \sim e^{-j_{01} z / R}, \qquad j_{01} = 2.40483,$$
+
+so the decay length is $R/2.405$ and depends on **nothing else** — not the bore
+of the element that made the field, not its length, not its voltage. Measured
+against this solver, fitted decay lengths past an einzel across housing radii
+of 10–20 mm land within 3 % of $R/2.405$; measured downstream of a charged
+aperture plate in drift tubes of 12 mm and 8 mm bore, within 2 %.
+
+The practical consequences are worth stating plainly:
+
+| Tube bore | Decay length | Field left after 15 mm |
+|---|---|---|
+| 3 mm | 1.2 mm | $4\times10^{-6}$ |
+| 6 mm | 2.5 mm | $2\times10^{-3}$ |
+| 12 mm | 5.0 mm | 0.05 |
+
+A **narrow grounded drift is already an excellent shield**; a wide housing is a
+poor one. This is why the answer to "how do I stop this field reaching my
+detector" is usually an aperture plate at ground, not more distance.
+
+### 10.4 How much it matters, element by element
+
+Measured on axis at the middle of each element, isolated solve versus column
+solve, with 12 mm drift tubes either side:
+
+| Element | Difference | Why |
+|---|---|---|
+| Einzel lens | **0.00 %** | Its outer two cylinders are grounded, so it is very nearly its own Faraday cage. Only 0.285 V escapes past the exit cylinder of a lens sitting at 1946 V on axis — a part in seven thousand. |
+| Aperture plate | **2.6 %** | A single charged plate with grounded space on both sides. Nothing shields it but distance. |
+
+The trajectory consequence is larger than the potential difference suggests.
+A 50 eV, nine-ion beam through a $-500$ V plate into a 12 mm tube: **3 of 9
+transmitted with a 10.3 mm exit radius** when the plate is solved alone,
+**9 of 9 with a 4.6 mm radius** when solved with its neighbours. Truncating the
+field cuts the second half of the plate's lens action, so the ion leaves with a
+radial kick that was never meant to stand on its own.
+
+### 10.5 What a run is, and where it stops
+
+Only axisymmetric elements can share an $r$–$z$ grid, so a run covers
+consecutive drifts, aperture plates and einzel lenses and stops at a quadrupole
+or a deflector. That is not much of a loss: both of those sit inside grounded
+housings that genuinely terminate the field rather than merely appearing to.
+A run also stops at a misaligned element, which is no longer a body of
+revolution about the column axis.
+
+Runs of nothing but drift are skipped: no electrode in them can ever hold a
+voltage, so the solution is zero everywhere and the elements' own empty fields
+say the same thing for free.
+
+The run's own two end faces remain a numerical device — the problem still has
+to be closed — but they now sit at the ends of the *run* rather than of every
+element. How much potential is still alive there is measured after each solve
+and warned about above 1 % of the largest electrode voltage.
+
+Cost, for a browser: the shipped starting column re-solves in **34 ms**; a
+seven-element lens stack, 606 × 36 nodes and 13 electrodes, in **226 ms**.
+Voltages remain fast adjust over the shared grid, so the tuner is unaffected.
+
+### 10.6 The quadrupole's hard edge, and a correction
+
+§8.6 claims that softening the quadrupole's hard edge with a longitudinal
+envelope "would trade a known approximation for a field that is not a field",
+because $g(z)(x^2-y^2)$ does not satisfy Laplace's equation unless $g''=0$.
+The premise is right and the conclusion is wrong. The naive product is not a
+field, but it is the first term of one that is:
+
+$$\phi = a(z)(x^2-y^2) - \frac{a''(z)}{12}(x^4-y^4) + O(a^{(4)}),$$
+
+which satisfies $\nabla^2\phi = 0$ to the order shown — the quartic term exists
+precisely to cancel the $a''(x^2-y^2)$ left over by the quadratic one. This is
+the standard soft-edge multipole expansion of beam optics, and it is a
+legitimate way to model a fringe field. It is not implemented here; the
+quadrupole still has a hard edge, and its transmission is still optimistic.
+The claim that it *could not* be done is withdrawn.
+
+---
+
+## 11. Starting values
 
 An element placed from the toolbar arrives set for **the ion currently in the
 source**, not for whichever ion the defaults happened to be written for. This
@@ -995,7 +1117,7 @@ afterwards and every element stays exactly where it was, with the readout
 saying how far off it now is — which for a deflector *is* its energy
 selectivity, and worth seeing rather than hiding.
 
-### 10.1 Why the controls are typed, not dragged
+### 11.1 Why the controls are typed, not dragged
 
 The same scaling argument decides the control. A deflector's voltage spans four
 orders of magnitude across the beams this simulator handles: 8 V for a 10 eV
@@ -1007,7 +1129,7 @@ closed forms above.
 
 ---
 
-## 11. Known limitations of this version
+## 12. Known limitations of this version
 
 **1. The lens does not converge at second order, and the reason is not
 staircasing.** Measured Richardson orders for `buildEinzelLens` at

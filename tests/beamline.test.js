@@ -49,6 +49,7 @@ import {
   applyKnob,
   TUNABLE,
 } from '../src/optimize.js';
+import { axisymmetricRuns, canShareGrid, decayLength } from '../src/column.js';
 import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
 import {
@@ -1064,6 +1065,172 @@ describe('Elements as placed from the toolbar', () => {
     const ion = { mass: 100, charge: 1, energy: 50 }; // matched near 40 V
     const r = fieldRange(field, { ...ELEMENT_TYPES.bender.defaults, voltage: 5000 }, ion);
     assert(r.max >= 5000, `range should reach the 5000 V already set, stops at ${r.max}`);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* fringe fields                                                       */
+/* ------------------------------------------------------------------ */
+
+describe('Column solves and fringe fields', () => {
+  const PLATE = { voltage: -500, bore: 4, margin: 10, housingRadius: 14 };
+
+  /** A charged plate, then a tube of the given bore. */
+  function plateThenTube(bore, fringe, extra = []) {
+    const bl = new Beamline([
+      createElement('drift', { length: 20, bore: 12 }),
+      createElement('aperture', PLATE),
+      createElement('drift', { length: 60, bore }),
+      ...extra,
+    ]);
+    bl.setFringe(fringe);
+    return bl;
+  }
+
+  /** On-axis potential `d` mm downstream of the plate's middle. */
+  function past(bl, d) {
+    const p = bl.elements[1];
+    const z = p.zStart + mmToM(p.params.margin + p.params.thickness / 2);
+    return bl.potentialAt3D(0, 0, z + mmToM(d));
+  }
+
+  it('groups only the elements that can share an r-z grid', () => {
+    const els = [
+      createElement('drift', { length: 20, bore: 6 }),
+      createElement('einzel', { gridStep: 0.8 }),
+      createElement('drift', { length: 20, bore: 6 }),
+      createElement('bender', { voltage: 40 }),
+      createElement('drift', { length: 20, bore: 6 }),
+      createElement('aperture', PLATE),
+    ];
+    assert(
+      JSON.stringify(axisymmetricRuns(els)) === JSON.stringify([[0, 2], [4, 5]]),
+      `runs should split at the deflector, got ${JSON.stringify(axisymmetricRuns(els))}`
+    );
+    // A deflector is in a grounded box of its own, so ending a run there is
+    // not an approximation - its field really does stop.
+    assert(!canShareGrid(els[3]), 'a deflector cannot share an r-z grid');
+    assert(canShareGrid(els[1]), 'a lens can');
+  });
+
+  it('excludes a misaligned element, which is no longer a body of revolution', () => {
+    const e = createElement('drift', { length: 20, bore: 6 });
+    assert(canShareGrid(e), 'aligned');
+    e.align = { dx: mmToM(1), dy: 0, tiltX: 0, tiltY: 0 };
+    assert(!canShareGrid(e), 'and not once it is nudged off the axis');
+  });
+
+  it('stops the field dead at the element boundary when off', () => {
+    // The thing being fixed. An isolated element's grounded end faces are a
+    // numerical device, but they behave exactly like a grounded plate.
+    const off = plateThenTube(12, false);
+    assert(Math.abs(past(off, 15)) < 1e-9, `field should be gone at 15 mm, got ${past(off, 15)}`);
+    assert(Math.abs(past(off, 8)) > 1, 'while still inside the element it is not');
+  });
+
+  it('lets the field reach into the next element when on', () => {
+    const on = plateThenTube(12, true);
+    assert(Math.abs(past(on, 15)) > 10, `expected a real fringe, got ${past(on, 15)} V`);
+    // And it falls off, rather than simply not being clipped.
+    assert(Math.abs(past(on, 35)) < Math.abs(past(on, 15)) / 10, 'and it decays');
+  });
+
+  it('decays inside a grounded pipe at the rate the pipe sets', () => {
+    // exp(-j01 z / R) and nothing else: not the bore of the element that made
+    // the field, not its voltage. This is the whole basis of shielding by
+    // geometry, so it is checked against the closed form rather than against
+    // a previous run.
+    for (const bore of [12, 8]) {
+      const bl = plateThenTube(bore, true);
+      const a = past(bl, 18);
+      const b = past(bl, 28);
+      const fitted = mmToM(10) / Math.log(Math.abs(a / b));
+      assertRelClose(
+        fitted,
+        decayLength(mmToM(bore)),
+        0.12,
+        `a ${bore} mm pipe should give a ${mToMm(decayLength(mmToM(bore))).toFixed(2)} mm decay`
+      );
+    }
+  });
+
+  it('shields with a grounded plate, which superposition could never do', () => {
+    // The reason this needs one grid rather than a sum. A grounded electrode
+    // contributes nothing to a superposition - it is at zero everywhere - yet
+    // it changes the field completely, because it changes the boundary of the
+    // problem rather than adding to its solution.
+    const open = plateThenTube(12, true);
+    const shielded = plateThenTube(12, true, []);
+    // Rebuild with a grounded plate close behind the live one.
+    const near = new Beamline([
+      createElement('drift', { length: 20, bore: 12 }),
+      createElement('aperture', PLATE),
+      createElement('drift', { length: 4, bore: 12 }),
+      createElement('aperture', { ...PLATE, voltage: 0, margin: 3 }),
+      createElement('drift', { length: 60, bore: 12 }),
+    ]);
+    near.setFringe(true);
+
+    const openAt = Math.abs(past(open, 25));
+    const shieldedAt = Math.abs(past(near, 25));
+    assert(openAt > 5, `an unshielded plate should still be felt at 25 mm, got ${openAt} V`);
+    assert(
+      shieldedAt < openAt / 5,
+      `a grounded plate should cut it hard: ${openAt.toFixed(2)} -> ${shieldedAt.toFixed(2)} V`
+    );
+    void shielded;
+  });
+
+  it('barely changes an einzel, which is its own Faraday cage', () => {
+    // Its outer cylinders are grounded, so they shield the centre electrode
+    // almost completely and the isolated solve was already right. Worth
+    // asserting: it says the two models agree where they should, which is the
+    // only reason to trust them where they differ.
+    const build = (fringe) => {
+      const bl = new Beamline([
+        createElement('drift', { length: 20, bore: 12 }),
+        createElement('einzel', {
+          gridStep: 0.5, voltage: -300, boreRadius: 5,
+          housingRadius: 14, entryDrift: 15, exitDrift: 15,
+        }),
+        createElement('drift', { length: 40, bore: 12 }),
+      ]);
+      bl.setFringe(fringe);
+      return bl;
+    };
+    const a = build(false);
+    const b = build(true);
+    const e = a.elements[1];
+    const z = e.zStart + e.length / 2;
+    assertRelClose(
+      b.potentialAt3D(0, 0, z),
+      a.potentialAt3D(0, 0, z),
+      0.01,
+      'a lens is unchanged by solving it with its neighbours'
+    );
+  });
+
+  it('keeps voltages a fast adjust over the shared grid', () => {
+    // A column solve holds its own copy of the voltages, so changing one has
+    // to reach it - but must not re-solve, or the tuner would be unusable.
+    const bl = plateThenTube(12, true);
+    const before = past(bl, 15);
+    const grid = bl.runs[0].grid;
+
+    bl.elements[1].setVoltage(-1000);
+    bl.syncRuns();
+    const after = past(bl, 15);
+
+    assert(bl.runs[0].grid === grid, 'the same grid, not a fresh solve');
+    assertRelClose(after, before * 2, 1e-9, 'and the field scales with the voltage');
+  });
+
+  it('turns off cleanly', () => {
+    const bl = plateThenTube(12, true);
+    assert(bl.runs.length === 1, 'one run while on');
+    bl.setFringe(false);
+    assert(bl.runs.length === 0, 'none while off');
+    assert(Math.abs(past(bl, 15)) < 1e-9, 'and the field is contained again');
   });
 });
 

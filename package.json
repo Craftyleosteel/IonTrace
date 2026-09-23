@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "description": "Open source ion trajectory simulation in the browser",
   "type": "module",
+  "author": "Paco Navarro",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Craftyleosteel/IonTrace.git"
+  },
   "private": false,
   "scripts": {
     "test": "node tests/run-node.js"

@@ -43,7 +43,7 @@ Elements arrive **already set for the ion in the source** — a lens at $-6\,T/q
 a deflector at its matched voltage, a filter at a Mathieu $q$ of 0.38 — so
 placing one and pressing Fly does something. All three follow the beam, and two
 of them flip polarity for a negative ion; see
-[PHYSICS.md §10](docs/PHYSICS.md). Every value is **typed rather than dragged**,
+[PHYSICS.md §11](docs/PHYSICS.md). Every value is **typed rather than dragged**,
 because a deflector's voltage spans four orders of magnitude across the beams
 this handles and no slider serves both ends of that.
 
@@ -83,6 +83,26 @@ $W(t) = U + V\cos(\Omega t + \varphi)$, and because the pairs are always
 driven antisymmetrically the field is exactly linear in $W$ - one solved map,
 scaled by a coefficient that varies in time, with no re-solve. Mathieu $a$ and
 $q$ are reported next to the controls that set them.
+
+**Fringe fields are optional, and the toggle is a physics setting.** By default
+each element is solved alone behind grounded end faces — which does not merely
+omit its fringe field, it *shields* it, with a plate that is a numerical device
+rather than hardware. Switch fringe fields on and stretches of axisymmetric
+elements share one grid: fields reach into their neighbours, and a grounded
+plate stops them.
+
+That last part is why it needs a shared grid rather than a sum. A grounded
+electrode contributes nothing to a superposition — it is at zero volts — yet it
+changes a neighbouring lens's field completely, because it changes the
+*boundary* of that lens's problem. Superposition is exact over voltages on
+fixed conductors; it is not valid over geometry.
+
+Inside a grounded pipe of radius $R$ a fringe dies as $e^{-2.405\,z/R}$, so a
+narrow drift tube is already an excellent shield and a wide housing is a poor
+one — measured against the solver to within 2–3 %. An einzel barely notices
+(its outer cylinders are grounded, so it is nearly its own Faraday cage: 0.00 %
+change); a charged aperture plate notices a lot (2.6 % on axis, and 3 of 9 ions
+transmitted becomes 9 of 9). See [PHYSICS.md §10](docs/PHYSICS.md).
 
 **Not included:** magnetic forces, buffer-gas collisions, image charges,
 quadrupole fringe fields, relativistic correction. Each omission and its
@@ -154,6 +174,7 @@ output:
 | Voltage tuner | recovers a working deflector voltage from zero, and lands within 15 % of the independently derived matched value |
 | Starting values | every element type transmits when placed, for ions from 4 u at 10 eV to 1000 u at 2 keV and for both polarities; `amplitudeForQ` inverts the Mathieu relation |
 | Folded columns | a column bent through two right angles transmits; no branch of it claims another's ions; the beam is measured transversely to the axis it is actually on |
+| Fringe fields | decay inside a grounded pipe matches $e^{-2.405z/R}$; a grounded plate measurably shields a charged one; a column solve agrees with the isolated solve where it should (an einzel, to 0.00 %) |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for
@@ -171,7 +192,7 @@ they found, including the parts that are still wrong.
 
 ## Known limitations
 
-Read [docs/PHYSICS.md §11](docs/PHYSICS.md) before trusting a number. The
+Read [docs/PHYSICS.md §12](docs/PHYSICS.md) before trusting a number. The
 headline ones:
 
 - **Transmission is systematically pessimistic.** Electrode strikes resolve to
@@ -238,4 +259,21 @@ needs help catching.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+IonTrace was created by Paco Navarro and is released under the MIT licence. See
+[LICENSE](LICENSE).
+
+You are free to use, copy, modify and redistribute it for any purpose,
+including reshaping it to fit your own experimental setup and publishing the
+result. The one condition is the MIT one: keep the copyright notice naming Paco
+Navarro with any copy or substantial portion of the source you pass on.
+
+If IonTrace contributes to something you publish - a paper, preprint, thesis,
+poster or technical report - please cite it and link back to this repository:
+
+> Navarro, P. (2026). IonTrace: open source ion trajectory simulation in the
+> browser. https://github.com/Craftyleosteel/IonTrace
+
+Citation metadata lives in [CITATION.cff](CITATION.cff), so GitHub's "Cite this
+repository" button will generate BibTeX or APA for you. The citation is a
+request rather than a licence condition; the attribution notice in the source
+is the part the licence actually requires.

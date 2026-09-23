@@ -62,6 +62,17 @@ export function createDrift(params = {}) {
       return Math.hypot(x, y) > bore;
     },
 
+    /**
+     * The metal this element actually is, for a solve that spans the column.
+     *
+     * A drift is a grounded pipe, and that is not a detail: a fringe field
+     * escaping into it dies as exp(-2.405 z / bore), so a narrow drift is the
+     * single most effective thing in a beamline for confining a neighbour's
+     * field. Solved element-by-element that never shows up, because each
+     * element's domain simply stops. Solved together, it does.
+     */
+    parts: [{ name: 'wall', z0: 0, z1: length, r0: bore, r1: Infinity, voltage: () => 0 }],
+
     // Drawn as the tube wall only.
     rects: [{ z0: 0, z1: length, r0: bore, r1: bore * 1.06, wall: true }],
   };

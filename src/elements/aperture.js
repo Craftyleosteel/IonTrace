@@ -134,6 +134,38 @@ export function createAperture(params = {}, solverOpts = {}) {
       return field.strikes(x, y, zl);
     },
 
+    /**
+     * The metal, for a solve that spans the column.
+     *
+     * Order matters, as it does when painting the isolated grid: the housing
+     * pipe is laid down first and the plate over it, so the plate owns the
+     * nodes the two share.
+     *
+     * Note what is NOT here - the grounded caps at each end of this element's
+     * own domain. Those are a numerical device for closing the Dirichlet
+     * problem, not hardware, and they are exactly what clips this plate's
+     * fringe field when it is solved alone. A charged plate leaks on both
+     * sides; that is what makes it a lens.
+     */
+    parts: [
+      {
+        name: 'housing',
+        z0: 0,
+        z1: length,
+        r0: mmToM(p.housingRadius),
+        r1: Infinity,
+        voltage: () => 0,
+      },
+      {
+        name: 'plate',
+        z0: zA,
+        z1: zB,
+        r0: bore,
+        r1: Infinity,
+        voltage: () => p.voltage,
+      },
+    ],
+
     rects: [
       { z0: zA, z1: zB, r0: bore, r1: mmToM(p.housingRadius) },
     ],

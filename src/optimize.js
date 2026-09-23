@@ -153,6 +153,10 @@ export function applyKnob(beamline, knob, value) {
   if (knob.key === 'voltage' && typeof element.setVoltage === 'function') {
     element.setVoltage(value);
   }
+  // With fringe fields on, the field the ion actually flies through belongs to
+  // a column solve spanning several elements, which keeps its own copy of the
+  // voltages. Still fast adjust - the search does not re-solve anything.
+  beamline.syncRuns?.();
 }
 
 /** Current value of every knob, for saving and restoring a trial. */

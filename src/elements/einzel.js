@@ -75,6 +75,35 @@ export function createEinzel(params = {}, solverOpts = {}) {
       return field.strikes(x, y, zl);
     },
 
+    /**
+     * The metal, for a solve that spans the column.
+     *
+     * The three cylinders and the housing pipe, and nothing else - in
+     * particular not the grounded caps closing this element's own domain.
+     *
+     * An einzel turns out to need this least of any element here. Its outer
+     * two cylinders are grounded, so they shield its centre electrode almost
+     * completely: measured on the shipped geometry, 0.285 V escapes past the
+     * exit cylinder from a lens sitting at 1946 V on axis, a part in seven
+     * thousand. A lens is very nearly its own Faraday cage. The entry and
+     * exit drifts in its own domain are therefore mostly wasted space, and
+     * what the column solve buys here is not a fringe field but the ability
+     * to put something else inside that space.
+     */
+    parts: [
+      {
+        name: 'housing',
+        z0: 0,
+        z1: length,
+        r0: mmToM(p.housingRadius),
+        r1: Infinity,
+        voltage: () => 0,
+      },
+      { name: 'entrance', z0: mmToM(b.z1), z1: mmToM(b.z2), r0: bore, r1: outer, voltage: () => 0 },
+      { name: 'centre', z0: mmToM(b.z3), z1: mmToM(b.z4), r0: bore, r1: outer, voltage: () => p.voltage },
+      { name: 'exit', z0: mmToM(b.z5), z1: mmToM(b.z6), r0: bore, r1: outer, voltage: () => 0 },
+    ],
+
     rects: [
       { z0: mmToM(b.z1), z1: mmToM(b.z2), r0: bore, r1: outer },
       { z0: mmToM(b.z3), z1: mmToM(b.z4), r0: bore, r1: outer },

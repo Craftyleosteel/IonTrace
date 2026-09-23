@@ -91,6 +91,19 @@
         <!-- Whatever is selected: an element, or the ion source. -->
         <section class="group" id="inspector" aria-live="polite" hidden></section>
 
+        <!--
+          How the field is solved. A property of the whole column rather than
+          of any one element, so it lives here and is always visible.
+        -->
+        <section class="group" id="fieldPanel">
+          <h2>Field model</h2>
+          <label class="check">
+            <input id="fringe" type="checkbox" />
+            <span>Fringe fields</span>
+          </label>
+          <p class="hint" id="fringeNote"></p>
+        </section>
+
         <!-- Beam settings. Shown only while the source is selected. -->
         <section class="group" id="beamPanel" hidden>
           <label class="field">

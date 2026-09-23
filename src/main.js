@@ -57,6 +57,8 @@ const flyButton = el('fly');
 const canvasFrame = el('canvasFrame');
 const viewFly = el('viewFly');
 const fullscreenBtn = el('fullscreen');
+const fringeToggle = el('fringe');
+const fringeNote = el('fringeNote');
 
 const inputs = {
   mass: el('mass'),
@@ -218,6 +220,10 @@ function setParam(index, key, value) {
     beamline.layout();
   }
 
+  // A column solve holds its own copy of the voltages. Re-applying them is
+  // fast adjust over that grid, not a re-solve.
+  beamline.syncRuns();
+
   markStale();
   renderTrack();
   refreshInspector();
@@ -252,6 +258,7 @@ function moveElement(index, delta) {
 
 function afterStructureChange() {
   markStale();
+  describeFringe();
   renderTrack();
   renderInspector();
   render();
@@ -2163,6 +2170,43 @@ autoAlignBtn.addEventListener('click', () => {
   afterStructureChange();
 });
 
+/**
+ * Solve neighbouring elements together, or each alone.
+ *
+ * This is a physics setting, not a display one: it changes the field the ions
+ * fly through, so it costs a solve and invalidates the drawn trajectories.
+ */
+function applyFringe() {
+  statusEl.classList.add('busy');
+  beamline.setFringe(fringeToggle.checked);
+  statusEl.classList.remove('busy');
+  describeFringe();
+  markStale();
+  render();
+  drawReadout();
+}
+
+function describeFringe() {
+  if (!fringeToggle.checked) {
+    fringeNote.textContent =
+      'Each element is solved alone behind grounded end faces. Its field stops ' +
+      'at its own boundary — which also means those faces shield it, whether ' +
+      'or not anything real is there.';
+    return;
+  }
+  const runs = beamline.runs;
+  const spanned = runs.reduce((n, r) => n + (r.to - r.from + 1), 0);
+  fringeNote.textContent = runs.length
+    ? `${spanned} of ${beamline.elements.length} elements solved together in ` +
+      `${runs.length} ${runs.length === 1 ? 'group' : 'groups'}. Fields now reach ` +
+      'into their neighbours, and a grounded plate stops them. Quadrupoles and ' +
+      'deflectors end a group: their own housings genuinely do terminate the field.'
+    : 'No axisymmetric elements to solve together — a quadrupole and a deflector ' +
+      'are each enclosed already.';
+}
+
+fringeToggle.addEventListener('change', applyFringe);
+
 optimizeBtn.addEventListener('click', () => {
   runTuner(tunableKnobs(beamline, beamSpec()), optimizeBtn, 'the whole column');
 });
@@ -2268,6 +2312,7 @@ statusEl.classList.remove('busy');
 selection = null;
 
 syncOutputs();
+describeFringe();
 renderTools();
 renderTrack();
 renderInspector();

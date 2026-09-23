@@ -1,13 +1,14 @@
 MIT License
 
-Copyright (c) 2026 IonTrace contributors
+Copyright (c) 2026 Paco Navarro
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+IonTrace was created by Paco Navarro, who is the original author and copyright
+holder of the Software. Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated documentation files
+(the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute,
+sublicense, and/or sell copies of the Software, and to permit persons to whom
+the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
@@ -19,3 +20,53 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+NOTICE REGARDING SCOPE AND USE
+
+For the avoidance of doubt, and without adding any condition to the MIT License
+granted above, the copyright holder confirms the following intent:
+
+1. Permitted uses. The grant above extends to any purpose, including research,
+   teaching, instrument design, and commercial work. It expressly includes the
+   right to modify, adapt, extend, recalibrate, and reconfigure the Software as
+   the recipient sees fit for their own experimental needs, and to redistribute
+   the result, whether in source or compiled form, alone or as part of a larger
+   work, under this or any other licence terms the recipient chooses for their
+   own contributions.
+
+2. Required attribution. The only condition attached to that grant is the one
+   stated in the MIT License above: the copyright notice and permission notice
+   must be retained in all copies or substantial portions of the Software. A
+   derivative work that redistributes IonTrace source code, in whole or in
+   substantial part, must therefore preserve the notice naming Paco Navarro as
+   the copyright holder, in the source files, in an accompanying LICENSE or
+   NOTICE file, or in the documentation distributed with the work.
+
+3. No warranty and no fitness for a particular purpose. The Software simulates
+   charged-particle optics using numerical approximations. Nothing in this file
+   is a representation that its output is correct, physically accurate, or
+   suitable for the design, construction, calibration, or safety assessment of
+   any physical instrument. Verification of any result against independent
+   methods is the sole responsibility of the user.
+
+-------------------------------------------------------------------------------
+
+REQUEST FOR CITATION (not a condition of the licence)
+
+The following is a request, not a legal requirement, and failure to honour it
+is not a breach of the MIT License granted above.
+
+If the Software, or a work derived from it, contributes to results reported in
+a publication, preprint, thesis, poster, technical report, or other scholarly
+or professional output, the author asks that you cite the project and link to
+its repository:
+
+    Navarro, P. (2026). IonTrace: open source ion trajectory simulation in the
+    browser. https://github.com/Craftyleosteel/IonTrace
+
+Machine-readable citation metadata is provided in CITATION.cff. If you
+redistribute a modified version, the author further asks that you state plainly
+that it is a modified version, so that users can distinguish your changes from
+the original work.
