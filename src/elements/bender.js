@@ -64,13 +64,17 @@ import { PotentialArray, CYLINDRICAL } from '../grid.js';
 import { solveBasis } from '../laplace.js';
 import { Field } from '../field.js';
 import { mmToM, ELEMENTARY_CHARGE, eVToJoules } from '../constants.js';
-import { yawFrame, compose, translation } from '../frames.js';
+import { yawFrame, compose, translation, rollFrame, inverse } from '../frames.js';
 
 export const BENDER_DEFAULTS = {
   bendRadius: 40, // mm, radius of the central orbit
   bendAngle: 90, // degrees
+  // Which plane the bend happens in, as a roll about the beam direction.
+  // 0 turns the beam horizontally, 90 turns it vertically. One element and
+  // one solve serve every plane; see the note on conjugation below.
+  bendPlane: 0, // degrees
   gap: 8, // mm, between the plates
-  height: 16, // mm, full vertical aperture between the grounded lids
+  height: 16, // mm, aperture across the plates, perpendicular to the bend
   voltage: 0, // V across the plates; 0 means "use the matched value"
   gridStep: 0.3, // mm
 };
@@ -179,12 +183,30 @@ export function createBender(params = {}, solverOpts = {}) {
    */
   const centre = [-R, 0, 0];
 
-  /** Bend-frame coordinates of a local point: distance from the bend axis, angle, height. */
+  /**
+   * The bend plane, as a roll about the beam direction.
+   *
+   * The element is built to curve in its own x-z plane. Rolling it makes the
+   * same element - the same solve, the same geometry - bend in any other
+   * plane, so a vertical bender needs no separate implementation. Everything
+   * below works in the ROLLED frame, and the two helpers convert.
+   */
+  const roll = (p.bendPlane * Math.PI) / 180;
+  const cosR = Math.cos(roll);
+  const sinR = Math.sin(roll);
+
+  /** A local vector expressed in the rolled (bend) frame. */
+  const intoBend = (x, y) => [cosR * x + sinR * y, -sinR * x + cosR * y];
+  /** A vector in the bend frame expressed back in local coordinates. */
+  const outOfBend = (u, v) => [cosR * u - sinR * v, sinR * u + cosR * v];
+
+  /** Bend-frame coordinates: distance from the bend axis, angle, height. */
   function bendCoords(x, y, z) {
-    const dx = x - centre[0];
+    const [bx, by] = intoBend(x, y);
+    const dx = bx - centre[0];
     const rho = Math.hypot(dx, z);
     const theta = Math.atan2(z, dx);
-    return { rho, theta, h: y, dx };
+    return { rho, theta, h: by, dx };
   }
 
   return {
@@ -193,7 +215,11 @@ export function createBender(params = {}, solverOpts = {}) {
     params: p,
     length,
     bore: gap / 2,
-    outerRadius: R + gap,
+    // The element's own TRANSVERSE half-extent - how far the metal reaches
+    // across the orbit - not its bend radius. Using R + gap here would claim
+    // the element was as wide as the corner it turns, which inflates the
+    // view's margins and makes every aperture comparison meaningless.
+    outerRadius: Math.max(gap, mmToM(p.height) / 2),
     lengthScale: step,
     shortestPeriod: null,
     warnings,
@@ -210,15 +236,31 @@ export function createBender(params = {}, solverOpts = {}) {
      * downstream is composed onto it, so a bender needs no cooperation from
      * any other element to redirect the whole beamline.
      */
+    /**
+     * Conjugated by the roll: R then the bend then R inverse.
+     *
+     * The conjugation matters. Composing the roll and the bend without
+     * undoing the roll would leave the downstream beam rotated about its own
+     * axis, so a vertical bender would also turn "up" into "sideways" for
+     * every element after it. What a bender should change is where the beam
+     * goes, not which way is up.
+     */
     exitTransform: compose(
-      translation(R * (Math.cos(alpha) - 1), 0, R * Math.sin(alpha)),
-      yawFrame(alpha)
+      compose(
+        rollFrame(roll),
+        compose(
+          translation(R * (Math.cos(alpha) - 1), 0, R * Math.sin(alpha)),
+          yawFrame(alpha)
+        )
+      ),
+      inverse(rollFrame(roll))
     ),
 
     /** A point a fraction of the way along the curved reference orbit. */
     pathPoint(f) {
       const th = f * alpha;
-      return [R * (Math.cos(th) - 1), 0, R * Math.sin(th)];
+      const [x, y] = outOfBend(R * (Math.cos(th) - 1), 0);
+      return [x, y, R * Math.sin(th)];
     },
 
     setVoltage(v) {
@@ -235,27 +277,28 @@ export function createBender(params = {}, solverOpts = {}) {
     },
 
     fieldAt(x, y, z) {
-      const { rho, theta, dx } = bendCoords(x, y, z);
+      const { rho, theta, h, dx } = bendCoords(x, y, z);
       if (theta < 0 || theta > alpha) return { Ex: 0, Ey: 0, Ez: 0 };
 
-      // The solved map's "z" axis is height and its "r" axis is rho.
-      const { Ez: Eh, Er: Erho } = unit.fieldAt(y, rho);
+      // The solved map's "z" axis is height across the plates and its "r"
+      // axis is distance from the bend axis.
+      const { Ez: Eh, Er: Erho } = unit.fieldAt(h, rho);
       const scale = p.voltage;
+      if (rho === 0) {
+        const [ex, ey] = outOfBend(0, scale * Eh);
+        return { Ex: ex, Ey: ey, Ez: 0 };
+      }
 
-      // Resolve the radial field onto the local axes. The outward radial
-      // direction at this point is (dx, 0, z) / rho.
-      if (rho === 0) return { Ex: 0, Ey: scale * Eh, Ez: 0 };
-      return {
-        Ex: (scale * Erho * dx) / rho,
-        Ey: scale * Eh,
-        Ez: (scale * Erho * z) / rho,
-      };
+      // Resolve the radial field in the bend frame, then roll it back into
+      // the element's own axes.
+      const [ex, ey] = outOfBend((scale * Erho * dx) / rho, scale * Eh);
+      return { Ex: ex, Ey: ey, Ez: (scale * Erho * z) / rho };
     },
 
     potentialAt(x, y, z) {
-      const { rho, theta } = bendCoords(x, y, z);
+      const { rho, theta, h } = bendCoords(x, y, z);
       if (theta < 0 || theta > alpha) return 0;
-      return p.voltage * unit.potentialAt(y, rho);
+      return p.voltage * unit.potentialAt(h, rho);
     },
 
     strikes(x, y, z) {
@@ -284,10 +327,12 @@ export function createBender(params = {}, solverOpts = {}) {
       const thick = Math.max(step * 2, gap * 0.12);
 
       // A point on the arc at angle theta and radius rho, in local (x, z).
-      const at = (theta, rho) => [
-        centre[0] + rho * Math.cos(theta),
-        rho * Math.sin(theta),
-      ];
+      // Points come back in the element's own transverse plane, so a rolled
+      // bender draws in the plane it actually bends in.
+      const at = (theta, rho) => {
+        const [x, y] = outOfBend(centre[0] + rho * Math.cos(theta), 0);
+        return [x, y, rho * Math.sin(theta)];
+      };
 
       const plate = (rho) => {
         const pts = [];

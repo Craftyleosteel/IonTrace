@@ -54,6 +54,37 @@ export function pitchFrame(angle) {
   return { o: [0, 0, 0], m: [1, 0, 0, 0, c, s, 0, -s, c] };
 }
 
+/**
+ * Rotation about the local z axis - a roll about the beam direction.
+ *
+ * This is how an element chooses which plane it acts in without needing a
+ * second implementation. A bender is built to curve in its own x-z plane;
+ * rolling it by 90 degrees makes the same element bend vertically, and
+ * conjugating by the roll (R then the bend then R inverse) means the beam
+ * leaves with its transverse axes unrotated - a vertical bender should change
+ * where the beam goes, not which way is up.
+ */
+export function rollFrame(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return { o: [0, 0, 0], m: [c, -s, 0, s, c, 0, 0, 0, 1] };
+}
+
+/** The inverse of a rigid placement. */
+export function inverse(frame) {
+  const { o, m } = frame;
+  // Transpose for the rotation, and the rotated negative origin for the shift.
+  const t = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+  return {
+    m: t,
+    o: [
+      -(t[0] * o[0] + t[1] * o[1] + t[2] * o[2]),
+      -(t[3] * o[0] + t[4] * o[1] + t[5] * o[2]),
+      -(t[6] * o[0] + t[7] * o[1] + t[8] * o[2]),
+    ],
+  };
+}
+
 /** A point given in `frame`'s local coordinates, expressed globally. */
 export function toGlobal(frame, l) {
   const { o, m } = frame;

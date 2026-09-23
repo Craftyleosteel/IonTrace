@@ -116,7 +116,8 @@ let selection = null; // null | {kind:'source'} | {kind:'element', index}
 
 const selectedIndex = () => (selection?.kind === 'element' ? selection.index : -1);
 
-let view = null; // the current screen transform, for hit-testing
+let view = null; // the top pane's transform, for hit-testing
+let views = []; // every pane currently drawn
 let trajectories = [];
 let stats = {};
 let flight = null;
@@ -268,9 +269,14 @@ function pointerPos(e) {
  * back to a point in that plane exactly. Hit testing then happens in world
  * coordinates, which is what lets it keep working after the column bends.
  */
+function paneAt(py) {
+  return views.find((v) => py >= v.top && py < v.top + v.height) ?? views[0] ?? view;
+}
+
 function worldAt(px, py) {
-  if (!view) return [0, 0, 0];
-  return view.unproject(px, py);
+  const T = paneAt(py);
+  if (!T) return [0, 0, 0];
+  return T.unproject(px, py);
 }
 
 /** The element under a world point, or -1. */
@@ -287,10 +293,11 @@ function elementIndexAtWorld(g) {
 /** Whether the cursor is on one of the source handles. */
 function onSourceHandle(px, py) {
   const first = beamline.elements[0];
-  if (!first || !view) return false;
+  const T = paneAt(py);
+  if (!first || !T) return false;
   const radius = mmToM(readNumber(inputs.beamRadius, 1));
   for (const sign of [-1, 1]) {
-    const [hx, hy] = view.project(toGlobal(first.frame, [sign * radius, 0, 0]));
+    const [hx, hy] = T.project(toGlobal(first.frame, across(T, sign * radius)));
     if (Math.hypot(px - hx, py - hy) < 10) return true;
   }
   return false;
@@ -380,10 +387,12 @@ canvas.addEventListener('pointermove', (e) => {
 
   if (drag.kind === 'beam') {
     // Distance from the axis, measured in the source's own frame so the
-    // handles keep working if the first element is nudged.
+    // handles keep working if the first element is nudged, and along the
+    // transverse axis of whichever pane is being dragged in.
     const first = beamline.elements[0];
+    const T = paneAt(py);
     const l = toLocal(first.frame, worldAt(px, py));
-    const mm = Math.max(0.1, Math.min(6, Math.abs(mToMm(l[0]))));
+    const mm = Math.max(0.1, Math.min(6, Math.abs(mToMm(l[T.axis]))));
     inputs.beamRadius.value = mm.toFixed(1);
     syncOutputs();
     renderTrack();
@@ -859,31 +868,54 @@ function setFlyLabel(label, hint) {
  * that are not the bend angles - and the fit is recomputed whenever the
  * column changes shape.
  */
-function makeTransform(width, height, padding = 18) {
-  const b = beamline.bounds();
+function makeTransform(width, paneHeight, paneTop, plane, scale, bounds, padding = 16) {
+  const b = bounds;
   const margin = beamline.radiusLimit * 1.4;
   const minZ = b.minZ - margin;
-  const maxZ = b.maxZ + margin;
-  const minX = b.minX - margin;
-  const maxX = b.maxX + margin;
+  // The across-screen coordinate is global x in the top view and global y in
+  // the side view; everything else about the two panes is identical.
+  const lo = (plane === 'top' ? b.minX : b.minY) - margin;
+  const hi = (plane === 'top' ? b.maxX : b.maxY) + margin;
+  const axis = plane === 'top' ? 0 : 1;
 
-  const spanZ = Math.max(1e-6, maxZ - minZ);
-  const spanX = Math.max(1e-6, maxX - minX);
-  const scale = Math.min((width - 2 * padding) / spanZ, (height - 2 * padding) / spanX);
+  const spanZ = Math.max(1e-6, b.maxZ + margin - minZ);
+  const spanT = Math.max(1e-6, hi - lo);
 
-  // Centre whatever is left over, so a short column does not hug one corner.
-  const offX = (width - spanZ * scale) / 2;
-  const offY = (height - spanX * scale) / 2;
+  const offX = padding + (width - 2 * padding - spanZ * scale) / 2;
+  const offY = paneTop + (paneHeight - spanT * scale) / 2;
 
   return {
-    // Global z runs across the screen, global x down it.
+    plane,
+    axis,
+    top: paneTop,
+    height: paneHeight,
     sx: (z) => offX + (z - minZ) * scale,
-    sy: (x) => offY + (maxX - x) * scale,
-    project: (p) => [offX + (p[2] - minZ) * scale, offY + (maxX - p[0]) * scale],
-    /** Screen position back to a world point on the y = 0 plane. */
-    unproject: (px, py) => [maxX - (py - offY) / scale, 0, minZ + (px - offX) / scale],
+    sy: (t) => offY + (hi - t) * scale,
+    project: (p) => [offX + (p[2] - minZ) * scale, offY + (hi - p[axis]) * scale],
+    /** Screen position back to a world point in this pane's plane. */
+    unproject: (px, py) => {
+      const t = hi - (py - offY) / scale;
+      const z = minZ + (px - offX) / scale;
+      return axis === 0 ? [t, 0, z] : [0, t, z];
+    },
     scale,
   };
+}
+
+/**
+ * The scale both panes share.
+ *
+ * They must match, or the same element would be drawn at two sizes and the
+ * eye would read a bend angle that is not there. Both axes within a pane also
+ * carry that scale, so angles on screen are true angles.
+ */
+function fitScale(width, paneHeight, bounds, panes, padding = 16) {
+  const margin = beamline.radiusLimit * 1.4;
+  const spanZ = Math.max(1e-6, bounds.maxZ - bounds.minZ + 2 * margin);
+  const spanX = Math.max(1e-6, bounds.maxX - bounds.minX + 2 * margin);
+  const spanY = Math.max(1e-6, bounds.maxY - bounds.minY + 2 * margin);
+  const spanT = panes === 1 ? spanX : Math.max(spanX, spanY);
+  return Math.min((width - 2 * padding) / spanZ, (paneHeight - 2 * padding) / spanT);
 }
 
 function drawElementField(e, T) {
@@ -954,9 +986,9 @@ function drawElementField(e, T) {
 function withElementTransform(e, T, body) {
   const [ox, oy] = T.project(e.frame.o);
   const f = forwardOf(e.frame);
-  // Screen x is global z and screen y is -global x, so the forward direction
-  // appears on screen as (fz, -fx).
-  const angle = Math.atan2(-f[0], f[2]);
+  // Screen x is global z; screen y is minus whichever transverse axis this
+  // pane shows. The forward direction therefore appears as (fz, -f[axis]).
+  const angle = Math.atan2(-f[T.axis], f[2]);
   ctx.translate(ox, oy);
   ctx.rotate(angle);
   body();
@@ -1034,8 +1066,13 @@ function drawElectrodes(T) {
         ? cssVar('--axis')
         : cssVar('--electrode');
     ctx.globalAlpha = shape.ghost ? 0.35 : shape.wall ? 0.5 : 1;
+    // Axisymmetric metal looks the same in any plane containing the axis, so
+    // the side view draws the quarter-turned copy rather than an edge-on
+    // sliver of the x-z one.
+    const corners =
+      T.plane === 'side' && shape.cornersRolled ? shape.cornersRolled : shape.corners;
     ctx.beginPath();
-    shape.corners.forEach((c, i) => {
+    corners.forEach((c, i) => {
       const [px, py] = T.project(c);
       if (i === 0) ctx.moveTo(px, py);
       else ctx.lineTo(px, py);
@@ -1079,8 +1116,8 @@ function drawBoundaries(T) {
   ctx.setLineDash([2, 3]);
   for (const e of beamline.elements) {
     const r = e.outerRadius * 1.1;
-    const a = T.project(toGlobal(e.frame, [r, 0, 0]));
-    const b = T.project(toGlobal(e.frame, [-r, 0, 0]));
+    const a = T.project(toGlobal(e.frame, across(T, r)));
+    const b = T.project(toGlobal(e.frame, across(T, -r)));
     ctx.beginPath();
     ctx.moveTo(a[0], a[1]);
     ctx.lineTo(b[0], b[1]);
@@ -1151,11 +1188,12 @@ function drawSelection(T) {
   const e = beamline.elements[selectedIndex()];
   if (!e) return;
   const r = e.outerRadius * 1.12;
+  const end = e.curved ? 0 : e.length;
   const corners = [
-    [r, 0, 0],
-    [-r, 0, 0],
-    [-r, 0, e.curved ? 0 : e.length],
-    [r, 0, e.curved ? 0 : e.length],
+    across(T, r, 0),
+    across(T, -r, 0),
+    across(T, -r, end),
+    across(T, r, end),
   ];
 
   ctx.save();
@@ -1206,7 +1244,7 @@ function drawSource(T) {
   ctx.fillStyle = cssVar('--traj');
   ctx.lineWidth = 2;
 
-  const at = (tx, tz) => T.project(toGlobal(first.frame, [tx, 0, tz]));
+  const at = (tx, tz) => T.project(toGlobal(first.frame, across(T, tx, tz)));
   const lead = Math.max(mmToM(2), radius * 0.8);
 
   ctx.beginPath();
@@ -1240,8 +1278,8 @@ function drawDropIndicator(T) {
       ? { frame: beamline.exitFrame, r: beamline.radiusLimit }
       : { frame: beamline.elements[i].frame, r: beamline.elements[i].outerRadius };
 
-  const a = T.project(toGlobal(at.frame, [at.r * 1.4, 0, 0]));
-  const b = T.project(toGlobal(at.frame, [-at.r * 1.4, 0, 0]));
+  const a = T.project(toGlobal(at.frame, across(T, at.r * 1.4)));
+  const b = T.project(toGlobal(at.frame, across(T, -at.r * 1.4)));
 
   ctx.save();
   ctx.strokeStyle = cssVar('--accent');
@@ -1364,13 +1402,26 @@ function render() {
   if (!beamline || beamline.elements.length === 0) return;
 
   const cssWidth = canvas.parentElement.clientWidth;
-  // The view fits the column's own bounding box, so a bent line gets a taller
-  // frame and a straight one a shallow strip.
-  const b = beamline.bounds();
+  const bounds = beamline.bounds();
   const margin = beamline.radiusLimit * 1.4;
-  const aspect =
-    (b.maxZ - b.minZ + 2 * margin) / Math.max(1e-9, b.maxX - b.minX + 2 * margin);
-  const cssHeight = Math.max(200, Math.min(560, Math.round(cssWidth / aspect)));
+
+  // A side elevation appears only when the column actually leaves the
+  // horizontal plane. For a straight or horizontally-bent line the top view
+  // says everything, and a second empty pane would be wasted space.
+  const panes = beamline.usesVerticalPlane ? 2 : 1;
+  const spanZ = bounds.maxZ - bounds.minZ + 2 * margin;
+  const spanT =
+    panes === 1
+      ? bounds.maxX - bounds.minX + 2 * margin
+      : Math.max(
+          bounds.maxX - bounds.minX + 2 * margin,
+          bounds.maxY - bounds.minY + 2 * margin
+        );
+  const paneHeight = Math.max(
+    150,
+    Math.min(320, Math.round((cssWidth * spanT) / Math.max(1e-9, spanZ)))
+  );
+  const cssHeight = paneHeight * panes;
 
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssWidth * dpr);
@@ -1382,8 +1433,54 @@ function render() {
   ctx.fillStyle = cssVar('--surface-1');
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  const T = makeTransform(cssWidth, cssHeight);
-  view = T;
+  const scale = fitScale(cssWidth, paneHeight, bounds, panes);
+  const planes = panes === 1 ? ['top'] : ['top', 'side'];
+  views = planes.map((plane, i) =>
+    makeTransform(cssWidth, paneHeight, i * paneHeight, plane, scale, bounds)
+  );
+  view = views[0];
+
+  for (const T of views) drawPane(T, cssWidth);
+
+  if (panes === 2) {
+    ctx.save();
+    ctx.strokeStyle = cssVar('--border');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, paneHeight + 0.5);
+    ctx.lineTo(cssWidth, paneHeight + 0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  drawScale(views[0], cssWidth, cssHeight);
+  drawCrossSection();
+
+  scaleNote.hidden = false;
+  scaleNote.textContent = beamline.misaligned
+    ? 'True scale · elements are misaligned'
+    : 'True scale — both panes share one scale';
+  scaleNote.classList.toggle('warn', beamline.misaligned);
+}
+
+/**
+ * A local point displaced across the beam, in whichever transverse direction
+ * this pane shows.
+ *
+ * Handles, selection outlines and element boundaries are all drawn "across
+ * the beam", and which axis that means depends on the pane. Going through one
+ * helper keeps every such marker honest in both views.
+ */
+function across(T, t, along = 0) {
+  return T.axis === 0 ? [t, 0, along] : [0, t, along];
+}
+
+/** Everything that belongs in one projection. */
+function drawPane(T, width) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, T.top, width, T.height);
+  ctx.clip();
 
   if (inputs.showField.checked) {
     for (const e of beamline.elements) drawElementField(e, T);
@@ -1398,17 +1495,14 @@ function render() {
   drawTrajectories(T);
   drawSource(T);
   drawDropIndicator(T);
-  drawScale(T, cssWidth, cssHeight);
-  drawCrossSection();
 
-  // Both screen axes carry the same scale, so angles on screen are true
-  // angles. Worth saying, because ion-optics figures usually stretch one axis
-  // and this one does not.
-  scaleNote.hidden = false;
-  scaleNote.textContent = beamline.misaligned
-    ? 'True scale · elements are misaligned'
-    : 'True scale — 1:1 in both axes';
-  scaleNote.classList.toggle('warn', beamline.misaligned);
+  // Say which plane this is, since the two look alike for a straight column.
+  ctx.fillStyle = cssVar('--text-muted');
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(T.plane === 'top' ? 'top  (x–z)' : 'side (y–z)', 8, T.top + 6);
+  ctx.restore();
 }
 
 /* ------------------------------------------------------------------ */

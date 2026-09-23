@@ -68,6 +68,7 @@ export const ELEMENT_TYPES = {
     fields: [
       { key: 'voltage', label: 'Plate voltage', unit: 'V', min: -2000, max: 2000, step: 5, rebuild: false, help: 'Across the pair. The matched value for the current ion is shown below — a bender at the wrong voltage puts the beam into a plate.' },
       { key: 'bendAngle', label: 'Bend angle', unit: '°', min: 10, max: 180, step: 5, rebuild: false },
+      { key: 'bendPlane', label: 'Bend plane', unit: '°', min: 0, max: 270, step: 90, rebuild: false, help: '0° turns the beam horizontally, 90° vertically. Same element, same solve — it is simply rolled about the beam.' },
       { key: 'bendRadius', label: 'Bend radius', unit: 'mm', min: 15, max: 120, step: 1, rebuild: true },
       { key: 'gap', label: 'Plate gap', unit: 'mm', min: 2, max: 20, step: 0.5, rebuild: true },
       { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 40, step: 1, rebuild: true },

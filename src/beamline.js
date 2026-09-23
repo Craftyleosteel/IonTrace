@@ -302,7 +302,12 @@ export class Beamline {
     for (const e of this.elements) {
       for (const shape of shapesOf(e)) {
         out.push({
-          corners: shape.points.map((pt) => toGlobal(e.frame, [pt[0], 0, pt[1]])),
+          corners: shape.points.map((pt) => toGlobal(e.frame, pt)),
+          // The same metal seen edge-on in the other plane. Only meaningful
+          // for axisymmetric elements, where it really is the same shape.
+          cornersRolled: shape.axisymmetric
+            ? shape.points.map((pt) => toGlobal(e.frame, [0, pt[0], pt[2]]))
+            : null,
           ghost: !!shape.ghost,
           wall: !!shape.wall,
           element: e,
@@ -324,22 +329,42 @@ export class Beamline {
     return pts;
   }
 
-  /** Axis-aligned bounds of everything drawn, in the global x-z plane. */
+  /** Bounds of everything drawn, in all three global axes. */
   bounds() {
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minZ = Infinity;
-    let maxZ = -Infinity;
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
     const see = (p) => {
-      minX = Math.min(minX, p[0]);
-      maxX = Math.max(maxX, p[0]);
-      minZ = Math.min(minZ, p[2]);
-      maxZ = Math.max(maxZ, p[2]);
+      for (let i = 0; i < 3; i++) {
+        lo[i] = Math.min(lo[i], p[i]);
+        hi[i] = Math.max(hi[i], p[i]);
+      }
     };
-    for (const r of this.outline()) for (const c of r.corners) see(c);
+    for (const r of this.outline()) {
+      for (const c of r.corners) see(c);
+      if (r.cornersRolled) for (const c of r.cornersRolled) see(c);
+    }
     for (const p of this.centreLine()) see(p);
-    if (!Number.isFinite(minX)) return { minX: -0.01, maxX: 0.01, minZ: 0, maxZ: 0.1 };
-    return { minX, maxX, minZ, maxZ };
+    if (!Number.isFinite(lo[0])) {
+      return { minX: -0.01, maxX: 0.01, minY: -0.01, maxY: 0.01, minZ: 0, maxZ: 0.1 };
+    }
+    return {
+      minX: lo[0], maxX: hi[0],
+      minY: lo[1], maxY: hi[1],
+      minZ: lo[2], maxZ: hi[2],
+    };
+  }
+
+  /**
+   * Does the column leave the horizontal plane?
+   *
+   * The view uses this to decide whether a side elevation is worth showing.
+   * A straight or horizontally-bent line is fully described by the top view,
+   * and a second empty pane would be wasted space.
+   */
+  get usesVerticalPlane() {
+    const b = this.bounds();
+    const spread = Math.max(Math.abs(b.minY), Math.abs(b.maxY));
+    return spread > this.radiusLimit * 1.05;
   }
 }
 
@@ -349,15 +374,15 @@ export function straightExit(length) {
 }
 
 /**
- * An element's drawable shapes, as polygons in its own (transverse, axial)
- * plane.
+ * An element's drawable shapes, as polygons of 3D points in its own frame.
  *
- * Most elements are axisymmetric and describe themselves as a few boxes, which
- * are mirrored about the axis to give the familiar two-sided cross-section. A
- * bender is neither axisymmetric nor straight - its two plates sit at
- * different radii and follow an arc - so it supplies its polygons directly.
- * Going through polygons rather than boxes is what lets the renderer stay
- * ignorant of which kind it is drawing.
+ * Most elements are axisymmetric and describe themselves as a few boxes in
+ * the x-z plane, which are mirrored about the axis to give the familiar
+ * two-sided cross-section. A bender is neither axisymmetric nor straight, and
+ * once it can be rolled it does not even lie in the x-z plane - so it
+ * supplies full 3D polygons directly. Going through polygons rather than
+ * boxes is what lets the renderer stay ignorant of which kind it is drawing,
+ * and what lets the same shapes be projected into more than one view.
  */
 function shapesOf(e) {
   if (typeof e.shapes === 'function') return e.shapes();
@@ -366,13 +391,16 @@ function shapesOf(e) {
     for (const sign of [1, -1]) {
       out.push({
         points: [
-          [sign * r.r0, r.z0],
-          [sign * r.r1, r.z0],
-          [sign * r.r1, r.z1],
-          [sign * r.r0, r.z1],
+          [sign * r.r0, 0, r.z0],
+          [sign * r.r1, 0, r.z0],
+          [sign * r.r1, 0, r.z1],
+          [sign * r.r0, 0, r.z1],
         ],
         ghost: r.ghost,
         wall: r.wall,
+        // Axisymmetric metal looks the same in any plane containing the axis,
+        // so the side view draws it by rotating the same box a quarter turn.
+        axisymmetric: true,
       });
     }
   }

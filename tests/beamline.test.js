@@ -741,6 +741,72 @@ describe('Bender', () => {
     }
   });
 
+  it('bends in whichever plane it is rolled into', () => {
+    // One element, one solve, any plane. A 90 degree roll turns the same
+    // bender from a horizontal corner into a vertical one.
+    const horizontal = new Beamline([createElement('bender', { ...PARAMS, bendPlane: 0 })]);
+    const vertical = new Beamline([createElement('bender', { ...PARAMS, bendPlane: 90 })]);
+
+    const h = forwardOf(horizontal.exitFrame);
+    const v = forwardOf(vertical.exitFrame);
+
+    assertClose(h[0], -1, 1e-12, 'an unrolled bender turns in x');
+    assertClose(h[1], 0, 1e-12, 'and not at all in y');
+    assertClose(v[1], -1, 1e-12, 'a 90 degree roll turns it in y instead');
+    assertClose(v[0], 0, 1e-12, 'and not at all in x');
+  });
+
+  it('does not roll the beam it passes on', () => {
+    // The conjugation by the roll is what makes this true. Without it a
+    // vertical bender would also rotate "up" into "sideways" for every
+    // element downstream, which is not what a bender does.
+    const bl = new Beamline([
+      createElement('bender', { ...PARAMS, bendPlane: 90, bendAngle: 90 }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    const after = bl.elements[1].frame;
+    // Local +x must still be global +x: the transverse axes are untwisted.
+    const localX = vectorToGlobal(after, [1, 0, 0]);
+    assertClose(localX[0], 1, 1e-12, 'transverse x survives a vertical bend');
+    assertClose(localX[1], 0, 1e-12, 'with nothing leaking into y');
+  });
+
+  it('carries a matched ion round a vertical bend', () => {
+    // The same physics, in the other plane. The ion should leave travelling
+    // in -y with essentially no x motion at all.
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 10, bore: 4 }),
+      createElement('bender', { ...PARAMS, bendPlane: 90, voltage: V }),
+      createElement('drift', { length: 20, bore: 4 }),
+    ]);
+    const { points, stop } = flyIon(
+      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+    );
+    assert(stop === 'exited', `a matched ion should get through, got ${stop}`);
+
+    const last = points[points.length - 1];
+    const turned = (Math.atan2(-last.vy, last.vz) * 180) / Math.PI;
+    assertClose(turned, 90, 2, 'a vertical bender turns the beam downward');
+    for (const p of points) {
+      assertClose(p.x, 0, mmToM(1e-3), 'and leaves the horizontal plane alone');
+    }
+  });
+
+  it('makes the column occupy the vertical plane', () => {
+    // Which is what tells the view a side elevation is worth drawing.
+    const flat = new Beamline([
+      createElement('drift', { length: 20, bore: 4 }),
+      createElement('bender', { ...PARAMS, bendPlane: 0 }),
+    ]);
+    const tall = new Beamline([
+      createElement('drift', { length: 20, bore: 4 }),
+      createElement('bender', { ...PARAMS, bendPlane: 90 }),
+    ]);
+    assert(!flat.usesVerticalPlane, 'a horizontal column stays in its plane');
+    assert(tall.usesVerticalPlane, 'a vertical bend leaves it');
+  });
+
   it('solves on a cylindrical band that excludes the axis', () => {
     // The bender reuses the axisymmetric stencil with the roles of the axes
     // reinterpreted, but its radial band sits about the bend radius rather
