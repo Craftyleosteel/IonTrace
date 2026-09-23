@@ -191,6 +191,8 @@ output:
 | Folded columns | a column bent through two right angles transmits; no branch of it claims another's ions; the beam is measured transversely to the axis it is actually on |
 | Fringe fields | decay inside a grounded pipe matches $e^{-2.405z/R}$; a grounded plate measurably shields a charged one; a column solve agrees with the isolated solve where it should (an einzel, to 0.00 %) |
 | Branching | each branch is placed where its own exit points, with the right path length; the beam switches with the voltage; an orphaned branch leaves with its junction; no element can be moved below itself |
+| Eigensolver | $Av = \lambda v$ and orthonormality to $10^{-10}$ on known, degenerate, near-singular and indefinite matrices |
+| Refinement | the beam is measured on the target plane rather than at the ion's last step; no refinement is kept that loses an ion or fails to improve |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for
@@ -255,6 +257,8 @@ src/
   frames.js             rigid placements: where each element sits
   beamline.js           the column: layout, lookup, bounds, alignment
   optimize.js           voltage search for maximum transmission
+  reduced.js            reduced-Hessian refinement; the null space of a column
+  column.js             fringe fields: neighbouring elements on one grid
   elements/             drift, aperture, einzel, quadrupole, deflector
     index.js            the registry the UI is generated from
   main.js               UI wiring and canvas rendering

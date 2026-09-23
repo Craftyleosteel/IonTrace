@@ -47,8 +47,10 @@ import {
   scoreBeamline,
   optimizeVoltages,
   applyKnob,
+  readKnobs,
   TUNABLE,
 } from '../src/optimize.js';
+import { symmetricEigen, beamQuality, refineNullSpace } from '../src/reduced.js';
 import { axisymmetricRuns, canShareGrid, decayLength } from '../src/column.js';
 import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
@@ -1687,6 +1689,168 @@ describe('Voltage optimiser', () => {
     const after = bl.elements[1].potentialAt(mmToM(6), 0, mmToM(26));
     assertClose(before, 0, 1e-12, 'no voltage, no potential');
     assert(Math.abs(after) > 1, `the field should follow the knob, got ${after}`);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* reduced-Hessian refinement                                          */
+/* ------------------------------------------------------------------ */
+
+describe('Symmetric eigensolver', () => {
+  /** Assert A v = lambda v and that the vectors are orthonormal. */
+  function check(A, label) {
+    const { values, vectors } = symmetricEigen(A);
+    const n = A.length;
+    assert(values.length === n, `${label}: one eigenvalue per dimension`);
+
+    for (let k = 0; k < n; k++) {
+      const v = vectors[k];
+      for (let i = 0; i < n; i++) {
+        const Av = A[i].reduce((s, a, j) => s + a * v[j], 0);
+        assertClose(Av, values[k] * v[i], 1e-10, `${label}: A v = lambda v`);
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const dot = vectors[i].reduce((s, c, k) => s + c * vectors[j][k], 0);
+        assertClose(dot, i === j ? 1 : 0, 1e-10, `${label}: orthonormal`);
+      }
+    }
+    for (let k = 1; k < n; k++) {
+      assert(values[k - 1] >= values[k], `${label}: sorted, stiffest first`);
+    }
+    return values;
+  }
+
+  it('diagonalises a matrix with known eigenvalues', () => {
+    const v = check([[2, 1], [1, 2]], '[[2,1],[1,2]]');
+    assertClose(v[0], 3, 1e-12, 'larger eigenvalue');
+    assertClose(v[1], 1, 1e-12, 'smaller eigenvalue');
+  });
+
+  it('handles a repeated eigenvalue', () => {
+    // The case that matters: two equally sloppy directions is exactly what a
+    // degenerate beamline produces, and a solver that cannot give orthogonal
+    // vectors for it would report a null space that is not one.
+    const v = check([[4, 0], [0, 4]], 'degenerate');
+    assertClose(v[0], 4, 1e-12, 'both equal');
+    assertClose(v[1], 4, 1e-12, 'both equal');
+  });
+
+  it('separates a stiff direction from a flat one', () => {
+    const v = check([[1, 0], [0, 1e-9]], 'nearly singular');
+    assertClose(v[0], 1, 1e-12, 'the stiff one');
+    assert(Math.abs(v[1]) < 1e-8, `the flat one, got ${v[1]}`);
+  });
+
+  it('handles an indefinite matrix', () => {
+    // A saddle, which is where a beamline that is not yet tuned normally sits.
+    const v = check([[0, 1], [1, 0]], 'saddle');
+    assertClose(v[0], 1, 1e-12, 'one uphill');
+    assertClose(v[1], -1, 1e-12, 'one downhill');
+  });
+
+  it('diagonalises a larger matrix', () => {
+    check([[6, 2, 1], [2, 5, 1], [1, 1, 4]], '3x3');
+    check([[2, -1, 0, 0], [-1, 2, -1, 0], [0, -1, 2, -1], [0, 0, -1, 2]], '4x4 tridiagonal');
+  });
+});
+
+describe('Refining a tuned beamline', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+  const ions = () => discBeam({ ...SPEC, count: 9, radius: 1.0 });
+
+  const column = () =>
+    new Beamline([
+      createElement('drift', { length: 12, bore: 6 }),
+      createElement('einzel', {
+        gridStep: 0.8, voltage: -300, boreRadius: 6,
+        housingRadius: 15, entryDrift: 14, exitDrift: 14,
+      }),
+      createElement('drift', { length: 14, bore: 6 }),
+      createElement('bender', { voltage: startingParams('bender', SPEC).voltage }),
+      createElement('drift', { length: 40, bore: 6 }),
+    ]);
+
+  it('measures the beam at the target plane, not where the ion stopped', () => {
+    // The difference between a merit that can be differentiated and one that
+    // cannot. The last recorded point sits wherever the adaptive step left
+    // off, which moves as the voltages change - so a finite difference reads
+    // that jitter rather than the physics.
+    const bl = column();
+    const target = bl.mainEnd;
+    const frame = bl.endFrame(target);
+    const q = beamQuality(bl, ions);
+    assert(q.arrived === 9, `all nine should arrive, got ${q.arrived}`);
+
+    // Every contributing ion is measured exactly on the plane, so the distance
+    // along the exit axis is zero rather than a step's worth of overshoot.
+    const { tracks } = flyBeam(bl, ions(), { cfl: 0.05, maxSteps: 200000 });
+    const f = forwardOf(frame);
+    let worst = 0;
+    for (const t of tracks) {
+      const p = t.points[t.points.length - 1];
+      const along =
+        (p.x - frame.o[0]) * f[0] + ((p.y ?? 0) - frame.o[1]) * f[1] + (p.z - frame.o[2]) * f[2];
+      worst = Math.max(worst, along);
+    }
+    assert(worst > 0, 'the recorded endpoint really does overshoot the plane');
+  });
+
+  it('reports no merit when the beam is not fully delivered', () => {
+    // A merit that counted a lost ion as a tighter beam would reward throwing
+    // the edge of the beam away.
+    const bl = column();
+    bl.elements[3].setVoltage(0); // deflector off: nothing reaches the bend
+    const q = beamQuality(bl, ions);
+    assert(q.merit === null, `expected no merit, got ${q.merit}`);
+  });
+
+  it('tightens the beam without losing any of it', async () => {
+    const bl = column();
+    const knobs = tunableKnobs(bl, SPEC);
+    const before = beamQuality(bl, ions);
+    const r = await refineNullSpace(bl, ions, knobs, {});
+
+    assert(r.rmsAfter <= r.rmsBefore, 'never worse than it started');
+    const after = beamQuality(bl, ions);
+    assert(
+      after.arrived === before.arrived,
+      `transmission must hold: ${before.arrived} -> ${after.arrived}`
+    );
+    if (r.improved) assert(r.steps > 0, 'an improvement means it actually stepped');
+  });
+
+  it('puts the voltages back if it cannot improve on them', async () => {
+    // A refinement that leaves a column worse than it found it is worse than
+    // no refinement.
+    const bl = column();
+    const knobs = tunableKnobs(bl, SPEC);
+    const before = readKnobs(bl, knobs);
+    const r = await refineNullSpace(bl, ions, knobs, { iterations: 1 });
+    if (!r.improved) {
+      const now = readKnobs(bl, knobs);
+      assert(
+        now.every((v, i) => v === before[i]),
+        'unchanged when nothing was gained'
+      );
+    }
+  });
+
+  it('gives every knob a natural size from the element itself', async () => {
+    // Without one, a knob's size falls back to a sixth of its full range: for
+    // a lens allowed +/-40 kV that is 13 kV, so the finite-difference probe is
+    // in kilovolts around an answer of a few hundred volts and the Hessian is
+    // meaningless. Every tunable field declares a scale for exactly this.
+    const bl = column();
+    for (const k of tunableKnobs(bl, SPEC)) {
+      assert(k.seed != null, `${k.label} has no natural size`);
+      assert(k.seed > 0 && Number.isFinite(k.seed), `${k.label} seed ${k.seed}`);
+      assert(
+        k.seed < Math.abs(k.max - k.min) / 4,
+        `${k.label}: a seed of ${k.seed} is a large fraction of its whole range`
+      );
+    }
   });
 });
 

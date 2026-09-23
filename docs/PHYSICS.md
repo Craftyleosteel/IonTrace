@@ -995,6 +995,66 @@ have missed the optimum by less than $d$. A fixed fraction of the range would
 not close in at all on a knob whose range is three orders of magnitude wider
 than its answer.
 
+**A second stage, and what a Hessian can and cannot do here.** Transmission is
+a count: flat almost everywhere, jumping by one when an ion clears an aperture
+it previously hit. It has no derivative, let alone a second one, so no Newton
+method of any kind applies to it — the scan is not a stopgap.
+
+But once the beam is through, a different question starts: of the many settings
+that transmit everything, which delivers the best beam? That *is* smooth. The
+spot size at the target moves continuously with the voltages while no ion is
+near an edge, so it has a gradient and a Hessian — and second-order information
+is exactly what coordinate descent lacks. `src/reduced.js` finite-differences
+both, eigendecomposes the Hessian by cyclic Jacobi, and takes a Newton step.
+
+Three things make that work rather than merely sound plausible:
+
+**Scaled coordinates.** Each knob is divided by a natural size taken from the
+same closed form that sets its starting value — $-6T/q$ for a lens, the matched
+voltage for a deflector, $q = 0.38$ for a filter. Without that the Hessian's
+eigenvalues mix units and "near zero" has nothing to be near zero against. A
+lens with no declared scale fell back to a sixth of its permitted range, 13 kV
+for an answer of a few hundred volts, and the resulting Hessian was noise.
+
+**Measuring at the target plane.** Each ion's crossing is interpolated onto the
+exit plane rather than read off its last recorded point. The last point sits
+wherever the adaptive step happened to leave off, which shifts as the voltages
+change — so a finite difference over a small change reads that jitter rather
+than the physics. Before this, the Hessian's largest eigenvalue came out
+negative and equal in magnitude to its smallest: a pure numerical saddle.
+
+**Treating three kinds of curvature differently.** A plain Newton step divides
+by the curvature, so a near-zero eigenvalue produces an enormous jump along the
+direction that matters least.
+
+| Curvature | What it means | What is done |
+|---|---|---|
+| $\lambda > \tau$ | a real minimum in this direction | Newton step, $-g_k/\lambda$ |
+| $\lambda < -\tau$ | downhill — a saddle | step with $-g_k/\lvert\lambda\rvert$, still a descent direction |
+| $\lvert\lambda\rvert \le \tau$ | flat — the null space | left alone, and **reported** |
+
+with $\tau$ a small fraction of the stiffest curvature present. Skipping
+negative curvature instead of using $\lvert\lambda\rvert$ leaves the method
+stalled at saddles, which is where an untuned beamline normally sits: measured,
+a column 3 mm from its best took a 0.2 V step and stopped.
+
+**The null space is the interesting output.** A beamline's knobs are not
+independent — a lens and the deflector behind it trade off, so the merit surface
+has a flat-bottomed valley and the Hessian a near-zero eigenvalue along it. That
+direction is a combination of voltages the beam does not care about, which says
+the tuned setting is not unique and which knob is redundant. It is reported
+rather than discarded.
+
+Measured on a lens-and-deflector column starting from zero volts: the scan alone
+reaches an exit beam of 0.344 mm rms and the refinement takes it to 0.327 mm.
+Modest, because the scan already gets close — and the larger gain from this work
+came from something the investigation turned up rather than from the Newton step
+itself. Coordinate descent could not find *any* working setting from zero,
+because sweeping the lens while the deflector is off transmits nothing whatever
+the lens does, so the sweep learns nothing and moves on. Every element already
+knows roughly what it wants, so the combination of all those guesses is now
+tried first, for the cost of one flight: 0 of 9 became 9 of 9.
+
 **What it will not touch.** Only voltages: geometry needs a fresh solve, and
 leaving it alone is the constraint an operator at a real instrument works under
 anyway. And *not the RF quadrupole*, which is the one exclusion worth arguing

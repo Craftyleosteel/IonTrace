@@ -1316,6 +1316,35 @@ document.addEventListener('fullscreenchange', () => {
  */
 let tuning = null;
 
+/**
+ * The combinations of knobs the beam turns out not to care about.
+ *
+ * These come out of the Hessian's near-zero eigenvalues, and they are worth
+ * saying out loud: each one is a statement about the instrument rather than
+ * about the search. "Raising the lens by this while nudging the deflector by
+ * that changes nothing" tells an operator which knob is redundant, and tells
+ * anyone reading a tuned setting why it is not unique.
+ */
+function describeNullSpace(nullSpace) {
+  if (!nullSpace?.length) return '';
+  const say = (d) =>
+    d.direction
+      // Only the knobs that carry real weight in this direction.
+      .filter((c) => Math.abs(c.weight) > 1e-9)
+      .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight))
+      .slice(0, 3)
+      .map(
+        (c) =>
+          `${c.weight >= 0 ? '+' : '−'}${Math.abs(c.weight).toPrecision(3)} ` +
+          `${c.label.split(' · ')[0]}`
+      )
+      .join(' with ');
+  return (
+    ` The beam is insensitive to ${nullSpace.length === 1 ? 'one combination' : `${nullSpace.length} combinations`}` +
+    ` of these voltages — ${nullSpace.map(say).join('; ')} — so the setting above is not unique.`
+  );
+}
+
 function setTuneNote(text, bad = false) {
   tuneNote.textContent = text ?? '';
   tuneNote.hidden = !text;
@@ -1388,13 +1417,28 @@ async function runTuner(knobs, button, what) {
       ? ''
       : `, beam ${mToMm(result.exitRadius).toFixed(2)} mm at the exit`);
 
+  // What the second stage did, if it ran. Said separately because it answers a
+  // different question from the scan, and the flat directions it finds are a
+  // statement about the instrument rather than about the search.
+  const ref = result.refinement;
+  const polish = !ref
+    ? ''
+    : (ref.improved
+        ? ` Reduced-Hessian refinement tightened the beam from ${mToMm(ref.rmsBefore).toFixed(
+            2
+          )} to ${mToMm(ref.rmsAfter).toFixed(2)} mm in ${ref.steps} Newton ${
+            ref.steps === 1 ? 'step' : 'steps'
+          }.`
+        : ' Reduced-Hessian refinement found nothing better: the scan had already ' +
+          'reached the best setting nearby.') + describeNullSpace(ref.nullSpace);
+
   setTuneNote(
-    result.cancelled
+    (result.cancelled
       ? `Stopped after ${result.evaluations} trials — keeping the best: ${headline}.` +
-          (settings ? ` ${settings}` : '')
+        (settings ? ` ${settings}` : '')
       : changed.length === 0
         ? `${result.evaluations} trials: ${headline}. Nothing beat the settings already in place.`
-        : `${result.evaluations} trials: ${headline}. ${settings}`,
+        : `${result.evaluations} trials: ${headline}. ${settings}`) + polish,
     result.transmitted === 0
   );
 

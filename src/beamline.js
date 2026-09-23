@@ -282,6 +282,15 @@ export class Beamline {
     return this.elements.find((e) => e.from?.parent === element && e.from.port === port) ?? null;
   }
 
+  /** The frame of a named open end, or the main exit if it is not one. */
+  endFrame(target) {
+    if (!target) return this.exitFrame;
+    const found = this.openEnds().find(
+      (o) => o.element === target.element && o.port === target.port
+    );
+    return found ? found.frame : this.exitFrame;
+  }
+
   /** Every exit with nothing bolted to it: the open ends of the column. */
   openEnds() {
     const out = [];

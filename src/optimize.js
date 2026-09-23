@@ -46,6 +46,7 @@
 import { flyBeam } from './integrator.js';
 import { ELEMENT_TYPES } from './elements/index.js';
 import { toLocal } from './frames.js';
+import { refineNullSpace } from './reduced.js';
 
 /**
  * Which parameters this optimiser is allowed to move.
@@ -115,10 +116,22 @@ export function tunableKnobs(beamline, ion = null) {
         );
       }
 
-      // An element's own estimate, if it has one and the ion is known.
+      /*
+        The element's own estimate of what this knob wants, from the same
+        closed form the control's range and starting value come from. Taken
+        from the registry's `scale` rather than from a method on the element,
+        so every field that has one gets it - a lens wants -6 T/q and a filter
+        a Mathieu q of 0.38, just as a deflector wants its matched voltage.
+
+        Missing it is not cosmetic. Without a seed the knob's natural size
+        falls back to a sixth of its full range, which for a lens allowed
+        +/- 40 kV is 13 kV - so the sweep steps in kilovolts around an answer
+        of a few hundred volts, and the finite-difference probe that the
+        second stage uses is meaningless.
+      */
       let seed = null;
-      if (key === 'voltage' && ion && typeof element.matchedVoltage === 'function') {
-        const v = element.matchedVoltage(ion.energy, Math.abs(ion.charge) || 1);
+      if (ion && typeof field.scale === 'function') {
+        const v = field.scale(element.params, ion);
         if (Number.isFinite(v) && v !== 0) seed = Math.abs(v);
       }
 
@@ -272,6 +285,7 @@ function snap(knob, value) {
  * @param {number} [options.passes=2]      sweeps over the whole knob list
  * @param {number} [options.coarse=13]     samples in the first sweep of a knob
  * @param {number} [options.refine=7]      samples in each narrowing sweep
+ * @param {boolean} [options.polish=true]  run the reduced-Hessian second stage
  * @param {number} [options.levels=3]      narrowing sweeps after the coarse one
  * @param {number} [options.shrink=0.25]   bracket width kept at each level
  * @param {object} [options.flight]        options passed to the integrator
@@ -282,8 +296,9 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   const {
     passes = 2,
     coarse = 13,
-    refine = 7,
+    refine: refineSamples = 7,
     levels = 3,
+    polish = true,
     flight = {},
     onProgress,
     shouldStop,
@@ -295,11 +310,35 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   let evaluations = 1;
   let cancelled = false;
 
+  /*
+    Try every knob at its own suggested value AT ONCE, before moving anything
+    one at a time.
+
+    Coordinate descent cannot find a setting that only works when two knobs are
+    right together, because it never has both right at the same time: sweeping
+    the lens while the deflector is off transmits nothing whatever the lens
+    does, so the sweep learns nothing and moves on. Measured on a
+    lens-and-deflector column starting from zero volts, the one-at-a-time
+    search found nothing at all - and every element already knows roughly what
+    it wants, so the combination of those guesses costs one flight to try.
+  */
+  if (knobs.some((k) => k.seed != null)) {
+    const seeded = knobs.map((k, i) => (k.seed != null ? snap(k, k.seed) : start[i]));
+    writeKnobs(beamline, knobs, seeded);
+    const result = scoreBeamline(beamline, makeIons, flight);
+    evaluations++;
+    if (result.score > bestResult.score) {
+      bestResult = result;
+      best = seeded;
+    }
+    writeKnobs(beamline, knobs, best);
+  }
+
   // An upper bound, not an estimate: the seeds add at most three samples to
   // each knob's first level, and repeats of a value already tried are skipped
   // rather than re-flown. So the count can finish early but never overrun,
   // which is the direction a progress bar should err in.
-  const perKnob = coarse + 3 + refine * levels;
+  const perKnob = coarse + 3 + refineSamples * levels;
   const total = 1 + passes * knobs.length * perKnob;
 
   const report = async (knob) => {
@@ -343,7 +382,7 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
       let centre = best[ki];
 
       for (let level = 0; level <= levels; level++) {
-        const samples = level === 0 ? coarse : refine;
+        const samples = level === 0 ? coarse : refineSamples;
         const spacing = (hi - lo) / (samples - 1 || 1);
 
         const values = [];
@@ -386,6 +425,55 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   }
 
   writeKnobs(beamline, knobs, best);
+
+  /*
+    Second stage: once the beam is through, tighten it.
+
+    The scan answers "does it get there", which is a discontinuous question and
+    needs a scan. It cannot answer "of the settings that work, which is best",
+    because the difference between them is a smooth quantity and a scan on a
+    grid of one step per knob steps straight over it. That is a Newton problem,
+    and it is where second-order information earns its keep - a lens and the
+    deflector behind it trade off, so the optimum lies in a valley at an angle
+    to both axes, which is the case coordinate descent is worst at.
+
+    Skipped unless the beam is fully delivered: with ions still being lost the
+    merit is not smooth, and a Hessian of it would be fiction.
+  */
+  let refinement = null;
+  if (
+    polish &&
+    !cancelled &&
+    knobs.length >= 1 &&
+    bestResult.count > 0 &&
+    bestResult.transmitted === bestResult.count
+  ) {
+    refinement = await refineNullSpace(beamline, makeIons, knobs, {
+      flight,
+      shouldStop,
+      onProgress: async (p) => {
+        evaluations += 0;
+        await onProgress?.({
+          evaluations,
+          total,
+          fraction: 1,
+          transmitted: bestResult.transmitted,
+          count: bestResult.count,
+          knob: 'tightening the beam',
+          values: readKnobs(beamline, knobs),
+          refining: p,
+        });
+      },
+    });
+    evaluations += refinement.evaluations;
+    if (refinement.improved) {
+      best = readKnobs(beamline, knobs);
+      bestResult = scoreBeamline(beamline, makeIons, flight);
+      evaluations++;
+    }
+  }
+
+  writeKnobs(beamline, knobs, best);
   const improved = bestResult.score > 0 && best.some((v, i) => v !== start[i]);
 
   return {
@@ -397,5 +485,6 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     transmitted: bestResult.transmitted,
     count: bestResult.count,
     exitRadius: bestResult.exitRadius,
+    refinement,
   };
 }
