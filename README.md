@@ -193,6 +193,7 @@ output:
 | Branching | each branch is placed where its own exit points, with the right path length; the beam switches with the voltage; an orphaned branch leaves with its junction; no element can be moved below itself |
 | Eigensolver | $Av = \lambda v$ and orthonormality to $10^{-10}$ on known, degenerate, near-singular and indefinite matrices |
 | Refinement | the beam is measured on the target plane rather than at the ion's last step; no refinement is kept that loses an ion or fails to improve |
+| Speed work | the element-lookup cache reproduces trajectories to the last bit; the coarse scan reaches the same answer as a full-fidelity one |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for

@@ -1055,6 +1055,29 @@ the lens does, so the sweep learns nothing and moves on. Every element already
 knows roughly what it wants, so the combination of all those guesses is now
 tried first, for the cost of one flight: 0 of 9 became 9 of 9.
 
+**What makes it fast enough to watch.** Profiled rather than guessed at. One
+flight of nine ions runs about 8,400 integrator steps, which produce 377,000
+field evaluations and **603,000 element lookups** — four field queries per ion
+per step plus a strike test, each of which was scanning the whole column and
+calling both `contains` and `strikes` on every element it passed. Three changes,
+measured on a lens-and-deflector search from zero volts (12.2 s originally):
+
+| Change | Why it is free | After |
+|---|---|---|
+| Element lookup remembers the last element it found | Almost every query is about a point a fraction of a millimetre from the previous one, or another ion in the same beam. The hint is re-checked before it is trusted, and trajectories come out identical to the last bit. | 9.4 s |
+| Settings already flown are not re-flown | Coordinate descent re-samples its own bracket centre at every level and re-walks ranges on a second pass. The flight is deterministic, so the answer is. Cut 141 evaluations to 96. | 6.7 s |
+| The scan ranks at a coarser time step | Its job is to rank settings, not measure one, and ranking survives a much coarser integration. The winner is re-scored at full fidelity before anything is reported or refined. | **3.2 s** |
+
+The last of those is a genuine trade-off, so it was measured before being
+taken. Over a sweep of lens voltages, at two, four and eight times the default
+step the ordering of the settings is unchanged and the scores agree to four
+decimal places, while a flight drops from 70 ms to 36, 17 and 8.
+
+Flying **fewer ions** would also be cheaper and is deliberately not done: the
+same sweep reorders when the beam is thinned from nine to five, because the
+tie-break is a mean over whichever ions are present and a different sample is a
+different mean. Cheaper is not the same as faster at the same answer.
+
 **What it will not touch.** Only voltages: geometry needs a fresh solve, and
 leaving it alone is the constraint an operator at a real instrument works under
 anyway. And *not the RF quadrupole*, which is the one exclusion worth arguing

@@ -1678,6 +1678,45 @@ describe('Voltage optimiser', () => {
     );
   });
 
+  it('reaches the same answer whether the scan flies coarse or fine', async () => {
+    // The search ranks settings at a coarser time step than the answer is
+    // judged at, which is most of why it is fast. That is only legitimate if
+    // the ranking survives it, so this compares the two directly rather than
+    // trusting that it does.
+    const fine = bentColumn(0);
+    const coarse = bentColumn(0);
+    const a = await optimizeVoltages(fine, beam(), tunableKnobs(fine, SPEC), {
+      scanSpeed: 1,
+      polish: false,
+    });
+    const b = await optimizeVoltages(coarse, beam(), tunableKnobs(coarse, SPEC), {
+      scanSpeed: 4,
+      polish: false,
+    });
+    assert(
+      a.transmitted === b.transmitted,
+      `same transmission: ${a.transmitted} vs ${b.transmitted}`
+    );
+    assertRelClose(b.values[0], a.values[0], 0.1, 'and lands on the same voltage');
+  });
+
+  it('does not fly the same settings twice', async () => {
+    // Coordinate descent revisits points constantly - every narrowing level
+    // re-samples its own bracket centre - and the flight is deterministic, so
+    // re-running it is pure waste.
+    const bl = bentColumn(0);
+    const knobs = tunableKnobs(bl, SPEC);
+    const withMemo = await optimizeVoltages(bl, beam(), knobs, { polish: false });
+    // The budget is an upper bound that assumes nothing repeats; coming in
+    // meaningfully under it is the memo doing its job.
+    const perKnob = 13 + 3 + 7 * 3;
+    const ceiling = 1 + 2 * knobs.length * perKnob;
+    assert(
+      withMemo.evaluations < ceiling * 0.9,
+      `expected repeats to be skipped: ${withMemo.evaluations} of a possible ${ceiling}`
+    );
+  });
+
   it('writes a knob through to the field, not just to the parameter', async () => {
     // `applyKnob` has to call the element's setter: writing `params.voltage`
     // alone would change the readout and leave the field untouched, so the
@@ -1903,6 +1942,46 @@ describe('Beamline composition', () => {
     });
     const n = tracks.filter((t) => t.stop === 'exited').length;
     assert(n >= 5, `a double bend should transmit most of the beam, got ${n} of 9`);
+  });
+
+  it('gives the same answer with the lookup hint as without it', () => {
+    // Element lookup remembers where the last one landed, because a flight of
+    // nine ions asks six hundred thousand times and almost every question is
+    // about a point a fraction of a millimetre from the previous one. It is a
+    // hint and nothing more: every use re-checks the point against that
+    // element. This pins that it changes no answer at all.
+    const V = matchedVoltage({ apertureRadius: 19 }, 50, 1);
+    const make = () =>
+      new Beamline([
+        createElement('drift', { length: 12, bore: 5 }),
+        createElement('bender', { voltage: V }),
+        createElement('drift', { length: 30, bore: 5 }),
+        createElement('bender', { voltage: V }),
+        createElement('drift', { length: 30, bore: 5 }),
+      ]);
+    const ions = () => discBeam({ mass: 100, charge: 1, energy: 50, count: 9, radius: 1 });
+
+    const hinted = flyBeam(make(), ions(), { cfl: 0.05, maxSteps: 600000 }).tracks;
+
+    // The same column, with the hint cleared before every single lookup.
+    const bl = make();
+    const base = Object.getPrototypeOf(bl).locate;
+    bl.locate = function (g) {
+      this.layout();
+      return base.call(this, g);
+    };
+    const plain = flyBeam(bl, ions(), { cfl: 0.05, maxSteps: 600000 }).tracks;
+
+    assert(hinted.length === plain.length, 'same number of tracks');
+    for (let i = 0; i < hinted.length; i++) {
+      assert(hinted[i].stop === plain[i].stop, `ion ${i}: same fate`);
+      assert(hinted[i].points.length === plain[i].points.length, `ion ${i}: same step count`);
+      const a = hinted[i].points[hinted[i].points.length - 1];
+      const b = plain[i].points[plain[i].points.length - 1];
+      for (const k of ['x', 'y', 'z', 'vx', 'vy', 'vz']) {
+        assert(a[k] === b[k], `ion ${i}: ${k} identical to the last bit`);
+      }
+    }
   });
 
   it('still blames the right element for a genuine wall strike', () => {

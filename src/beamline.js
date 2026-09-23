@@ -75,6 +75,15 @@ export class Beamline {
   }
 
   /**
+   * The element the previous lookup landed in, as a hint for the next.
+   *
+   * Cleared whenever the column is re-laid, since an element's frame may have
+   * moved underneath it. It is only ever an optimisation: every path that uses
+   * it re-checks the point against that element before trusting it.
+   */
+  #hint = null;
+
+  /**
    * Turn column solves on or off, re-solving as needed.
    *
    * Costs a Laplace solve per run, so it is called on a structural change or
@@ -332,6 +341,7 @@ export class Beamline {
     // Depth first, because a branch continues from where its junction left
     // off. The recursion is over the tree, not the array: array order is for
     // display and is kept in step by `#reorder`.
+    this.#hint = null;
     let longest = 0;
     let main = identityFrame();
     let mainEnd = null;
@@ -460,12 +470,41 @@ export class Beamline {
    * what lets `classify` call it an exit rather than a crash.
    */
   locate(g) {
+    /*
+      Try the element the last lookup found, before scanning for one.
+
+      This is the hottest path in the simulator by a wide margin. A single
+      flight of nine ions runs about eight thousand integrator steps, and each
+      step asks for the field four times per ion and for a strike test once -
+      six hundred thousand lookups, every one of which was scanning the whole
+      column and calling both `contains` and `strikes` on each element it
+      passed.
+
+      Almost all of those ask about a point a fraction of a millimetre from the
+      previous one, or about another ion in the same beam a millimetre away, so
+      the answer is nearly always the same element as last time. The hint is
+      only ever a guess: it is accepted only when the point is in that
+      element's free space, which is the same condition the scan below would
+      have returned it for, and otherwise the scan runs as usual.
+    */
+    const hint = this.#hint;
+    if (hint) {
+      const e = hint.element;
+      const l = toLocal(e.frame, g);
+      if (e.contains(l[0], l[1], l[2]) && !e.strikes(l[0], l[1], l[2])) {
+        return { element: e, local: l, index: hint.index };
+      }
+    }
+
     let fallback = null;
     for (let i = 0; i < this.elements.length; i++) {
       const e = this.elements[i];
       const l = toLocal(e.frame, g);
       if (!e.contains(l[0], l[1], l[2])) continue;
-      if (!e.strikes(l[0], l[1], l[2])) return { element: e, local: l, index: i };
+      if (!e.strikes(l[0], l[1], l[2])) {
+        this.#hint = { element: e, index: i };
+        return { element: e, local: l, index: i };
+      }
       const reach = Math.hypot(l[0], l[1]) <= e.outerRadius * CLAIM_MARGIN;
       if (reach && !fallback) fallback = { element: e, local: l, index: i };
     }

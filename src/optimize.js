@@ -82,6 +82,9 @@ export const TUNABLE = {
  */
 const SEED_SPAN = 3;
 
+/** The step `scoreBeamline` flies at when the caller names none. */
+const DEFAULT_SCAN_CFL = 0.05;
+
 /**
  * The knobs available on a beamline, with the range each may be searched over.
  *
@@ -299,14 +302,35 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     refine: refineSamples = 7,
     levels = 3,
     polish = true,
+    scanSpeed = 4,
     flight = {},
     onProgress,
     shouldStop,
   } = options;
 
+  /*
+    The scan flies at a coarser time step than the answer is finally judged at.
+
+    Its job is to RANK settings, not to measure one, and ranking survives a
+    much coarser integration than measuring does. Measured on a lens-and-
+    deflector column over a sweep of lens voltages: at two, four and eight
+    times the default step the order of the settings is unchanged and the
+    scores agree to four decimal places, while a flight drops from 70 ms to
+    36, 17 and 8.
+
+    The setting the scan chooses is then re-scored at full fidelity before
+    anything is reported or refined, so the coarse step never reaches the
+    answer - only the search path to it.
+
+    Fewer IONS would also be cheaper and is not done: the same sweep reorders
+    when the beam is thinned to five, because the tie-break is a mean over
+    whichever ions are present and a different sample means a different mean.
+  */
+  const scanFlight = { ...flight, cfl: (flight.cfl ?? DEFAULT_SCAN_CFL) * scanSpeed };
+
   const start = readKnobs(beamline, knobs);
   let best = readKnobs(beamline, knobs);
-  let bestResult = scoreBeamline(beamline, makeIons, flight);
+  let bestResult = scoreBeamline(beamline, makeIons, scanFlight);
   let evaluations = 1;
   let cancelled = false;
 
@@ -325,7 +349,7 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   if (knobs.some((k) => k.seed != null)) {
     const seeded = knobs.map((k, i) => (k.seed != null ? snap(k, k.seed) : start[i]));
     writeKnobs(beamline, knobs, seeded);
-    const result = scoreBeamline(beamline, makeIons, flight);
+    const result = scoreBeamline(beamline, makeIons, scanFlight);
     evaluations++;
     if (result.score > bestResult.score) {
       bestResult = result;
@@ -354,11 +378,28 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     });
   };
 
+  /*
+    Settings already flown.
+
+    Coordinate descent revisits the same point often: every narrowing level
+    re-samples its own bracket centre, and a second pass re-walks ranges the
+    first pass already covered. The flight is deterministic - the same ions
+    through the same fields - so the answer is too, and re-flying it is pure
+    waste. Keyed on the whole knob vector, because that is what the score
+    depends on.
+  */
+  const flown = new Map();
+
   /** Try one value on one knob, keeping it only if it scores better. */
   const trial = (knob, ki, value) => {
     applyKnob(beamline, knob, value);
-    const result = scoreBeamline(beamline, makeIons, flight);
-    evaluations++;
+    const key = readKnobs(beamline, knobs).join(',');
+    let result = flown.get(key);
+    if (!result) {
+      result = scoreBeamline(beamline, makeIons, scanFlight);
+      evaluations++;
+      flown.set(key, result);
+    }
     if (result.score > bestResult.score) {
       bestResult = result;
       best = readKnobs(beamline, knobs);
@@ -425,6 +466,14 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
   }
 
   writeKnobs(beamline, knobs, best);
+
+  // Back to full fidelity. Everything above ranked settings against each other
+  // at a coarse step; what gets reported, and what the refinement works from,
+  // is measured at the step the caller asked for.
+  if (scanSpeed !== 1) {
+    bestResult = scoreBeamline(beamline, makeIons, flight);
+    evaluations++;
+  }
 
   /*
     Second stage: once the beam is through, tighten it.
