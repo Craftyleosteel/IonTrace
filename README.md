@@ -28,7 +28,7 @@ and fly ions through the result:
 | **Aperture plate** | A charged plate with a hole. Not a passive opening — the equipotentials bulge through it, so it acts as a lens. |
 | **Einzel lens** | Three coaxial cylinders, outer two grounded. Does no net work on a transmitted ion, and focuses for either polarity. |
 | **Quadrupole** | Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both. |
-| **Quadrupole deflector** | Four curved electrodes in a grounded box, at $\pm V$ on the diagonals, turning the beam 90°. Not a sector: the field is a quadrupole *in* the bend plane, so the two axes couple and the path is not an arc. |
+| **Quadrupole deflector** | Four curved electrodes in a grounded box, at $\pm V$ on the diagonals, turning the beam 90°. Not a sector: the field is a quadrupole *in* the bend plane, so the two axes couple and the path is not an arc. Rolls to any angle, so the column can turn left, down, or anywhere between. |
 
 Elements carry their own local field solve, so **only the element you change
 re-solves**, and voltages never re-solve at all.
@@ -38,6 +38,14 @@ is only a multiplier on a solved field, searching a few hundred combinations
 costs a few hundred beam flights and no solver time — so the tuner can hunt for
 the settings that transmit the most beam while you watch. Tune one element from
 its own panel, or the whole column from the toolbar.
+
+Elements arrive **already set for the ion in the source** — a lens at $-6\,T/q$,
+a deflector at its matched voltage, a filter at a Mathieu $q$ of 0.38 — so
+placing one and pressing Fly does something. All three follow the beam, and two
+of them flip polarity for a negative ion; see
+[PHYSICS.md §10](docs/PHYSICS.md). Every value is **typed rather than dragged**,
+because a deflector's voltage spans four orders of magnitude across the beams
+this handles and no slider serves both ends of that.
 
 ## What it computes
 
@@ -144,6 +152,8 @@ output:
 | Quadrupole | closed-form $(x^2-y^2)/r_0^2$ potential; four-fold symmetry; Mathieu $a$, $q$ and their scalings; stable ion transmits and unstable one is lost |
 | Quadrupole deflector | solved potential is bilinear $\phi \propto XZ$; matched voltage derived from $\cot s = \tanh s$ and confirmed by integrating the coupled equations; measured transmission window |
 | Voltage tuner | recovers a working deflector voltage from zero, and lands within 15 % of the independently derived matched value |
+| Starting values | every element type transmits when placed, for ions from 4 u at 10 eV to 1000 u at 2 keV and for both polarities; `amplitudeForQ` inverts the Mathieu relation |
+| Folded columns | a column bent through two right angles transmits; no branch of it claims another's ions; the beam is measured transversely to the axis it is actually on |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for
@@ -161,7 +171,7 @@ they found, including the parts that are still wrong.
 
 ## Known limitations
 
-Read [docs/PHYSICS.md §10](docs/PHYSICS.md) before trusting a number. The
+Read [docs/PHYSICS.md §11](docs/PHYSICS.md) before trusting a number. The
 headline ones:
 
 - **Transmission is systematically pessimistic.** Electrode strikes resolve to

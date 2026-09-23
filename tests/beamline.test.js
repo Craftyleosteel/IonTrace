@@ -13,8 +13,19 @@
 import { describe, it, assert, assertClose, assertRelClose } from './harness.js';
 
 import { Beamline } from '../src/beamline.js';
-import { createElement, ELEMENT_TYPES, needsRebuild } from '../src/elements/index.js';
-import { createQuadrupole, MATHIEU_Q_LIMIT } from '../src/elements/quadrupole.js';
+import {
+  createElement,
+  ELEMENT_TYPES,
+  needsRebuild,
+  startingParams,
+  fieldRange,
+} from '../src/elements/index.js';
+import {
+  createQuadrupole,
+  MATHIEU_Q_LIMIT,
+  MATHIEU_Q_WORKING,
+  amplitudeForQ,
+} from '../src/elements/quadrupole.js';
 import { createDrift } from '../src/elements/drift.js';
 import {
   createBender,
@@ -195,7 +206,14 @@ describe('Quadrupole field', () => {
   });
 
   it('reports a shortest period only when the RF is on', () => {
-    assertRelClose(quad.shortestPeriod, 1e-6, 1e-12, '1 MHz period');
+    // Stated from the element's own frequency rather than a literal, so this
+    // keeps testing the relation if the default frequency ever moves again.
+    assertRelClose(
+      quad.shortestPeriod,
+      1 / (quad.params.frequency * 1e6),
+      1e-12,
+      'one RF period'
+    );
     const dc = createQuadrupole({ gridStep: 0.5, rfAmplitude: 0 });
     assert(dc.shortestPeriod === null, 'a DC quadrupole has no period to resolve');
   });
@@ -229,7 +247,9 @@ describe('Quadrupole field', () => {
     assertRelClose(quad.mathieu(200, 1).q, base / 2, 1e-12, 'q ~ 1/m');
     assertRelClose(quad.mathieu(100, 2).q, base * 2, 1e-12, 'q ~ charge');
 
-    const faster = createQuadrupole({ gridStep: 0.5, frequency: 2 });
+    // Twice the frequency of whatever this one runs at, so the factor of four
+    // is the physics and not an assumption about the default.
+    const faster = createQuadrupole({ gridStep: 0.5, frequency: quad.params.frequency * 2 });
     assertRelClose(
       faster.mathieu(100, 1).q,
       quad.mathieu(100, 1).q / 4,
@@ -868,6 +888,39 @@ describe('Quadrupole deflector', () => {
     assert(tall.usesVerticalPlane, 'a vertical bend leaves it');
   });
 
+  it('bends into any plane, not just the four right angles', () => {
+    // The roll is a rotation about the beam applied when the field is read,
+    // so an arbitrary angle is no harder than a quarter turn. The plane the
+    // beam ends up in must be exactly the plane asked for.
+    for (const deg of [0, 30, 45, 90, 135, 180, 270, -45]) {
+      const bl = new Beamline([
+        createElement('drift', { length: 8, bore: 6 }),
+        createElement('bender', { ...PARAMS, bendPlane: deg }),
+      ]);
+      const d = forwardOf(bl.exitFrame);
+      // Azimuth of the exit direction in the transverse plane, measured the
+      // same way the roll is.
+      const azimuth = (Math.atan2(-d[1], -d[0]) * 180) / Math.PI;
+      // Compared modulo a full turn: +180 and -180 are the same plane.
+      const off = ((((azimuth - deg) % 360) + 540) % 360) - 180;
+      assertClose(off, 0, 1e-9, `a ${deg} degree roll bends into that plane`);
+      assertClose(d[2], 0, 1e-9, 'and still turns through a right angle');
+    }
+  });
+
+  it('transmits a matched ion at a roll no multiple of ninety', () => {
+    // The plane being right is not enough; the beam has to get through it.
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    for (const deg of [30, 45, 137]) {
+      const { stop } = flyIon(
+        column({ bendPlane: deg, voltage: V }),
+        makeIon({ mass: 100, charge: 1, energy: ENERGY }),
+        { cfl: 0.05 }
+      );
+      assert(stop === 'exited', `a ${deg} degree roll should transmit, got ${stop}`);
+    }
+  });
+
   it('refuses a geometry with no electrode left', () => {
     let threw = false;
     try {
@@ -876,6 +929,141 @@ describe('Quadrupole deflector', () => {
       threw = true;
     }
     assert(threw, 'a 45 degree gap leaves nothing to hold a voltage');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* starting values                                                     */
+/* ------------------------------------------------------------------ */
+
+describe('Elements as placed from the toolbar', () => {
+  // The ions a user is plausibly simulating, including a negative one and a
+  // doubly charged one - the two cases a voltage written for "an ion" gets
+  // wrong.
+  const IONS = [
+    { mass: 4, charge: 1, energy: 10 },
+    { mass: 100, charge: 1, energy: 50 },
+    { mass: 100, charge: 2, energy: 500 },
+    { mass: 1000, charge: 1, energy: 2000 },
+    { mass: 100, charge: -1, energy: 50 },
+  ];
+
+  const describeIon = (i) => `${i.mass} u, ${i.charge > 0 ? '+' : ''}${i.charge}, ${i.energy} eV`;
+
+  /** One element between two drifts, exactly as placing it from the toolbar. */
+  function alone(type, ion) {
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement(type, startingParams(type, ion)),
+      createElement('drift', { length: 25, bore: 5 }),
+    ]);
+    const { tracks } = flyBeam(bl, discBeam({ ...ion, count: 9, radius: 1.0 }), {
+      cfl: 0.05,
+      maxSteps: 600000,
+    });
+    return tracks.filter((t) => t.stop === 'exited').length;
+  }
+
+  it('transmits the beam for every element type', () => {
+    // The bug this guards against is not subtle and was shipped: a deflector
+    // placed from the toolbar arrived at zero volts, so it did not deflect at
+    // all - the beam flew straight on into the far wall of the box. An einzel
+    // arrived at a voltage forty times too strong for the default beam, and a
+    // quadrupole at a Mathieu q of 1.83, outside the first stability region
+    // entirely. Three of the five elements did nothing useful when placed.
+    const ion = { mass: 100, charge: 1, energy: 50 };
+    for (const type of Object.keys(ELEMENT_TYPES)) {
+      const n = alone(type, ion);
+      assert(n >= 7, `a ${type} placed from the toolbar transmitted only ${n} of 9`);
+    }
+  });
+
+  it('follows the ion in the source, not the one the defaults were written for', () => {
+    // Every starting value that is set at all is set from the beam. A fixed
+    // number cannot be right for both a 4 u ion at 10 eV and a 1000 u ion at
+    // 2 keV, and the scalings that make it right are physics: a lens depends
+    // only on T/q, a deflector on T/q and its own proportions, a filter on
+    // mass through the Mathieu q.
+    for (const ion of IONS) {
+      for (const type of ['einzel', 'bender', 'quadrupole']) {
+        const n = alone(type, ion);
+        assert(n === 9, `${type} lost ${9 - n} of 9 for ${describeIon(ion)}`);
+      }
+    }
+  });
+
+  it('flips polarity for a negative ion', () => {
+    // The case a magnitude gets wrong. A negative ion meeting the centre
+    // electrode of a lens set for a positive one is decelerated rather than
+    // accelerated, and cannot climb the barrier; a deflector at the wrong
+    // polarity steers it into the wall instead of round the corner.
+    const pos = { mass: 100, charge: 1, energy: 50 };
+    const neg = { mass: 100, charge: -1, energy: 50 };
+    for (const type of ['einzel', 'bender']) {
+      const a = startingParams(type, pos).voltage;
+      const b = startingParams(type, neg).voltage;
+      assertRelClose(b, -a, 1e-12, `${type} reverses for a negative ion`);
+    }
+    // The RF filter does not: it confines either sign, because the drive
+    // reverses every half cycle regardless.
+    assertRelClose(
+      startingParams('quadrupole', neg).rfAmplitude,
+      startingParams('quadrupole', pos).rfAmplitude,
+      1e-12,
+      'an RF filter has no polarity to get wrong'
+    );
+  });
+
+  it('puts a placed quadrupole at a usable Mathieu q', () => {
+    for (const ion of IONS) {
+      const q = createElement('quadrupole', startingParams('quadrupole', ion));
+      const m = q.mathieu(ion.mass, Math.abs(ion.charge));
+      // One per cent, not exact: the starting amplitude is snapped to the
+      // step its own control will show, so that the box does not read one
+      // number while the element holds another. Half a step is a few tenths
+      // of a per cent of the value, and q follows it.
+      assertRelClose(m.q, MATHIEU_Q_WORKING, 0.01, `q for ${describeIon(ion)}`);
+      assert(m.q < MATHIEU_Q_LIMIT, 'and inside the first stability region');
+    }
+  });
+
+  it('inverts the Mathieu relation exactly', () => {
+    // amplitudeForQ is the inverse of mathieu, and a round trip is the only
+    // check that cannot be fooled by both being wrong the same way... so it
+    // is checked against the closed form too.
+    const params = { gridStep: 0.5, fieldRadius: 4, frequency: 2 };
+    const V = amplitudeForQ(params, 100, 1, 0.5);
+    const q = createElement('quadrupole', { ...params, rfAmplitude: V });
+    assertRelClose(q.mathieu(100, 1).q, 0.5, 1e-12, 'round trip');
+
+    // q = 4 z e V / (m r0^2 Omega^2), written out independently.
+    const omega = 2 * Math.PI * 2e6;
+    const expected =
+      (0.5 * 100 * ATOMIC_MASS_UNIT * mmToM(4) ** 2 * omega ** 2) / (4 * ELEMENTARY_CHARGE);
+    assertRelClose(V, expected, 1e-12, 'closed form');
+  });
+
+  it('keeps a scaled control inside the parameter’s hard limits', () => {
+    // The slider may be narrowed to where the answer is, but it can never
+    // offer a setting the parameter does not allow - or the UI would propose
+    // voltages the element rejects.
+    const field = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
+    for (const energy of [1, 50, 1000, 500000]) {
+      const ion = { mass: 100, charge: 1, energy };
+      const r = fieldRange(field, { ...ELEMENT_TYPES.bender.defaults }, ion);
+      assert(r.min >= field.min && r.max <= field.max, `${energy} eV stays within the limits`);
+      assert(r.step > 0, 'and has a usable step');
+    }
+  });
+
+  it('widens a scaled control to contain the value already set', () => {
+    // Otherwise changing the beam energy would re-render the panel with a
+    // range that excludes the current voltage, and the browser would clamp
+    // it - silently moving a setting the user chose deliberately.
+    const field = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
+    const ion = { mass: 100, charge: 1, energy: 50 }; // matched near 40 V
+    const r = fieldRange(field, { ...ELEMENT_TYPES.bender.defaults, voltage: 5000 }, ion);
+    assert(r.max >= 5000, `range should reach the 5000 V already set, stops at ${r.max}`);
   });
 });
 
@@ -1102,6 +1290,80 @@ describe('Beamline composition', () => {
     assertRelClose(bl.elements[2].zStart, mmToM(35), 1e-12, 'third starts where second ends');
   });
 
+  it('does not let one branch of a folded column claim another', () => {
+    // Elements answer `contains` on their axial extent alone, so that an ion
+    // inside an element's length but outside its bore is still that element's
+    // business and is reported as hitting its wall. In a straight column that
+    // is unambiguous. Fold the column through two right angles and the last
+    // drift runs back alongside the first, inside its axial range but eighty
+    // millimetres off its axis - and every ion entering the last drift was
+    // being reported as striking the wall of the first.
+    const V = matchedVoltage({ apertureRadius: 19 }, 50, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V }),
+      createElement('drift', { length: 30, bore: 5 }),
+      createElement('bender', { voltage: V }),
+      createElement('drift', { length: 30, bore: 5 }),
+    ]);
+    assertClose(forwardOf(bl.exitFrame)[2], -1, 1e-9, 'the column folds right back');
+
+    // A point on the axis of the LAST drift, well inside it.
+    const last = bl.elements[4];
+    const g = toGlobal(last.frame, [0, 0, mmToM(15)]);
+    const hit = bl.locate(g);
+    assert(hit, 'a point on the last drift axis belongs to some element');
+    assert(hit.index === 4, `expected the last drift, got element ${hit.index}`);
+    assert(!bl.strikes(g[0], g[1], g[2]), 'and it is free space, not a wall');
+
+    // And the beam actually survives the second bend.
+    const { tracks } = flyBeam(bl, discBeam({ mass: 100, charge: 1, energy: 50, count: 9, radius: 1 }), {
+      cfl: 0.05,
+      maxSteps: 600000,
+    });
+    const n = tracks.filter((t) => t.stop === 'exited').length;
+    assert(n >= 5, `a double bend should transmit most of the beam, got ${n} of 9`);
+  });
+
+  it('still blames the right element for a genuine wall strike', () => {
+    // The transverse bound on that claim must not go so far as to stop an ion
+    // that really does hit a wall being attributed to it.
+    const bl = new Beamline([
+      createElement('drift', { length: 20, bore: 5 }),
+      createElement('drift', { length: 20, bore: 5 }),
+    ]);
+    const g = [mmToM(6), 0, mmToM(10)]; // inside the first, outside its bore
+    const hit = bl.locate(g);
+    assert(hit?.index === 0, 'the wall it hit is the first drift');
+    assert(bl.strikes(g[0], g[1], g[2]), 'and it counts as a strike');
+    // Far outside every element, though, belongs to nothing.
+    assert(bl.locate([mmToM(500), 0, mmToM(10)]) === null, 'half a metre out is not a strike');
+  });
+
+  it('measures the beam transversely to the axis it is on', () => {
+    // What the cross-section profile depends on. After a right-hand bend the
+    // beam runs along -x, so global x is the direction of travel and global z
+    // is transverse; an ion on the axis is far from the origin in x but zero
+    // from its own axis. Reading the global x and y instead would draw a
+    // profile that smears with distance flown.
+    const V = matchedVoltage({ apertureRadius: 19 }, 50, 1);
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: V }),
+      createElement('drift', { length: 30, bore: 5 }),
+    ]);
+    const after = bl.elements[2];
+    const g = toGlobal(after.frame, [mmToM(1), mmToM(0.5), mmToM(20)]);
+
+    const local = toLocal(bl.locate(g).element.frame, g);
+    assertClose(mToMm(Math.hypot(local[0], local[1])), Math.hypot(1, 0.5), 1e-9, 'offset from its own axis');
+    // Measured from the global axis instead it would be tens of millimetres.
+    assert(
+      mToMm(Math.hypot(g[0], g[1])) > 20,
+      'while the global offset is large, which is the thing not to plot'
+    );
+  });
+
   it('finds the right element at every point, including the joins', () => {
     const bl = new Beamline([
       createElement('drift', { length: 10 }),
@@ -1212,12 +1474,15 @@ describe('Beamline composition', () => {
   it('takes its step size from the most demanding element', () => {
     // A coarse drift must not let an ion skip through a finely resolved
     // quadrupole beside it.
-    const bl = new Beamline([
-      createDrift({ length: 20 }),
-      createElement('quadrupole', { gridStep: 0.2 }),
-    ]);
+    const quad = createElement('quadrupole', { gridStep: 0.2 });
+    const bl = new Beamline([createDrift({ length: 20 }), quad]);
     assertRelClose(bl.lengthScale, mmToM(0.2), 1e-12, 'finest element wins');
-    assertRelClose(bl.shortestPeriod, 1e-6, 1e-12, 'RF period is exposed to the integrator');
+    assertRelClose(
+      bl.shortestPeriod,
+      1 / (quad.params.frequency * 1e6),
+      1e-12,
+      'RF period is exposed to the integrator'
+    );
   });
 
   it('reports no field outside the column', () => {

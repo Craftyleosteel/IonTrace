@@ -43,6 +43,17 @@ import {
   forwardOf,
 } from './frames.js';
 
+/**
+ * How far past its own outer radius an element may still claim a strike.
+ *
+ * Enough to cover a step that overshoots the wall, and enough for the corners
+ * of a box whose diagonal exceeds its stated radius - a deflector's outer
+ * radius is its half-width, and its corners sit a factor of root two further
+ * out. Not enough to reach a neighbouring branch of a folded column, which is
+ * the whole point.
+ */
+const CLAIM_MARGIN = 1.6;
+
 export class Beamline {
   constructor(elements = []) {
     this.elements = [];
@@ -133,13 +144,44 @@ export class Beamline {
     return null;
   }
 
+  /**
+   * Which element a global point belongs to.
+   *
+   * Elements answer `contains` on their AXIAL extent alone: a point inside an
+   * element's length but outside its bore is still that element's business,
+   * because it is about to be a strike on that element's wall rather than an
+   * ion that has wandered out of the column. That is right, and it is why
+   * this cannot simply take the first element that says yes.
+   *
+   * In a straight column it could, because axial position identifies an
+   * element uniquely. Once the path bends it does not. Fold a column through
+   * two right angles and its last drift runs back alongside its first, inside
+   * the first one's axial range but eighty millimetres off its axis - and
+   * every ion entering the last drift was being reported as striking the wall
+   * of the first. Nothing about that looks like a lookup failure from the
+   * outside: the beam simply stops, at a plausible place, for a plausible
+   * reason.
+   *
+   * So an element claims a point only if the point is in its free space.
+   * Whichever element holds it in vacuum wins. Failing that it may still be
+   * claimed as a strike, but only within reach of the element's own hardware:
+   * an ion eighty-seven millimetres off the axis of a lens whose housing is
+   * fourteen millimetres across did not hit that lens, and saying so killed
+   * beams that had already flown the whole column and reached the exit.
+   * Beyond every element's envelope the point belongs to no element, which is
+   * what lets `classify` call it an exit rather than a crash.
+   */
   locate(g) {
+    let fallback = null;
     for (let i = 0; i < this.elements.length; i++) {
       const e = this.elements[i];
       const l = toLocal(e.frame, g);
-      if (e.contains(l[0], l[1], l[2])) return { element: e, local: l, index: i };
+      if (!e.contains(l[0], l[1], l[2])) continue;
+      if (!e.strikes(l[0], l[1], l[2])) return { element: e, local: l, index: i };
+      const reach = Math.hypot(l[0], l[1]) <= e.outerRadius * CLAIM_MARGIN;
+      if (reach && !fallback) fallback = { element: e, local: l, index: i };
     }
-    return null;
+    return fallback;
   }
 
   /* ---------------------------------------------------------------- */

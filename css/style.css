@@ -370,6 +370,33 @@ body {
   text-align: right;
 }
 
+/*
+  Typed fields, which is now every quantity in the panel.
+
+  These used to be sliders. A slider is a poor control for a voltage: the
+  deflector's range has to reach tens of kilovolts because real ones run
+  there, and on a range that wide a forty-volt setting is less than a pixel
+  from zero - unreachable by dragging, however carefully. Typing the number is
+  exact at every scale, and the stepper arrows still nudge by an amount chosen
+  for the beam in front of the element.
+*/
+.field-typed input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Keep the steppers visible rather than revealing them on hover: they are now
+   the only way to nudge a value by a known amount. */
+.field-typed input[type="number"]::-webkit-inner-spin-button,
+.field-typed input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+/* The one field that still carries a readout sits beside it rather than
+   above it. */
+.field-paired input[type="number"] {
+  grid-column: 1;
+}
+
 input[type="range"] {
   width: 100%;
   accent-color: var(--accent);

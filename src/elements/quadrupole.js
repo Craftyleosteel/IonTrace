@@ -67,10 +67,15 @@ import { mmToM, ELEMENTARY_CHARGE, ATOMIC_MASS_UNIT } from '../constants.js';
 export const QUADRUPOLE_DEFAULTS = {
   fieldRadius: 4, // mm, r0 - axis to rod surface
   rodRadius: 4.6, // mm, 1.1487 x r0 is the classic round-rod optimum
-  length: 60, // mm, rod length
+  // 150 mm at 2 MHz gives a 100 u, 50 eV ion about thirty RF cycles in the
+  // rods. That number matters more than it looks: Mathieu stability is an
+  // asymptotic property, and an ion crossing in a handful of cycles can be
+  // thrown out whatever its (a, q) says. At the previous 60 mm and 1 MHz it
+  // saw six, and nothing was transmitted.
+  length: 150, // mm, rod length
   dcVoltage: 0, // V, U
-  rfAmplitude: 300, // V, V (zero-to-peak)
-  frequency: 1.0, // MHz
+  rfAmplitude: 250, // V, V (zero-to-peak) - see amplitudeForQ
+  frequency: 2.0, // MHz
   phase: 0, // degrees
   housingRadius: 12, // mm
   gridStep: 0.15, // mm, in the transverse plane
@@ -258,3 +263,36 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
 
 /** High-mass cut-off of the first Mathieu stability region at a = 0. */
 export const MATHIEU_Q_LIMIT = 0.90803;
+
+/**
+ * A working point well inside the first stability region.
+ *
+ * Not the apex. The apex is where a filter is operated when resolution is the
+ * goal, and it is precisely where transmission is most fragile; 0.38 is
+ * comfortably confining and comfortably clear of the q = 0.908 cut-off.
+ * Measured on a 150 mm, 2 MHz filter with a 100 u, 50 eV beam: 9 of 9 at
+ * q = 0.38 and at 0.23, 3 of 9 at 0.46, nothing at 1.83.
+ */
+export const MATHIEU_Q_WORKING = 0.38;
+
+/**
+ * The RF amplitude that puts a given ion at a given Mathieu q.
+ *
+ *     q = 4 z e V / (m r0^2 Omega^2)   =>   V = q m r0^2 Omega^2 / (4 z e)
+ *
+ * The inverse of `mathieu`, and the reason a quadrupole placed from the
+ * toolbar confines the ion in the source rather than whichever ion the
+ * defaults were written for. A filter's stability depends on mass, so a fixed
+ * default amplitude is stable only by coincidence: at the previous defaults a
+ * 100 u ion sat at q = 1.83, outside the first region entirely, and every ion
+ * was lost.
+ */
+export function amplitudeForQ(params, massAmu, chargeStates = 1, q = MATHIEU_Q_WORKING) {
+  const p = { ...QUADRUPOLE_DEFAULTS, ...params };
+  const m = massAmu * ATOMIC_MASS_UNIT;
+  const z = Math.abs(chargeStates) * ELEMENTARY_CHARGE;
+  const r0 = mmToM(p.fieldRadius);
+  const w = 2 * Math.PI * p.frequency * 1e6;
+  if (z === 0) return 0;
+  return (q * m * r0 * r0 * w * w) / (4 * z);
+}

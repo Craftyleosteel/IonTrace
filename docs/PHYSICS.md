@@ -747,7 +747,25 @@ Softening the edge with a longitudinal envelope $g(z)$ would be worse, not
 better. $g(z)(x^2-y^2)$ does not satisfy Laplace's equation unless $g'' = 0$,
 so it would trade a known approximation for a field that is not a field.
 
-### 8.7 Energy is not conserved, and should not be
+### 8.7 Stability is asymptotic, and a short filter is not stable
+
+Mathieu stability says where the motion stays bounded **for ever**. It says
+nothing about an ion that crosses the rods in a handful of RF periods, and such
+an ion can be thrown out with a perfectly respectable $(a, q)$.
+
+This is not a fine point. Measured: a 70 mm filter at 1.2 MHz gives a 100 u,
+50 eV ion **8.6 cycles** and loses eight ions in nine, with nothing in the
+stability numbers to show for it. The same filter at 150 mm and 2 MHz gives
+30.5 cycles and transmits all nine. The cycle count,
+
+$$N = \frac{L}{v}\,f = \frac{L f}{\sqrt{2T/m}},$$
+
+is therefore shown in the interface beside $a$ and $q$, and flagged below
+about 15. It depends on the ion's **energy**, which $a$ and $q$ do not — two
+beams with identical Mathieu parameters can behave completely differently if
+one crosses in five cycles and the other in fifty.
+
+### 8.8 Energy is not conserved, and should not be
 
 With a time-dependent field, $\tfrac{1}{2}mv^2 + q\phi$ is **not** a constant
 of the motion: the RF does work on the ion, which is how a quadrupole confines
@@ -853,7 +871,50 @@ here — this element and the mass filter both solve in a plane of their own, so
 for them the grid's $z$ ends are ordinary walls, and both close them
 explicitly.
 
-### 9.5 Tuning
+### 9.5 Rolling it into any plane
+
+The bend plane is a roll about the beam, applied when the field is evaluated
+rather than baked into the solve, so one solved deflector serves every
+orientation and an arbitrary angle costs exactly what a quarter turn costs.
+0° turns the beam left, 90° down, 180° right, 270° up, and anything between
+bends into the plane at that azimuth — verified to nine figures against the
+exit direction, with full transmission at 30°, 45° and 137°.
+
+The roll is **conjugated**: the transverse axes are rotated into the bend
+plane and back out again. Without that, a vertical deflector would also rotate
+"up" into "sideways" for every element downstream, which is not what bending a
+beamline does to the hardware bolted after it.
+
+### 9.6 Two things a bend breaks that a straight column hides
+
+**Element lookup.** Elements answer `contains` on their *axial* extent alone,
+deliberately: an ion inside an element's length but outside its bore is still
+that element's business, and should be reported as striking its wall rather
+than as having wandered out of the column. In a straight line that is
+unambiguous, because axial position identifies an element uniquely. It is not
+once the path folds. A column bent through two right angles runs its last
+drift back alongside its first, inside the first one's axial range but eighty
+millimetres off its axis — and every ion entering the last drift was reported
+as striking the wall of the first. The symptom is indistinguishable from
+physics: the beam stops, at a plausible place, for a plausible reason.
+
+So an element claims a point only if the point is in its **free space**.
+Whichever element holds it in vacuum wins. Failing that it may still be
+claimed as a strike, but only within 1.6 times its own outer radius — enough
+to cover a step that overshoots a wall and the corners of a box whose diagonal
+exceeds its stated radius, not enough to reach another branch of a folded
+column. Beyond every element's envelope the point belongs to nothing, which is
+what lets an ion at the exit plane be called an exit rather than a crash.
+
+**The transverse plane.** A beam profile means the offsets perpendicular to
+the direction of travel. Global $x$ and $y$ are those only while the beam runs
+along $z$: after a right-hand bend the beam travels along $-x$, so global $x$
+is now *along* the beam and global $z$ is transverse. A profile plotted in
+global $(x, y)$ smears across the screen in proportion to distance flown. Each
+ion is therefore measured in the frame of the element it is passing through,
+and an ion past the end against the exit frame.
+
+### 9.7 Tuning
 
 Because every electrode voltage is a multiplier on a stored unit solution
 (§3.2), a search over voltages costs beam flights and no solver time at all.
@@ -902,7 +963,51 @@ belong behind a button labelled "best transmission".
 
 ---
 
-## 10. Known limitations of this version
+## 10. Starting values
+
+An element placed from the toolbar arrives set for **the ion currently in the
+source**, not for whichever ion the defaults happened to be written for. This
+is a usability decision with a physics justification, and getting it wrong is
+not a cosmetic failure: before it, three of the five element types did nothing
+useful when placed. A deflector arrived at zero volts — so it did not deflect
+at all, and the beam flew straight into the far wall of its box. An einzel
+arrived forty times too strong for the default beam and transmitted three ions
+in nine. A quadrupole arrived at $q = 1.83$, outside the first stability region
+entirely, and transmitted none.
+
+Each starting value comes from a closed form, so it follows the beam:
+
+| Element | Set from | Why that quantity |
+|---|---|---|
+| Einzel lens | $V = -6\,T/q$ | Electrostatic optics depends only on $E/q$, so the lens is fixed by the centre potential as a multiple of $T/q$ and by nothing else — measured identical at 50 eV and 500 eV. Everything from $-1$ to $-10$ transmits fully; over-focusing sets in near $-20$. |
+| Quadrupole deflector | $V_0 = 1.8556\,(T/q)(r_0/a)^2$ | §9.2. |
+| RF quadrupole | $V$ giving $q = 0.38$ | Inverting $q = 4zeV/(mr_0^2\Omega^2)$. Not the apex of the stability region, which is where resolution is best and transmission most fragile — 0.38 is confining and well clear of the $q = 0.908$ cut-off. |
+
+Two of these are **signed by the charge**, and that is the case a magnitude
+gets wrong. A negative ion meeting the centre electrode of a lens set for a
+positive one is decelerated rather than accelerated, cannot climb the barrier,
+and is reflected; a deflector at the wrong polarity steers it into the wall
+instead of round the corner. An RF filter has no polarity to get wrong, because
+the drive reverses every half cycle regardless.
+
+Nothing here ever moves a value the user has set. Change the beam energy
+afterwards and every element stays exactly where it was, with the readout
+saying how far off it now is — which for a deflector *is* its energy
+selectivity, and worth seeing rather than hiding.
+
+### 10.1 Why the controls are typed, not dragged
+
+The same scaling argument decides the control. A deflector's voltage spans four
+orders of magnitude across the beams this simulator handles: 8 V for a 10 eV
+ion, 45 kV for a 27 keV one. A slider wide enough for the second puts the first
+inside a single pixel — on a ±60 kV range, one pixel is over 500 V. The number
+is typed instead, which is exact at every scale. The stepper arrows still nudge
+by an amount chosen for the beam in front of the element, taken from the same
+closed forms above.
+
+---
+
+## 11. Known limitations of this version
 
 **1. The lens does not converge at second order, and the reason is not
 staircasing.** Measured Richardson orders for `buildEinzelLens` at

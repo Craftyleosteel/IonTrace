@@ -15,12 +15,24 @@
  */
 
 import { Beamline } from './beamline.js';
-import { ELEMENT_TYPES, createElement, needsRebuild } from './elements/index.js';
+import {
+  ELEMENT_TYPES,
+  createElement,
+  needsRebuild,
+  fieldRange,
+  startingParams,
+} from './elements/index.js';
 import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
 import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
 import { tunableKnobs, optimizeVoltages, TUNABLE } from './optimize.js';
-import { joulesToEV, mToMm, mmToM } from './constants.js';
+import {
+  joulesToEV,
+  mToMm,
+  mmToM,
+  ELEMENTARY_CHARGE,
+  ATOMIC_MASS_UNIT,
+} from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
 import { toGlobal, toLocal, forwardOf } from './frames.js';
 
@@ -136,36 +148,35 @@ const readNumber = (input, fallback) => {
 /**
  * A starting column that shows what the thing does without any setup.
  *
- * The einzel is set where it matches the beam into the quadrupole's
- * acceptance rather than merely where it focuses. Measured with the shipped
- * disc beam: 2 of 9 ions survive at 0 V, 8 at -80 V, 1 at -150 V and 9 at
- * -300 V. Matching one element to the next is most of what building a column
- * is, and the answer is not monotonic in the lens voltage.
+ * A lens and a corner. The corner is the point: a column that turns is what
+ * distinguishes this from a ray diagram, and leaving it out of the first
+ * thing anyone sees hid the most interesting element behind a toolbar button.
+ *
+ * Chosen for how forgiving it is rather than how impressive. Measured with
+ * the shipped disc beam, it transmits all nine ions with the lens anywhere
+ * from -600 V to 0 and the deflector anywhere from 32 to 42 V, so the first
+ * thing a newcomer changes does not collapse it. A filter here instead would
+ * look better and behave far worse: with a quadrupole in the line the same
+ * beam swings between 0 and 6 of 9 over 50 V of lens, because the filter's
+ * acceptance is sharp and not monotonic. That is real, and worth meeting
+ * deliberately rather than on load.
  */
 function defaultBeamline() {
   return new Beamline([
     createElement('drift', { length: 12, bore: 5 }),
     createElement('einzel', {
       gridStep: 0.5,
-      voltage: -300,
+      voltage: -300, // six times T/q for the 50 eV beam in the source
       boreRadius: 5,
       housingRadius: 14,
       entryDrift: 15,
       exitDrift: 15,
     }),
     createElement('drift', { length: 14, bore: 5 }),
-    // 150 mm at 2 MHz gives a 50 eV ion about thirty RF cycles in the rods.
-    // That number matters more than it looks: stability is an asymptotic
-    // property of the Mathieu equation, and an ion that crosses in a handful
-    // of cycles can be thrown out whatever its (a, q) says. A shorter or
-    // faster-crossing quadrupole loses ions for that reason alone.
-    createElement('quadrupole', {
-      gridStep: 0.25,
-      length: 150,
-      rfAmplitude: 250,
-      frequency: 2,
-    }),
-    createElement('drift', { length: 25, bore: 5 }),
+    // Matched for a 100 u, 50 eV singly-charged ion: V0 = 1.8556 (T/q)(r0/a)^2
+    // is 39.8 V, and the solved field turns that through 89 degrees.
+    createElement('bender', { voltage: 40 }),
+    createElement('drift', { length: 30, bore: 5 }),
   ]);
 }
 
@@ -215,7 +226,9 @@ function addElement(type) {
   const after = selectedIndex();
   const index = after >= 0 ? after + 1 : beamline.elements.length;
   statusEl.classList.add('busy');
-  beamline.add(createElement(type), index);
+  // Matched to the beam that is in the source right now, so a deflector
+  // dropped in from the toolbar actually deflects.
+  beamline.add(createElement(type, startingParams(type, beamSpec())), index);
   statusEl.classList.remove('busy');
   selection = { kind: 'element', index };
   afterStructureChange();
@@ -573,21 +586,27 @@ function renderInspector() {
   }
 
   const spec = ELEMENT_TYPES[e.typeKey];
+  const ion = beamSpec();
   const rows = spec.fields
     .map((f) => {
       const value = e.params[f.key];
+      // Typed, not dragged. A deflector's voltage spans four orders of
+      // magnitude across the beams this simulator handles, and no slider
+      // serves both a forty-volt setting and a forty-kilovolt one - on a
+      // range wide enough for the second, the first is inside a pixel. The
+      // arrows still step by a sensible amount for the beam in front of it.
+      const r = fieldRange(f, e.params, ion);
       const instant = f.rebuild
         ? ''
         : '<span class="instant" title="No re-solve needed">fast</span>';
       return `
-        <label class="field">
+        <label class="field field-typed">
           <span class="field-label">
             ${escapeHtml(f.label)}${instant}
             <span class="unit">${escapeHtml(f.unit ?? '')}</span>
           </span>
-          <input type="range" data-param="${f.key}"
-                 min="${f.min}" max="${f.max}" step="${f.step}" value="${value}" />
-          <output data-out="${f.key}">${value}</output>
+          <input type="number" data-param="${f.key}" data-rebuild="${f.rebuild ? 1 : 0}"
+                 min="${f.min}" max="${f.max}" step="${r.step}" value="${value}" />
           ${f.help ? `<span class="field-help">${escapeHtml(f.help)}</span>` : ''}
         </label>`;
     })
@@ -650,17 +669,15 @@ function alignmentRows(e) {
       e.align.dx || e.align.dy ? 'open' : ''
     }>
       <summary>Alignment</summary>
-      <label class="field">
+      <label class="field field-typed">
         <span class="field-label">Offset x<span class="unit">mm</span></span>
-        <input type="range" data-align="dx" min="-3" max="3" step="0.05"
+        <input type="number" data-align="dx" min="-3" max="3" step="0.05"
                value="${mm(e.align.dx)}" />
-        <output data-alignout="dx">${mm(e.align.dx)}</output>
       </label>
-      <label class="field">
+      <label class="field field-typed">
         <span class="field-label">Offset y<span class="unit">mm</span></span>
-        <input type="range" data-align="dy" min="-3" max="3" step="0.05"
+        <input type="number" data-align="dy" min="-3" max="3" step="0.05"
                value="${mm(e.align.dy)}" />
-        <output data-alignout="dy">${mm(e.align.dy)}</output>
         <span class="field-help">
           Moves this element only. The ones after it stay on their own mounts,
           because each is bolted down independently.
@@ -708,12 +725,34 @@ function benderReadout(e) {
  * These, not the voltages, are what decide whether an ion is transmitted, so
  * they belong next to the controls that set them.
  */
+/**
+ * Below about this many RF cycles in the rods, stability stops meaning much.
+ *
+ * Mathieu stability is an asymptotic property of the equation: it says where
+ * the motion stays bounded for ever, not what happens to an ion that crosses
+ * in a handful of periods. Such an ion can be thrown out with a perfectly
+ * respectable (a, q). This project has been caught by it once already — a
+ * 70 mm filter at 1.2 MHz gave 8.6 cycles and lost eight ions in nine, with
+ * nothing in the stability numbers to show for it — so the cycle count is
+ * shown beside them rather than left to be inferred.
+ */
+const RF_CYCLES_MIN = 15;
+
 function quadrupoleReadout(e) {
   if (e.typeKey !== 'quadrupole') return '';
   const mass = readNumber(inputs.mass, 100);
   const charge = readNumber(inputs.charge, 1);
   const { a, q } = e.mathieu(mass, Math.abs(charge) || 1);
   const stable = Math.abs(q) < MATHIEU_Q_LIMIT && Math.abs(a) < 0.237;
+
+  // Cycles the ion sees crossing the rods, at its entrance speed.
+  const speed = Math.sqrt(
+    (2 * readNumber(inputs.energy, 50) * ELEMENTARY_CHARGE * (Math.abs(charge) || 1)) /
+      (mass * ATOMIC_MASS_UNIT)
+  );
+  const cycles = speed > 0 ? (e.length / speed) * e.params.frequency * 1e6 : 0;
+  const brief = cycles < RF_CYCLES_MIN;
+
   return `
     <div class="mathieu ${stable ? 'ok' : 'bad'}">
       <span>a = ${a.toFixed(4)}</span>
@@ -722,6 +761,15 @@ function quadrupoleReadout(e) {
         stable
           ? 'inside the first stability region'
           : `outside it — q limit is ${MATHIEU_Q_LIMIT}`
+      }</span>
+    </div>
+    <div class="mathieu ${brief ? 'bad' : 'ok'}">
+      <span>${cycles.toFixed(1)} RF cycles</span>
+      <span class="verdict">${
+        brief
+          ? 'too few to rely on — stability is asymptotic, and a short crossing ' +
+            'loses ions whatever (a, q) says. Lengthen the rods or raise the frequency.'
+          : 'long enough for the stability numbers above to mean something'
       }</span>
     </div>`;
 }
@@ -1502,12 +1550,35 @@ function drawScale(T, width, height) {
 }
 
 /**
+ * Where an ion sits in the transverse plane of the element it is passing
+ * through, which is what a profile means once the column can turn.
+ *
+ * Plotting the global x and y instead only works while the beam travels along
+ * z. After a right-hand bend the beam runs along -x, so global x is now the
+ * direction of travel and global z is transverse - a profile drawn in (x, y)
+ * shows the beam smeared across the screen in proportion to how far it has
+ * flown, which is not a beam profile at all.
+ *
+ * An ion past the end of the column is measured against the exit frame, the
+ * natural continuation of the last element's axis.
+ */
+function transverseAt(p) {
+  const g = [p.x, p.y ?? 0, p.z];
+  const hit = beamline.locate(g);
+  const l = toLocal(hit ? hit.element.frame : beamline.exitFrame, g);
+  return { x: l[0], y: l[1], element: hit?.element ?? null };
+}
+
+/**
  * Beam cross-section, looking down the axis.
  *
  * The main view is the x-z plane, which cannot show that the ions now move in
  * three dimensions. In a quadrupole they emphatically do: the field converges
  * in one transverse plane while diverging in the other, so a beam that looks
  * well behaved from the side can be being pulled into a line seen end-on.
+ *
+ * Every ion is drawn against the axis of the element it is in, so the profile
+ * keeps meaning what it says after the beam turns a corner.
  */
 function drawCrossSection() {
   const size = 132;
@@ -1522,8 +1593,31 @@ function drawCrossSection() {
   crossCtx.fillStyle = cssVar('--surface-1');
   crossCtx.fillRect(0, 0, size, size);
 
-  // Framed on the widest bore in the line, so the scale does not jump about.
-  const limit = Math.max(...beamline.elements.map((e) => e.bore)) * 1.15;
+  // Each ion against the axis of the element it is in. Computed once: locating
+  // a point is a walk over the column, and this runs every frame.
+  const spots = [];
+  for (const traj of trajectories) {
+    const p = traj.active ? traj.state : traj.points[traj.points.length - 1];
+    if (!p) continue;
+    spots.push({ ...transverseAt(p), live: Boolean(traj.active) });
+  }
+
+  // The aperture the leading ion is inside. Found by locating it in space
+  // rather than by its z, which stops being a path coordinate once the column
+  // bends.
+  const leader = spots.find((s) => s.live) ?? spots[0];
+  const elementHere = leader?.element ?? null;
+
+  /*
+    Framed on the aperture the beam is in, not on the widest in the line. A
+    deflector's bore is nineteen millimetres against a drift's five, so a
+    single fixed scale would draw the beam as a dot for most of its flight.
+    The frame never crops the beam, so an ion outside its aperture is still
+    visible - that is exactly the moment worth seeing.
+  */
+  const reach = Math.max(0, ...spots.map((s) => Math.hypot(s.x, s.y)));
+  const bore = elementHere?.bore ?? Math.max(...beamline.elements.map((e) => e.bore));
+  const limit = Math.max(bore, reach) * 1.15;
   const c = size / 2;
   const k = (size / 2 - 8) / limit;
 
@@ -1537,10 +1631,6 @@ function drawCrossSection() {
   crossCtx.lineTo(c, size - 8);
   crossCtx.stroke();
 
-  // The aperture the ions are currently inside.
-  const here = trajectories.find((t) => t.active) ?? trajectories[0];
-  const zNow = here ? (here.active ? here.state.z : here.points[here.points.length - 1].z) : 0;
-  const elementHere = beamline.elementAt(zNow);
   if (elementHere) {
     crossCtx.strokeStyle = cssVar('--electrode');
     crossCtx.globalAlpha = 0.6;
@@ -1555,22 +1645,23 @@ function drawCrossSection() {
   crossCtx.fillStyle = cssVar('--traj');
   crossCtx.strokeStyle = cssVar('--surface-1');
   crossCtx.lineWidth = 1.2;
-  for (const traj of trajectories) {
-    const p = traj.active ? traj.state : traj.points[traj.points.length - 1];
-    if (!p) continue;
-    crossCtx.globalAlpha = traj.active ? 1 : 0.35;
+  for (const s of spots) {
+    crossCtx.globalAlpha = s.live ? 1 : 0.35;
     crossCtx.beginPath();
-    crossCtx.arc(c + p.x * k, c - (p.y ?? 0) * k, 3, 0, Math.PI * 2);
+    crossCtx.arc(c + s.x * k, c - s.y * k, 3, 0, Math.PI * 2);
     crossCtx.fill();
     crossCtx.stroke();
   }
   crossCtx.restore();
 
+  // The scale is stated, because it is no longer fixed.
   crossCtx.fillStyle = cssVar('--text-muted');
   crossCtx.font = '10px ui-monospace, monospace';
   crossCtx.textAlign = 'center';
   crossCtx.fillText(
-    elementHere ? escapeHtml(elementHere.label) : 'beam cross-section',
+    elementHere
+      ? `${elementHere.label} · ±${mToMm(limit).toFixed(0)} mm`
+      : 'beam cross-section',
     c,
     size - 4
   );
@@ -1795,17 +1886,19 @@ function warningStats(warnings) {
 /* wiring                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Readouts beside an input.
+ *
+ * Only one survives. Every other control now holds its own number in a box
+ * you can type into, so repeating it alongside would just be the same figure
+ * twice. This one is different: what is typed is an exponent, and the count it
+ * stands for is the thing worth reading.
+ */
 const OUTPUTS = {
-  rays: (v) => v,
-  beamRadius: (v) => parseFloat(v).toFixed(1),
-  divergence: (v) => parseFloat(v).toFixed(1),
-  beamCurrent: (v) => parseFloat(v).toFixed(1),
   ionsPerParticle: (v) => {
     const n = 10 ** parseFloat(v);
     return n < 10 ? n.toFixed(1) : n.toExponential(1).replace('e+', 'e');
   },
-  cfl: (v) => parseFloat(v).toFixed(2),
-  zoom: (v) => parseFloat(v).toFixed(1),
 };
 
 function syncOutputs() {
@@ -1863,14 +1956,17 @@ function handleAction(act, index) {
       removeElement(index);
       return true;
     case 'match': {
-      // Put the bender on the matched voltage for the current ion.
+      // Put the bender on the matched voltage for the current ion, snapped to
+      // the slider's own step so the control shows exactly what was set.
       const e = beamline.elements[selectedIndex()];
       if (e?.typeKey !== 'bender') return true;
       const V = e.matchedVoltage(
         readNumber(inputs.energy, 50),
         Math.abs(readNumber(inputs.charge, 1)) || 1
       );
-      setParam(selectedIndex(), 'voltage', Math.round(V * 100) / 100);
+      const spec = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
+      const { step } = fieldRange(spec, e.params, beamSpec());
+      setParam(selectedIndex(), 'voltage', Math.round(V / step) * step);
       return true;
     }
     case 'tune': {
@@ -1938,7 +2034,7 @@ canvas.addEventListener('drop', (e) => {
     return;
   }
   statusEl.classList.add('busy');
-  beamline.add(createElement(type), index);
+  beamline.add(createElement(type, startingParams(type, beamSpec())), index);
   statusEl.classList.remove('busy');
   selection = { kind: 'element', index };
   afterStructureChange();
@@ -1953,35 +2049,75 @@ optimizeBtn.addEventListener('click', () => {
   runTuner(tunableKnobs(beamline, beamSpec()), optimizeBtn, 'the whole column');
 });
 
-// Inspector sliders edit the selected element.
-inspectorEl.addEventListener('input', (e) => {
-  const param = e.target.closest('input[data-param]');
-  if (param) {
-    const key = param.dataset.param;
-    const value = parseFloat(param.value);
-    const out = inspectorEl.querySelector(`[data-out="${key}"]`);
-    if (out) out.textContent = value;
+/**
+ * Read a typed field, or null if it does not yet hold a usable number.
+ *
+ * A field being typed into passes through states like "", "-" and "1e" on the
+ * way to a value. None of those is a voltage, and none should be applied -
+ * committing them would clamp the box to a limit mid-keystroke and fight the
+ * person typing. Out-of-range values are clamped rather than rejected, so a
+ * typo cannot put an element somewhere the sliders could not have.
+ */
+function readTyped(input) {
+  if (input.value.trim() === '') return null;
+  const v = parseFloat(input.value);
+  if (!Number.isFinite(v)) return null;
+  const lo = parseFloat(input.min);
+  const hi = parseFloat(input.max);
+  return Math.min(Number.isFinite(hi) ? hi : v, Math.max(Number.isFinite(lo) ? lo : v, v));
+}
+
+/**
+ * Apply what a typed inspector field says.
+ *
+ * `live` distinguishes a keystroke from a commit. A voltage only rescales
+ * stored solutions, so it can follow every keystroke and the picture updates
+ * as the number is typed. Geometry needs a fresh Laplace solve, and re-solving
+ * once per character while someone types "15" would solve for 1 first - slow,
+ * and briefly wrong. Those wait for the field to be committed: blur, Enter, or
+ * the stepper arrows.
+ */
+function applyTypedField(input, live) {
+  const key = input.dataset.param;
+  if (key) {
+    if (live && input.dataset.rebuild === '1') return;
+    const value = readTyped(input);
+    if (value === null) return;
     setParam(selectedIndex(), key, value);
     return;
   }
 
-  const align = e.target.closest('input[data-align]');
-  if (align) {
-    const key = align.dataset.align;
-    const mm = parseFloat(align.value);
-    const out = inspectorEl.querySelector(`[data-alignout="${key}"]`);
-    if (out) out.textContent = mm.toFixed(2);
-    const element = beamline.elements[selectedIndex()];
-    if (!element) return;
-    // Misalignment costs no re-solve: the element is unchanged, only where it
-    // sits. That is the whole reason it can be dragged smoothly.
-    element.align = { ...element.align, [key]: mmToM(mm) };
-    beamline.layout();
-    markStale();
-    renderTrack();
-    render();
-    drawReadout();
-  }
+  const alignKey = input.dataset.align;
+  if (!alignKey) return;
+  const mm = readTyped(input);
+  if (mm === null) return;
+  const element = beamline.elements[selectedIndex()];
+  if (!element) return;
+  // Misalignment costs no re-solve: the element is unchanged, only where it
+  // sits. That is the whole reason it can be dragged smoothly.
+  element.align = { ...element.align, [alignKey]: mmToM(mm) };
+  beamline.layout();
+  markStale();
+  renderTrack();
+  render();
+  drawReadout();
+}
+
+// Inspector fields edit the selected element.
+inspectorEl.addEventListener('input', (e) => {
+  const input = e.target.closest('input[data-param], input[data-align]');
+  if (input) applyTypedField(input, true);
+});
+
+inspectorEl.addEventListener('change', (e) => {
+  const input = e.target.closest('input[data-param], input[data-align]');
+  if (!input) return;
+  applyTypedField(input, false);
+  // Show what was actually taken. A value outside the element's limits is
+  // clamped rather than refused, and the box should say so rather than
+  // displaying a number the simulation is not using.
+  const taken = readTyped(input);
+  if (taken !== null && String(taken) !== input.value) input.value = taken;
 });
 
 flyButton.addEventListener('click', fly);

@@ -108,22 +108,19 @@
             <input id="energy" type="number" min="0.1" step="10" value="50" />
           </label>
 
-          <label class="field">
+          <label class="field field-typed">
             <span class="field-label">Ions</span>
-            <input id="rays" type="range" min="1" max="21" step="2" value="9" />
-            <output id="raysOut">9</output>
+            <input id="rays" type="number" min="1" max="21" step="2" value="9" />
           </label>
 
-          <label class="field">
+          <label class="field field-typed">
             <span class="field-label">Beam radius<span class="unit">mm</span></span>
-            <input id="beamRadius" type="range" min="0.1" max="6" step="0.1" value="1.0" />
-            <output id="beamRadiusOut">1.0</output>
+            <input id="beamRadius" type="number" min="0.1" max="6" step="0.1" value="1.0" />
           </label>
 
-          <label class="field">
+          <label class="field field-typed">
             <span class="field-label">Divergence<span class="unit">° half-angle</span></span>
-            <input id="divergence" type="range" min="0" max="5" step="0.1" value="0" />
-            <output id="divergenceOut">0.0</output>
+            <input id="divergence" type="number" min="0" max="5" step="0.1" value="0" />
             <span class="field-help">
               Each ion is aimed radially outward at an angle proportional to
               its distance from the axis, so the beam expands as a cone from a
@@ -144,18 +141,19 @@
               </select>
             </label>
 
-            <label class="field" data-model="coulomb">
+            <!-- The only one that keeps a readout: the number typed is the
+                 exponent, and the count it stands for is what matters. -->
+            <label class="field field-typed field-paired" data-model="coulomb">
               <span class="field-label">
-                Ions per particle<span class="unit">real ions</span>
+                Ions per particle<span class="unit">10^n real ions</span>
               </span>
-              <input id="ionsPerParticle" type="range" min="0" max="8" step="0.1" value="6" />
+              <input id="ionsPerParticle" type="number" min="0" max="8" step="0.1" value="6" />
               <output id="ionsPerParticleOut">1e6</output>
             </label>
 
-            <label class="field" data-model="beam">
+            <label class="field field-typed" data-model="beam">
               <span class="field-label">Beam current<span class="unit">µA</span></span>
-              <input id="beamCurrent" type="range" min="0" max="50" step="0.5" value="5" />
-              <output id="beamCurrentOut">5.0</output>
+              <input id="beamCurrent" type="number" min="0" max="50" step="0.5" value="5" />
             </label>
 
             <label class="field">
@@ -166,10 +164,9 @@
               </select>
             </label>
 
-            <label class="field">
+            <label class="field field-typed">
               <span class="field-label">Step fraction</span>
-              <input id="cfl" type="range" min="0.01" max="0.3" step="0.01" value="0.05" />
-              <output id="cflOut">0.05</output>
+              <input id="cfl" type="number" min="0.01" max="0.3" step="0.01" value="0.05" />
             </label>
 
             <label class="check">
