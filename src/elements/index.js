@@ -33,7 +33,15 @@ const ICONS = {
   quadrupole:
     '<circle cx="9" cy="5" r="2.6"/><circle cx="23" cy="5" r="2.6"/>' +
     '<circle cx="9" cy="13" r="2.6"/><circle cx="23" cy="13" r="2.6"/>',
-  bender: '<path d="M2 14h9a10 10 0 0 0 10-10v-2"/><path d="M18 4l3 -3 3 3" fill="none"/>',
+  // Four curved electrodes in a grounded box, with the beam entering on one
+  // axis and leaving on the perpendicular one.
+  bender:
+    '<rect x="9.5" y="1.5" width="15" height="15" rx="1" opacity=".3"/>' +
+    '<path d="M21.7 7.29A5 5 0 0 0 18.71 4.3"/>' +
+    '<path d="M15.29 4.3A5 5 0 0 0 12.3 7.29"/>' +
+    '<path d="M12.3 10.71A5 5 0 0 0 15.29 13.7"/>' +
+    '<path d="M18.71 13.7A5 5 0 0 0 21.7 10.71"/>' +
+    '<path d="M2 9h15V1" opacity=".55"/>',
 };
 
 export const ELEMENT_TYPES = {
@@ -81,18 +89,23 @@ export const ELEMENT_TYPES = {
 
   bender: {
     icon: ICONS.bender,
-    label: 'Bender',
+    label: 'Quadrupole deflector',
     blurb:
-      'Two curved plates that turn the beam. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
+      'Four curved electrodes in a grounded box, at +V and −V on the diagonals, turning the beam ninety degrees. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
     create: createBender,
     defaults: BENDER_DEFAULTS,
     fields: [
-      { key: 'voltage', label: 'Plate voltage', unit: 'V', min: -2000, max: 2000, step: 5, rebuild: false, help: 'Across the pair. The matched value for the current ion is shown below — a bender at the wrong voltage puts the beam into a plate.' },
-      { key: 'bendAngle', label: 'Bend angle', unit: '°', min: 10, max: 180, step: 5, rebuild: false },
+      // Step 1 V, not something rounder. The range has to reach tens of
+      // kilovolts because real deflectors run there, but a 50 eV beam is
+      // matched at a few tens of volts and its whole transmitting window is
+      // about ten per cent wide — a 25 V step would step clean over it.
+      { key: 'voltage', label: 'Electrode voltage', unit: 'V', min: -20000, max: 20000, step: 1, rebuild: false, help: 'Applied as +V and −V on opposite diagonals. The matched value for the current ion is shown below; Tune searches the solved field for the value that actually transmits best.' },
       { key: 'bendPlane', label: 'Bend plane', unit: '°', min: 0, max: 270, step: 90, rebuild: false, help: '0° turns the beam horizontally, 90° vertically. Same element, same solve — it is simply rolled about the beam.' },
-      { key: 'bendRadius', label: 'Bend radius', unit: 'mm', min: 15, max: 120, step: 1, rebuild: true },
-      { key: 'gap', label: 'Plate gap', unit: 'mm', min: 2, max: 20, step: 0.5, rebuild: true },
-      { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 40, step: 1, rebuild: true },
+      { key: 'apertureRadius', label: 'Aperture radius r₀', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (r₀/a)², so this and the two below set the operating voltage between them.' },
+      { key: 'electrodeThickness', label: 'Electrode thickness', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true },
+      { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. r₀ plus these two is the half-width a.' },
+      { key: 'gapAngle', label: 'Aperture gap', unit: '°', min: 5, max: 40, step: 1, rebuild: true, help: 'How far short of each axis the electrodes stop. This is the beam’s way in and out.' },
+      { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 60, step: 1, rebuild: true },
     ],
   },
 

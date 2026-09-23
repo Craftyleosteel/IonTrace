@@ -134,9 +134,10 @@ export class Beamline {
   }
 
   locate(g) {
-    for (const e of this.elements) {
+    for (let i = 0; i < this.elements.length; i++) {
+      const e = this.elements[i];
       const l = toLocal(e.frame, g);
-      if (e.contains(l[0], l[1], l[2])) return { element: e, local: l };
+      if (e.contains(l[0], l[1], l[2])) return { element: e, local: l, index: i };
     }
     return null;
   }
@@ -362,9 +363,22 @@ export class Beamline {
    * and a second empty pane would be wasted space.
    */
   get usesVerticalPlane() {
-    const b = this.bounds();
-    const spread = Math.max(Math.abs(b.minY), Math.abs(b.maxY));
-    return spread > this.radiusLimit * 1.05;
+    // Measured on the PATH, not on the bounding box. A column's vertical
+    // extent is partly just how tall its hardware is, and for a quadrupole
+    // deflector the two are the same number - it is exactly as wide across
+    // the bend as the bend displaces the beam - so a size-based test cannot
+    // tell a vertical bend from a horizontal one at all.
+    const frames = [...this.elements.map((e) => e.frame), this.exitFrame];
+
+    // A bend out of the plane shows up exactly in the direction the path
+    // points, so this needs no tolerance beyond round-off.
+    if (frames.some((f) => Math.abs(forwardOf(f)[1]) > 1e-9)) return true;
+
+    // Failing that, only a displacement large enough to be worth drawing
+    // counts - otherwise every fraction of a millimetre of misalignment would
+    // open a second pane to show it in.
+    const spread = Math.max(0, ...frames.map((f) => Math.abs(f.o[1])));
+    return spread > this.radiusLimit * 0.5;
   }
 }
 

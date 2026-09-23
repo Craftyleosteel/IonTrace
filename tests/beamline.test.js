@@ -16,7 +16,12 @@ import { Beamline } from '../src/beamline.js';
 import { createElement, ELEMENT_TYPES, needsRebuild } from '../src/elements/index.js';
 import { createQuadrupole, MATHIEU_Q_LIMIT } from '../src/elements/quadrupole.js';
 import { createDrift } from '../src/elements/drift.js';
-import { createBender, matchedVoltage } from '../src/elements/bender.js';
+import {
+  createBender,
+  matchedVoltage,
+  DEFLECTOR_CONSTANT,
+  DEFLECTOR_DESIGN_PHASE,
+} from '../src/elements/bender.js';
 import {
   compose,
   translation,
@@ -26,6 +31,13 @@ import {
   vectorToGlobal,
   forwardOf,
 } from '../src/frames.js';
+import {
+  tunableKnobs,
+  scoreBeamline,
+  optimizeVoltages,
+  applyKnob,
+  TUNABLE,
+} from '../src/optimize.js';
 import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
 import {
@@ -629,112 +641,167 @@ describe('Frames', () => {
 /* bender                                                              */
 /* ------------------------------------------------------------------ */
 
-describe('Bender', () => {
-  const PARAMS = { bendRadius: 40, bendAngle: 90, gap: 8, height: 16, gridStep: 0.3 };
-  const ENERGY = 50;
+describe('Quadrupole deflector', () => {
+  // r0/a = 0.95, the proportions of the reference instrument.
+  const PARAMS = {
+    apertureRadius: 19,
+    electrodeThickness: 0.5,
+    boxClearance: 0.5,
+    height: 30,
+    gridStep: 0.5,
+  };
+  const ENERGY = 1000;
+  const A = mmToM(20); // r0 + thickness + clearance
 
-  it('matches the closed-form plate voltage', () => {
-    // For the central orbit, the electric force supplies the centripetal one:
-    //   qE = 2T/R,  with  E = V / (R ln(r2/r1))   =>   V = (2T/q) ln(r2/r1)
-    // which for a narrow gap approaches the familiar 2Td/(qR).
+  /** A column with the deflector in the middle, at `voltage`. */
+  const column = (extra = {}) =>
+    new Beamline([
+      createElement('drift', { length: 8, bore: 6 }),
+      createElement('bender', { ...PARAMS, ...extra }),
+      createElement('drift', { length: 25, bore: 6 }),
+    ]);
+
+  it('matches the derived design constant', () => {
+    // V0 = k (T/q)(r0/a)^2 with k = coth^2(s) and cot s = tanh s. Checking the
+    // root rather than the constant, because the constant is where a typo
+    // would hide.
+    const s = DEFLECTOR_DESIGN_PHASE;
+    assertClose(Math.cos(s) / Math.sin(s), Math.tanh(s), 1e-6, 'cot s = tanh s');
+    assertRelClose(DEFLECTOR_CONSTANT, Math.tanh(s) ** -2, 1e-12, 'k = coth^2 s');
+
     const V = matchedVoltage(PARAMS, ENERGY, 1);
-    const r1 = mmToM(PARAMS.bendRadius - PARAMS.gap / 2);
-    const r2 = mmToM(PARAMS.bendRadius + PARAMS.gap / 2);
-    assertRelClose(V, 2 * ENERGY * Math.log(r2 / r1), 1e-12, 'closed form');
-    // And the narrow-gap limit, to the accuracy that limit deserves.
-    assertRelClose(V, (2 * ENERGY * PARAMS.gap) / PARAMS.bendRadius, 0.01, 'narrow-gap estimate');
+    assertRelClose(V, DEFLECTOR_CONSTANT * ENERGY * 0.95 ** 2, 1e-12, 'closed form');
   });
 
-  it('scales the matched voltage with energy and charge', () => {
-    const base = matchedVoltage(PARAMS, 50, 1);
-    assertRelClose(matchedVoltage(PARAMS, 100, 1), 2 * base, 1e-12, 'V ~ T');
-    assertRelClose(matchedVoltage(PARAMS, 50, 2), base / 2, 1e-12, 'V ~ 1/q');
+  it('scales the matched voltage with energy, charge and aperture ratio', () => {
+    const base = matchedVoltage(PARAMS, 1000, 1);
+    assertRelClose(matchedVoltage(PARAMS, 2000, 1), 2 * base, 1e-12, 'V ~ T');
+    assertRelClose(matchedVoltage(PARAMS, 1000, 2), base / 2, 1e-12, 'V ~ 1/q');
+
+    // The ratio enters squared, which is the part that is easy to get wrong:
+    // `a` is the half-width of the field region, not the electrode radius.
+    const wider = matchedVoltage(
+      { ...PARAMS, electrodeThickness: 4.5, boxClearance: 0.5 },
+      1000,
+      1
+    );
+    assertRelClose(wider, DEFLECTOR_CONSTANT * 1000 * (19 / 24) ** 2, 1e-12, 'V ~ (r0/a)^2');
   });
 
-  it('turns the column by its bend angle', () => {
+  it('solves a quadrupole potential in the bend plane', () => {
+    // phi = C X Z: antisymmetric across each axis, and identically zero ON
+    // them. This is the whole reason the device couples the two axes, so it is
+    // worth checking directly rather than inferring it from a trajectory.
+    const b = createBender({ ...PARAMS, voltage: 100 });
+    const r = mmToM(6);
+    const at = (X, Z) => b.potentialAt(X, 0, A + Z);
+
+    assertClose(at(0, r), 0, 0.05, 'zero on the entrance axis');
+    assertClose(at(r, 0), 0, 0.05, 'zero on the exit axis');
+    assertRelClose(at(r, r), -at(-r, r), 1e-6, 'antisymmetric across X');
+    assertRelClose(at(r, r), -at(r, -r), 1e-6, 'antisymmetric across Z');
+    assertRelClose(at(r, r), at(-r, -r), 1e-6, 'symmetric under a half turn');
+
+    // And it really is bilinear near the centre: halving both coordinates
+    // should quarter the potential.
+    assertRelClose(at(r / 2, r / 2), at(r, r) / 4, 0.02, 'phi ~ X Z');
+  });
+
+  it('solves on a planar grid that is exactly symmetric about the centre', () => {
+    // An even node count would put the box half a step further out on one side
+    // than the other, and the four electrodes would not see the same
+    // enclosure - the deflector would bend by different amounts either way.
+    const b = createBender(PARAMS);
+    assert(b.grid.nz % 2 === 1 && b.grid.nr % 2 === 1, 'node counts must be odd');
+    assertClose(b.grid.z0, -b.grid.step * (b.grid.nz - 1) / 2, 1e-15, 'centred in Z');
+    assertClose(b.grid.r0, -b.grid.step * (b.grid.nr - 1) / 2, 1e-15, 'centred in X');
+    assert(!b.grid.includesAxis, 'a planar grid has no symmetry axis to claim');
+  });
+
+  it('leaves the entrance and exit apertures open', () => {
+    // The Laplace problem needs the box closed, but the holes in it are real.
+    // Without this the beam is destroyed on the entrance plane.
+    const b = createBender(PARAMS);
+    assert(!b.strikes(0, 0, 0), 'the entrance is a hole, not a wall');
+    assert(!b.strikes(-A, 0, A), 'and so is the exit');
+    // The rest of that face is metal.
+    assert(b.strikes(mmToM(15), 0, 0), 'the entrance face is otherwise solid');
+    assert(b.strikes(-A, 0, A + mmToM(15)), 'and so is the exit face');
+  });
+
+  it('turns the column through a right angle', () => {
     // The whole point of the element: its exit faces somewhere else, so
     // everything downstream turns with it.
-    for (const deg of [30, 90, 127]) {
-      const bl = new Beamline([
-        createElement('drift', { length: 5, bore: 4 }),
-        createElement('bender', { ...PARAMS, bendAngle: deg }),
-      ]);
-      const dir = forwardOf(bl.exitFrame);
-      const turned = (Math.atan2(-dir[0], dir[2]) * 180) / Math.PI;
-      assertRelClose(turned, deg, 1e-9, `a ${deg} degree bend`);
-    }
+    const dir = forwardOf(column().exitFrame);
+    assertClose(dir[0], -1, 1e-12, 'the column leaves along -x');
+    assertClose(dir[2], 0, 1e-12, 'with nothing left along z');
   });
 
-  it('places the element after a bend on the turned axis', () => {
+  it('places the element after the bend on the turned axis', () => {
     const bl = new Beamline([
-      createElement('bender', { ...PARAMS, bendAngle: 90 }),
+      createElement('bender', PARAMS),
       createElement('drift', { length: 20, bore: 4 }),
     ]);
     const after = bl.elements[1].frame;
-    // A 90 degree bend of radius R puts the exit at (-R, 0, R) and pointing
-    // along -x, so the drift after it runs in -x from there.
-    const R = mmToM(40);
-    assertClose(after.o[0], -R, 1e-12, 'exit sits one radius to the side');
-    assertClose(after.o[2], R, 1e-12, 'and one radius downstream');
-    const dir = forwardOf(after);
-    assertClose(dir[0], -1, 1e-12, 'and the drift runs across the original axis');
+    // Entrance at the centre of one face, exit at the centre of the next, so
+    // the exit sits one half-width across and one half-width along.
+    assertClose(after.o[0], -A, 1e-12, 'exit sits one half-width to the side');
+    assertClose(after.o[2], A, 1e-12, 'and one half-width downstream');
+    assertClose(forwardOf(after)[0], -1, 1e-12, 'the drift runs across the original axis');
   });
 
-  it('carries a matched ion round the arc and out', () => {
+  it('carries a matched ion through and out at ninety degrees', () => {
     const V = matchedVoltage(PARAMS, ENERGY, 1);
-    const bl = new Beamline([
-      createElement('drift', { length: 10, bore: 4 }),
-      createElement('bender', { ...PARAMS, voltage: V }),
-      createElement('drift', { length: 20, bore: 4 }),
-    ]);
     const { points, stop } = flyIon(
-      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+      column({ voltage: V }), makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
     );
     assert(stop === 'exited', `a matched ion should get through, got ${stop}`);
 
     const last = points[points.length - 1];
     const turned = (Math.atan2(-last.vx, last.vz) * 180) / Math.PI;
-    // Within a degree or so of nominal. The remaining error is real: the
-    // grounded lids sit close enough to perturb the field from the ideal
-    // cylindrical-capacitor form the matched voltage assumes.
-    assertClose(turned, 90, 2, 'a matched ion follows the nominal bend');
+    // Two degrees of the nominal right angle. The residual is real and is
+    // documented in the element: the electrodes subtend finite arcs and the
+    // grounded box pulls the potential down near the apertures, so the solved
+    // field is slightly weaker than the ideal form the constant assumes.
+    assertClose(turned, 90, 2.5, 'a matched ion turns through a right angle');
   });
 
-  it('puts a badly mismatched ion into a plate', () => {
-    // A bender at the wrong voltage does not bend the beam slightly wrongly,
-    // it disperses it onto an electrode. That is also what makes it an energy
-    // filter rather than merely a corner.
+  it('has a transmitting window of about a tenth either side', () => {
+    // Measured, and relied on by the readout in the UI. Inside the window the
+    // ion gets through; well outside it, it does not.
     const V = matchedVoltage(PARAMS, ENERGY, 1);
-    const bl = new Beamline([
-      createElement('drift', { length: 10, bore: 4 }),
-      createElement('bender', { ...PARAMS, voltage: V }),
-      createElement('drift', { length: 20, bore: 4 }),
-    ]);
-    for (const energy of [ENERGY * 0.8, ENERGY * 1.2]) {
-      const { stop } = flyIon(
-        bl, makeIon({ mass: 100, charge: 1, energy }), { cfl: 0.05 }
-      );
+    const ion = () => makeIon({ mass: 100, charge: 1, energy: ENERGY });
+    for (const f of [0.92, 1.0, 1.08]) {
+      const { stop } = flyIon(column({ voltage: V * f }), ion(), { cfl: 0.05 });
+      assert(stop === 'exited', `${f.toFixed(2)} x matched should transmit, got ${stop}`);
+    }
+    for (const f of [0.7, 1.4]) {
+      const { stop } = flyIon(column({ voltage: V * f }), ion(), { cfl: 0.05 });
+      assert(stop !== 'exited', `${f.toFixed(2)} x matched should not transmit, got ${stop}`);
+    }
+  });
+
+  it('disperses an off-energy ion', () => {
+    // A deflector at a fixed voltage selects an energy: this is what makes it
+    // an energy filter rather than merely a corner.
+    const V = matchedVoltage(PARAMS, ENERGY, 1);
+    const bl = column({ voltage: V });
+    for (const energy of [ENERGY * 0.7, ENERGY * 1.4]) {
+      const { stop } = flyIon(bl, makeIon({ mass: 100, charge: 1, energy }), { cfl: 0.05 });
       assert(
-        stop === 'electrode',
+        stop !== 'exited',
         `an ion ${((energy / ENERGY - 1) * 100).toFixed(0)} % off energy should be ` +
-          `dispersed into a plate, got ${stop}`
+          `dispersed, got ${stop}`
       );
     }
   });
 
   it('keeps an on-orbit ion in the bend plane', () => {
-    // A cylindrical sector bends horizontally and does essentially nothing
-    // vertically - it has no vertical focusing at all in the ideal geometry,
-    // which is exactly why spherical deflectors exist. An ion launched in the
-    // plane must stay in it.
+    // The electrodes are uniform perpendicular to the bend plane, so there is
+    // no field in that direction and an ion launched in the plane stays in it.
     const V = matchedVoltage(PARAMS, ENERGY, 1);
-    const bl = new Beamline([
-      createElement('drift', { length: 10, bore: 4 }),
-      createElement('bender', { ...PARAMS, voltage: V }),
-      createElement('drift', { length: 20, bore: 4 }),
-    ]);
     const { points } = flyIon(
-      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+      column({ voltage: V }), makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
     );
     for (const p of points) {
       assertClose(p.y, 0, mmToM(1e-3), `left the bend plane at z = ${mToMm(p.z).toFixed(1)} mm`);
@@ -743,14 +810,13 @@ describe('Bender', () => {
 
   it('bends in whichever plane it is rolled into', () => {
     // One element, one solve, any plane. A 90 degree roll turns the same
-    // bender from a horizontal corner into a vertical one.
-    const horizontal = new Beamline([createElement('bender', { ...PARAMS, bendPlane: 0 })]);
-    const vertical = new Beamline([createElement('bender', { ...PARAMS, bendPlane: 90 })]);
+    // deflector from a horizontal corner into a vertical one.
+    const h = forwardOf(new Beamline([createElement('bender', PARAMS)]).exitFrame);
+    const v = forwardOf(
+      new Beamline([createElement('bender', { ...PARAMS, bendPlane: 90 })]).exitFrame
+    );
 
-    const h = forwardOf(horizontal.exitFrame);
-    const v = forwardOf(vertical.exitFrame);
-
-    assertClose(h[0], -1, 1e-12, 'an unrolled bender turns in x');
+    assertClose(h[0], -1, 1e-12, 'an unrolled deflector turns in x');
     assertClose(h[1], 0, 1e-12, 'and not at all in y');
     assertClose(v[1], -1, 1e-12, 'a 90 degree roll turns it in y instead');
     assertClose(v[0], 0, 1e-12, 'and not at all in x');
@@ -758,15 +824,13 @@ describe('Bender', () => {
 
   it('does not roll the beam it passes on', () => {
     // The conjugation by the roll is what makes this true. Without it a
-    // vertical bender would also rotate "up" into "sideways" for every
+    // vertical deflector would also rotate "up" into "sideways" for every
     // element downstream, which is not what a bender does.
     const bl = new Beamline([
-      createElement('bender', { ...PARAMS, bendPlane: 90, bendAngle: 90 }),
+      createElement('bender', { ...PARAMS, bendPlane: 90 }),
       createElement('drift', { length: 20, bore: 4 }),
     ]);
-    const after = bl.elements[1].frame;
-    // Local +x must still be global +x: the transverse axes are untwisted.
-    const localX = vectorToGlobal(after, [1, 0, 0]);
+    const localX = vectorToGlobal(bl.elements[1].frame, [1, 0, 0]);
     assertClose(localX[0], 1, 1e-12, 'transverse x survives a vertical bend');
     assertClose(localX[1], 0, 1e-12, 'with nothing leaking into y');
   });
@@ -775,19 +839,16 @@ describe('Bender', () => {
     // The same physics, in the other plane. The ion should leave travelling
     // in -y with essentially no x motion at all.
     const V = matchedVoltage(PARAMS, ENERGY, 1);
-    const bl = new Beamline([
-      createElement('drift', { length: 10, bore: 4 }),
-      createElement('bender', { ...PARAMS, bendPlane: 90, voltage: V }),
-      createElement('drift', { length: 20, bore: 4 }),
-    ]);
     const { points, stop } = flyIon(
-      bl, makeIon({ mass: 100, charge: 1, energy: ENERGY }), { cfl: 0.05 }
+      column({ bendPlane: 90, voltage: V }),
+      makeIon({ mass: 100, charge: 1, energy: ENERGY }),
+      { cfl: 0.05 }
     );
     assert(stop === 'exited', `a matched ion should get through, got ${stop}`);
 
     const last = points[points.length - 1];
     const turned = (Math.atan2(-last.vy, last.vz) * 180) / Math.PI;
-    assertClose(turned, 90, 2, 'a vertical bender turns the beam downward');
+    assertClose(turned, 90, 2.5, 'a vertical deflector turns the beam downward');
     for (const p of points) {
       assertClose(p.x, 0, mmToM(1e-3), 'and leaves the horizontal plane alone');
     }
@@ -797,7 +858,7 @@ describe('Bender', () => {
     // Which is what tells the view a side elevation is worth drawing.
     const flat = new Beamline([
       createElement('drift', { length: 20, bore: 4 }),
-      createElement('bender', { ...PARAMS, bendPlane: 0 }),
+      createElement('bender', PARAMS),
     ]);
     const tall = new Beamline([
       createElement('drift', { length: 20, bore: 4 }),
@@ -807,17 +868,221 @@ describe('Bender', () => {
     assert(tall.usesVerticalPlane, 'a vertical bend leaves it');
   });
 
-  it('solves on a cylindrical band that excludes the axis', () => {
-    // The bender reuses the axisymmetric stencil with the roles of the axes
-    // reinterpreted, but its radial band sits about the bend radius rather
-    // than starting at zero - so the singular on-axis stencil must NOT be
-    // applied, and row j = 0 is an ordinary wall.
-    const b = createBender(PARAMS);
-    assert(b.grid.r0 > 0, 'the band should not reach the axis');
-    assert(!b.grid.includesAxis, 'and must not claim to contain it');
-    // Which means j = 0 has to be part of the enclosure, or the problem is
-    // unbounded on that side.
-    assert(b.grid.isElectrode(Math.floor(b.grid.nz / 2), 0), 'inner wall must be fixed');
+  it('refuses a geometry with no electrode left', () => {
+    let threw = false;
+    try {
+      createBender({ ...PARAMS, gapAngle: 45 });
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'a 45 degree gap leaves nothing to hold a voltage');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* voltage tuning                                                      */
+/* ------------------------------------------------------------------ */
+
+describe('Voltage optimiser', () => {
+  const DEFLECTOR = {
+    apertureRadius: 19,
+    electrodeThickness: 0.5,
+    boxClearance: 0.5,
+    gridStep: 0.5,
+  };
+  const SPEC = { mass: 100, charge: 1, energy: 1000 };
+  const beam = (count = 5) => () => discBeam({ ...SPEC, count, radius: 1.5 });
+
+  const bentColumn = (voltage = 0) =>
+    new Beamline([
+      createElement('drift', { length: 8, bore: 6 }),
+      createElement('bender', { ...DEFLECTOR, voltage }),
+      createElement('drift', { length: 25, bore: 6 }),
+    ]);
+
+  it('offers only parameters that do not need a re-solve', () => {
+    // The optimiser's whole premise: a voltage is a multiplier on a stored
+    // solution, so hundreds of trials cost no solver time. If a tunable key
+    // were ever marked `rebuild`, `tunableKnobs` must refuse rather than
+    // silently re-solve a few hundred times.
+    for (const [type, keys] of Object.entries(TUNABLE)) {
+      for (const key of keys) {
+        const field = ELEMENT_TYPES[type].fields.find((f) => f.key === key);
+        assert(field, `${type}.${key} must exist in the registry`);
+        assert(!needsRebuild(type, key), `${type}.${key} must not need a re-solve`);
+      }
+    }
+  });
+
+  it('finds every tunable voltage in a column, and nothing else', () => {
+    const bl = new Beamline([
+      createElement('drift', { length: 8, bore: 6 }),
+      createElement('einzel', { boreRadius: 6, centreLength: 20, gap: 6 }),
+      createElement('bender', DEFLECTOR),
+    ]);
+    const knobs = tunableKnobs(bl);
+    assert(knobs.length === 2, `expected 2 knobs, got ${knobs.length}`);
+    assert(
+      knobs.every((k) => k.index > 0),
+      'a drift has no voltage to tune'
+    );
+    // Limits come from the registry, so the optimiser can never propose a
+    // setting the user could not have typed.
+    for (const k of knobs) {
+      const field = ELEMENT_TYPES[k.type].fields.find((f) => f.key === k.key);
+      assert(k.min === field.min && k.max === field.max, `${k.key} limits from the registry`);
+      assert(k.lo === field.min && k.hi === field.max, `${k.key} sweeps it all without an ion`);
+    }
+  });
+
+  it('leaves the RF quadrupole alone', () => {
+    // Not an oversight. A mass filter's voltages do change transmission, and
+    // the setting that transmits most is the one that filters nothing - so a
+    // search told to maximise transmission simply turns the RF off. That is
+    // the optimiser working correctly on the wrong objective, and the fix is
+    // to keep the filter out of its hands.
+    const bl = new Beamline([
+      createElement('quadrupole', { gridStep: 0.5, length: 60, rfAmplitude: 250, frequency: 2 }),
+    ]);
+    assert(tunableKnobs(bl).length === 0, 'a mass filter offers no transmission knobs');
+    assert(!('quadrupole' in TUNABLE), 'and is not listed as tunable at all');
+  });
+
+  it('narrows the sweep to where an element says the answer is', () => {
+    // The deflector's range has to reach tens of kilovolts, because real ones
+    // run there. A 1 keV beam is matched near 1.7 kV. A coarse sweep of the
+    // full range would step straight over that, so when the ion is known the
+    // sweep is centred on the element's own closed-form estimate instead.
+    const bl = bentColumn(0);
+    const wide = tunableKnobs(bl)[0];
+    const aimed = tunableKnobs(bl, SPEC)[0];
+
+    assert(aimed.seed !== null, 'the deflector can suggest a voltage');
+    assertRelClose(
+      aimed.seed,
+      matchedVoltage(DEFLECTOR, SPEC.energy, 1),
+      1e-12,
+      'and the suggestion is the matched voltage'
+    );
+    assert(aimed.hi - aimed.lo < (wide.hi - wide.lo) / 2, 'the aimed sweep is narrower');
+    assert(aimed.min === wide.min && aimed.max === wide.max, 'but the hard limits are unchanged');
+    // Symmetric about zero, so a negative ion's opposite polarity is still
+    // reachable without anyone having to say so.
+    assertClose(aimed.lo, -aimed.hi, 1e-12, 'the sweep spans both polarities');
+  });
+
+  it('always tries the suggested voltage, however coarse the sweep', async () => {
+    // Five samples across the aimed range is a spacing far wider than the
+    // deflector's transmitting window, so an evenly spaced scan alone cannot
+    // find it. It works only because the element's own estimate is tried
+    // explicitly - which is the point: whether a sweep happens to land on the
+    // right value must not depend on the sample count.
+    const bl = bentColumn(0);
+    const knobs = tunableKnobs(bl, SPEC);
+    const result = await optimizeVoltages(bl, beam(), knobs, {
+      passes: 1,
+      coarse: 5,
+      levels: 0,
+    });
+    assert(
+      result.transmitted === result.count,
+      `a five-sample sweep should still find it, got ${result.transmitted}/${result.count}`
+    );
+  });
+
+  it('scores transmission, and rewards partial progress below it', () => {
+    const V = matchedVoltage(DEFLECTOR, SPEC.energy, 1);
+    const good = scoreBeamline(bentColumn(V), beam());
+    const dead = scoreBeamline(bentColumn(0), beam());
+
+    assert(good.transmitted === good.count, `matched should transmit all, got ${good.transmitted}`);
+    assert(dead.transmitted === 0, 'an unpowered deflector transmits nothing');
+    assert(good.score > dead.score, 'transmitting must outscore not transmitting');
+
+    // The partial-credit and beam-size terms together must never be able to
+    // outweigh one transmitted ion, or the search would trade beam away for
+    // tidiness.
+    assert(
+      dead.score < 1 / dead.count,
+      `a fully lost beam scored ${dead.score.toFixed(4)}, which is more than one ion is worth`
+    );
+  });
+
+  it('prefers the tighter beam among settings that all transmit', () => {
+    // The tie-break, measured transverse to the EXIT axis. Measured from the
+    // origin instead it would be dominated by the bend offset and would say
+    // nothing about the beam at all.
+    const V = matchedVoltage(DEFLECTOR, SPEC.energy, 1);
+    const a = scoreBeamline(bentColumn(V), beam());
+    const b = scoreBeamline(bentColumn(V * 1.05), beam());
+    assert(a.transmitted === b.transmitted, 'both settings transmit everything');
+    assert(a.exitRadius !== null && b.exitRadius !== null, 'both report an exit radius');
+    assert(
+      a.exitRadius < mmToM(10) && b.exitRadius < mmToM(10),
+      'the radius is transverse to the exit axis, not the distance from the origin'
+    );
+    // Whichever is tighter must be the one that scores higher.
+    const tighter = a.exitRadius < b.exitRadius ? a : b;
+    const looser = tighter === a ? b : a;
+    assert(tighter.score > looser.score, 'the tighter beam wins the tie-break');
+  });
+
+  it('recovers a working deflector voltage from nothing', async () => {
+    const bl = bentColumn(0);
+    const knobs = tunableKnobs(bl, SPEC);
+    const before = scoreBeamline(bl, beam());
+    assert(before.transmitted === 0, 'starts with the beam lost');
+
+    const result = await optimizeVoltages(bl, beam(), knobs, { passes: 1, coarse: 11, levels: 2 });
+
+    assert(result.transmitted === result.count, `expected full transmission, got ${result.transmitted}`);
+    assert(result.improved, 'and it should report that it moved something');
+
+    // The voltage it lands on must be the physical one, not an artefact of
+    // the search: within the measured window around the derived value.
+    const V = matchedVoltage(DEFLECTOR, SPEC.energy, 1);
+    const found = bl.elements[1].params.voltage;
+    assertRelClose(found, V, 0.15, 'the tuner finds the matched voltage');
+  });
+
+  it('leaves a beamline exactly as it found it when nothing helps', async () => {
+    // A drift-only column has no knobs at all; the optimiser must not invent
+    // any, and must not disturb what is there.
+    const bl = new Beamline([createElement('drift', { length: 20, bore: 6 })]);
+    const knobs = tunableKnobs(bl);
+    assert(knobs.length === 0, 'a drift column has nothing to tune');
+    const result = await optimizeVoltages(bl, beam(), knobs, { passes: 1 });
+    assert(!result.improved, 'nothing to improve');
+    assert(result.transmitted === result.count, 'and the beam still gets through');
+  });
+
+  it('stops when asked and keeps the best setting found so far', async () => {
+    const bl = bentColumn(0);
+    const knobs = tunableKnobs(bl, SPEC);
+    let seen = 0;
+    const result = await optimizeVoltages(bl, beam(), knobs, {
+      shouldStop: () => ++seen > 20,
+    });
+    assert(result.cancelled, 'should report that it was cancelled');
+    assert(result.evaluations < 40, `should stop early, ran ${result.evaluations} trials`);
+    // Whatever it kept must actually be what is set on the element.
+    assert(
+      bl.elements[1].params.voltage === result.values[0],
+      'the element carries the value the optimiser reports'
+    );
+  });
+
+  it('writes a knob through to the field, not just to the parameter', async () => {
+    // `applyKnob` has to call the element's setter: writing `params.voltage`
+    // alone would change the readout and leave the field untouched, so the
+    // optimiser would score every trial against the same trajectory.
+    const bl = bentColumn(0);
+    const [knob] = tunableKnobs(bl, SPEC);
+    const before = bl.elements[1].potentialAt(mmToM(6), 0, mmToM(26));
+    applyKnob(bl, knob, 500);
+    const after = bl.elements[1].potentialAt(mmToM(6), 0, mmToM(26));
+    assertClose(before, 0, 1e-12, 'no voltage, no potential');
+    assert(Math.abs(after) > 1, `the field should follow the knob, got ${after}`);
   });
 });
 

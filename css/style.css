@@ -500,6 +500,45 @@ input[type="range"]:focus-visible {
   border-color: var(--accent);
 }
 
+.ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/*
+  A button that is mid-search. It keeps its place in the layout while its label
+  counts up, so the toolbar does not reflow on every progress tick - hence the
+  tabular figures and the minimum width.
+*/
+.busy {
+  min-width: 15ch;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+/* What the tuner settled on. Wraps rather than truncating: the voltages are
+   the point of the exercise. */
+.tune-note {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 24px 10px;
+  font-size: 12px;
+  font-family: var(--mono);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.tune-note.warn {
+  color: #d03b3b;
+}
+
+.tune-row {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .back {
   float: right;
   padding: 0 5px;

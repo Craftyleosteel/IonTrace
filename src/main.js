@@ -19,6 +19,7 @@ import { ELEMENT_TYPES, createElement, needsRebuild } from './elements/index.js'
 import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
 import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
+import { tunableKnobs, optimizeVoltages, TUNABLE } from './optimize.js';
 import { joulesToEV, mToMm, mmToM } from './constants.js';
 import { NO_ELECTRODE } from './grid.js';
 import { toGlobal, toLocal, forwardOf } from './frames.js';
@@ -37,6 +38,8 @@ const addPanel = el('addPanel');
 const toolsEl = el('tools');
 const beamPanel = el('beamPanel');
 const autoAlignBtn = el('autoAlign');
+const optimizeBtn = el('optimize');
+const tuneNote = el('tuneNote');
 const scaleNote = el('scaleNote');
 const flyButton = el('fly');
 
@@ -459,7 +462,9 @@ function summarise(e) {
         ? `DC ${p.dcVoltage} V · ${p.length} mm`
         : `${p.rfAmplitude} V @ ${p.frequency} MHz · ${p.length} mm`;
     case 'bender':
-      return `${p.bendAngle}° · R${p.bendRadius} mm · ${p.voltage.toFixed(0)} V`;
+      return `90° ${p.bendPlane === 0 ? 'horizontal' : 'vertical'} · ±${p.voltage.toFixed(
+        0
+      )} V · r₀ ${p.apertureRadius} mm`;
     default:
       return '';
   }
@@ -594,11 +599,36 @@ function renderInspector() {
     ${rows}
     ${benderReadout(e)}
     ${quadrupoleReadout(e)}
+    ${tuneRow(e)}
     ${alignmentRows(e)}
     <div class="row-actions">
       <button data-act="left" data-index="${selectedIndex()}">◀ Upstream</button>
       <button data-act="right" data-index="${selectedIndex()}">Downstream ▶</button>
       <button data-act="remove" data-index="${selectedIndex()}">Remove</button>
+    </div>`;
+}
+
+/**
+ * Tune this element alone.
+ *
+ * Offered only where there is something to tune. Tuning one element is not the
+ * same as tuning the column - a deflector set in isolation is set for the beam
+ * the elements before it happen to deliver - so the toolbar button that moves
+ * every voltage together is named right next to it.
+ */
+function tuneRow(e) {
+  const keys = TUNABLE[e.typeKey];
+  if (!keys?.length) return '';
+  const what = keys.length === 1 ? 'this voltage' : 'these voltages';
+  return `
+    <div class="row-actions tune-row">
+      <button data-act="tune" data-index="${selectedIndex()}">Tune ${escapeHtml(
+        e.label
+      )}</button>
+      <span class="field-help">
+        Searches ${what} for the best transmission, leaving everything else
+        alone. Optimise voltages, in the toolbar, moves the whole column at once.
+      </span>
     </div>`;
 }
 
@@ -639,7 +669,18 @@ function alignmentRows(e) {
     </details>`;
 }
 
-/** Matched plate voltage for the current ion, beside the control that sets it. */
+/**
+ * Matched electrode voltage for the current ion, beside the control that sets
+ * it.
+ *
+ * The tolerance here is measured, not assumed. A small beam through a
+ * deflector with r0/a = 0.95 is fully transmitted from 0.9 to 1.1 times the
+ * ideal matched value and dies outside that, so the window is about a tenth
+ * either way - wide enough that a figure "off the matched value" is not by
+ * itself bad news, and narrow enough to be worth showing.
+ */
+const BENDER_WINDOW = 0.1;
+
 function benderReadout(e) {
   if (e.typeKey !== 'bender') return '';
   const V = e.matchedVoltage(
@@ -649,13 +690,13 @@ function benderReadout(e) {
   const set = e.params.voltage;
   const off = V === 0 ? 0 : Math.abs((set - V) / V);
   return `
-    <div class="mathieu ${off < 0.05 ? 'ok' : 'bad'}">
-      <span>matched = ${V.toFixed(2)} V</span>
-      <span>set = ${set.toFixed(2)} V</span>
+    <div class="mathieu ${off <= BENDER_WINDOW ? 'ok' : 'bad'}">
+      <span>matched = ${V.toFixed(0)} V</span>
+      <span>set = ${set.toFixed(0)} V</span>
       <span class="verdict">${
-        off < 0.05
-          ? 'on the central orbit'
-          : `${(off * 100).toFixed(0)} % off — the beam will be driven into a plate`
+        off <= BENDER_WINDOW
+          ? `${(off * 100).toFixed(0)} % off the ideal value — inside the transmitting window`
+          : `${(off * 100).toFixed(0)} % off — outside the window, the beam lands on an electrode`
       }</span>
       <button class="mini" data-act="match">Use matched voltage</button>
     </div>`;
@@ -695,16 +736,36 @@ function markStale() {
   flyButton.classList.add('stale');
 }
 
-function startFlight() {
-  const spec = {
+/** The ion the source is set to produce, without its spatial distribution. */
+function beamSpec() {
+  return {
     mass: readNumber(inputs.mass, 100),
     charge: readNumber(inputs.charge, 1),
     energy: readNumber(inputs.energy, 50),
     z: 0.2,
   };
+}
+
+/**
+ * A fresh beam matching the source settings.
+ *
+ * Fresh every call, deliberately: ions carry their own state and the
+ * integrator mutates them, so handing the same array to two flights would fly
+ * the second one from wherever the first ended up. The optimiser calls this
+ * hundreds of times.
+ */
+function makeBeam(count = Math.round(readNumber(inputs.rays, 9))) {
+  return discBeam({
+    ...beamSpec(),
+    count,
+    radius: readNumber(inputs.beamRadius, 1.5),
+    divergence: readNumber(inputs.divergence, 0),
+  });
+}
+
+function startFlight() {
+  const spec = beamSpec();
   const count = Math.round(readNumber(inputs.rays, 9));
-  const maxOffset = readNumber(inputs.beamRadius, 1.5);
-  const divergence = readNumber(inputs.divergence, 0);
 
   let ions;
   try {
@@ -712,7 +773,7 @@ function startFlight() {
     // beam on a symmetry plane of every element here, where it would stay for
     // ever - the motion would look two-dimensional because the source was,
     // not because the physics is.
-    ions = discBeam({ ...spec, count, radius: maxOffset, divergence });
+    ions = makeBeam(count);
   } catch (err) {
     trajectories = [];
     flight = null;
@@ -860,6 +921,115 @@ function tick() {
 function setFlyLabel(label, hint) {
   flyButton.innerHTML =
     `<span class="fly-label">${label}</span><span class="fly-hint">${hint}</span>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* voltage tuning                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Search electrode voltages for the best transmission.
+ *
+ * Only voltages: every one of them is a multiplier on a field that was solved
+ * when the element was built, so a few hundred trials cost a few hundred beam
+ * flights and no solver time at all. The geometry is left alone, which is also
+ * the constraint an operator at a real instrument works under.
+ *
+ * The search runs in the page rather than a worker, so it must hand the event
+ * loop back or the button never repaints and the tab appears to hang. It does
+ * that in `onProgress`, which `optimizeVoltages` awaits.
+ */
+let tuning = null;
+
+function setTuneNote(text, bad = false) {
+  tuneNote.textContent = text ?? '';
+  tuneNote.hidden = !text;
+  tuneNote.classList.toggle('warn', Boolean(bad));
+}
+
+async function runTuner(knobs, button, what) {
+  if (tuning) {
+    // A press during a search stops it rather than starting a competing one.
+    // Pressing a *different* tune button does the same, so say so - otherwise
+    // it looks as though the button did nothing.
+    tuning.stop = true;
+    if (tuning.button !== button) {
+      setTuneNote(`Stopping the search already running; press again to tune ${what}.`);
+    }
+    return;
+  }
+  if (knobs.length === 0) {
+    setTuneNote('Nothing to tune — this column has no adjustable voltages.', true);
+    return;
+  }
+
+  cancelAnimationFrame(animation.frame);
+  animation.running = false;
+
+  const original = button.textContent;
+  tuning = { stop: false, button };
+  button.classList.add('busy');
+  optimizeBtn.disabled = button !== optimizeBtn;
+  flyButton.disabled = true;
+  setTuneNote(
+    `Tuning ${what} — ${knobs.length} voltage${knobs.length === 1 ? '' : 's'}, ` +
+      'every trial flies the whole beam. Press the button again to stop and keep the best so far.'
+  );
+
+  let result;
+  try {
+    result = await optimizeVoltages(beamline, () => makeBeam(), knobs, {
+      flight: { cfl: readNumber(inputs.cfl, 0.05), method: inputs.method.value },
+      shouldStop: () => tuning.stop,
+      onProgress: async (p) => {
+        button.textContent = `${Math.round(p.fraction * 100)}% · ${p.transmitted}/${p.count} — cancel`;
+        // Yields to the browser: without this the search would run to
+        // completion before a single frame was painted.
+        await new Promise((r) => setTimeout(r, 0));
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    setTuneNote(`Tuning failed: ${err.message}`, true);
+    return;
+  } finally {
+    tuning = null;
+    button.textContent = original;
+    button.classList.remove('busy');
+    optimizeBtn.disabled = false;
+    flyButton.disabled = false;
+  }
+
+  const changed = knobs
+    .map((k, i) => ({ k, from: result.start[i], to: result.values[i] }))
+    .filter((c) => c.from !== c.to);
+
+  const settings = changed
+    .map((c) => `${c.k.label} ${c.from} → ${c.to} ${c.k.unit}`)
+    .join('; ');
+  const headline =
+    `${result.transmitted}/${result.count} through` +
+    (result.exitRadius === null
+      ? ''
+      : `, beam ${mToMm(result.exitRadius).toFixed(2)} mm at the exit`);
+
+  setTuneNote(
+    result.cancelled
+      ? `Stopped after ${result.evaluations} trials — keeping the best: ${headline}.` +
+          (settings ? ` ${settings}` : '')
+      : changed.length === 0
+        ? `${result.evaluations} trials: ${headline}. Nothing beat the settings already in place.`
+        : `${result.evaluations} trials: ${headline}. ${settings}`,
+    result.transmitted === 0
+  );
+
+  renderInspector();
+  renderTrack();
+  render();
+  // The trajectories on screen were flown at the old voltages, so say so
+  // rather than leaving a picture that no longer matches the settings.
+  markStale();
+  drawReadout();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1703,6 +1873,16 @@ function handleAction(act, index) {
       setParam(selectedIndex(), 'voltage', Math.round(V * 100) / 100);
       return true;
     }
+    case 'tune': {
+      const e = beamline.elements[index];
+      if (!e) return true;
+      const knobs = tunableKnobs(beamline, beamSpec()).filter((k) => k.index === index);
+      // The button itself is inside the inspector, which this rerenders on
+      // completion, so look it up now rather than holding a stale node.
+      const button = inspectorEl.querySelector('button[data-act="tune"]');
+      if (button) runTuner(knobs, button, `the ${e.label}`);
+      return true;
+    }
     default:
       return false;
   }
@@ -1767,6 +1947,10 @@ canvas.addEventListener('drop', (e) => {
 autoAlignBtn.addEventListener('click', () => {
   beamline.autoAlign();
   afterStructureChange();
+});
+
+optimizeBtn.addEventListener('click', () => {
+  runTuner(tunableKnobs(beamline, beamSpec()), optimizeBtn, 'the whole column');
 });
 
 // Inspector sliders edit the selected element.

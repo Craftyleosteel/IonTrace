@@ -93,6 +93,13 @@ export class PotentialArray {
      * The outer radial wall is deliberately not listed. In the einzel
      * geometry that surface is the grounded housing, which is real metal an
      * ion genuinely can hit.
+     *
+     * This default assumes the grid's z axis IS the beam axis, which is true
+     * of every element solved in the r-z plane. Elements that solve in a plane
+     * of their own - the mass filter, in x and y, and the quadrupole
+     * deflector, in the bend plane - must close both faces, because for them
+     * the z ends are ordinary walls. They do that explicitly rather than by
+     * omission.
      */
     this.openFaces = { zMin: true, zMax: true };
   }

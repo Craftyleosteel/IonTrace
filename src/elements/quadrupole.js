@@ -126,6 +126,11 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
     r0: -extent,
   });
 
+  // This grid's two axes are x and y; the beam runs perpendicular to both. So
+  // the z end faces are the grounded housing on the +x and -x sides, real
+  // metal, not the apertures the default assumes.
+  grid.openFaces = { zMin: false, zMax: false };
+
   const encl = grid.addElectrode('housing');
   const poleA = grid.addElectrode('poleA'); // on the x axis
   const poleB = grid.addElectrode('poleB'); // on the y axis
@@ -212,7 +217,10 @@ export function createQuadrupole(params = {}, solverOpts = {}) {
     strikes(x, y, zl) {
       if (Math.hypot(x, y) > extent) return true;
       if (zl < 0 || zl > length) return false;
-      return unit.strikes(x, y, 0);
+      // Field.strikes takes (transverse, height, axial), which is the reverse
+      // of fieldAt(axial, transverse) above - so with the grid's axial axis
+      // carrying x and its transverse axis y, the arguments go (y, 0, x).
+      return unit.strikes(y, 0, x);
     },
 
     /**

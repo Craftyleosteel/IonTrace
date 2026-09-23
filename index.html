@@ -37,8 +37,24 @@
           <button class="ghost-btn" id="autoAlign" type="button" hidden>
             Auto-align
           </button>
+          <!--
+            Searches every electrode voltage in the column for the combination
+            that transmits the most beam. Cheap enough to be a button because
+            a voltage is only a multiplier on a solved field - see
+            src/optimize.js.
+          -->
+          <button class="ghost-btn" id="optimize" type="button"
+                  title="Search the electrode voltages for the best transmission">
+            Optimise voltages
+          </button>
         </div>
       </div>
+      <!--
+        What the tuner did, in full. Too long for the transient status pill
+        over the canvas, and worth keeping on screen: the point of a tuner is
+        the numbers it settled on.
+      -->
+      <p class="tune-note" id="tuneNote" role="status" hidden></p>
     </nav>
 
     <main class="layout">

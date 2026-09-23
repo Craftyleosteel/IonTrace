@@ -7,9 +7,11 @@ resulting field.
 Built for physical chemists and ion opticians who want to see where their ions
 go without installing anything.
 
-**Status: v0.2.** Electrostatic and RF optics in vacuum, three-dimensional
+**Status: v0.3.** Electrostatic and RF optics in vacuum, three-dimensional
 trajectories, optional space charge, and beamlines assembled from drifts,
-aperture plates, einzel lenses and quadrupoles. The physics that is present is
+aperture plates, einzel lenses, quadrupoles and quadrupole deflectors — so a
+column can turn a corner rather than only run straight. Voltages can be tuned
+for transmission at the press of a button. The physics that is present is
 validated; the physics that is absent is
 [documented](docs/PHYSICS.md#5-what-is-deliberately-absent).
 
@@ -26,9 +28,16 @@ and fly ions through the result:
 | **Aperture plate** | A charged plate with a hole. Not a passive opening — the equipotentials bulge through it, so it acts as a lens. |
 | **Einzel lens** | Three coaxial cylinders, outer two grounded. Does no net work on a transmitted ion, and focuses for either polarity. |
 | **Quadrupole** | Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both. |
+| **Quadrupole deflector** | Four curved electrodes in a grounded box, at $\pm V$ on the diagonals, turning the beam 90°. Not a sector: the field is a quadrupole *in* the bend plane, so the two axes couple and the path is not an arc. |
 
 Elements carry their own local field solve, so **only the element you change
 re-solves**, and voltages never re-solve at all.
+
+That last point is what makes **Optimise voltages** practical. Since a voltage
+is only a multiplier on a solved field, searching a few hundred combinations
+costs a few hundred beam flights and no solver time — so the tuner can hunt for
+the settings that transmit the most beam while you watch. Tune one element from
+its own panel, or the whole column from the toolbar.
 
 ## What it computes
 
@@ -43,8 +52,11 @@ axis.
 element. Einzel lenses, aperture plates and drifts are axisymmetric, so
 $\partial\phi/\partial\theta = 0$ exactly and rotation supplies the third
 dimension. A quadrupole's rods are uniform along $z$, so it is solved on a
-*transverse* $(x, y)$ grid instead. Neither is an approximation of a 3D solve;
-each is a symmetry being used.
+*transverse* $(x, y)$ grid instead. A deflector's electrodes are uniform
+perpendicular to the bend, so it is solved in the bend plane itself — the one
+case where the field and the trajectory share a plane, which is exactly why its
+axes couple. None of these is an approximation of a 3D solve; each is a
+symmetry being used.
 
 **Space charge is included.** The beam repels itself, driven by a beam
 *current* rather than by how many rays you happen to draw. Note that a ray
@@ -130,6 +142,8 @@ output:
 | Space charge | closed-form uniform-beam field; cylindrical shell theorem; zero at zero current |
 | Einzel lens | no net work, mirror symmetry, positive spherical aberration, reflection reported as reflection, focus independent of ion mass |
 | Quadrupole | closed-form $(x^2-y^2)/r_0^2$ potential; four-fold symmetry; Mathieu $a$, $q$ and their scalings; stable ion transmits and unstable one is lost |
+| Quadrupole deflector | solved potential is bilinear $\phi \propto XZ$; matched voltage derived from $\cot s = \tanh s$ and confirmed by integrating the coupled equations; measured transmission window |
+| Voltage tuner | recovers a working deflector voltage from zero, and lands within 15 % of the independently derived matched value |
 | Beamline | coordinate translation into placed elements; step size taken from the most demanding element; live chunking cannot change a trajectory |
 
 The lens tests check properties the *real device* has, so they fail for
@@ -147,7 +161,7 @@ they found, including the parts that are still wrong.
 
 ## Known limitations
 
-Read [docs/PHYSICS.md §9](docs/PHYSICS.md) before trusting a number. The
+Read [docs/PHYSICS.md §10](docs/PHYSICS.md) before trusting a number. The
 headline ones:
 
 - **Transmission is systematically pessimistic.** Electrode strikes resolve to
@@ -167,6 +181,16 @@ headline ones:
 - **Elements are solved in isolation**, so the field where two live elements
   meet is not a true solution for the pair. Leave a drift between them; the
   readout warns when you do not.
+- **The tuner optimises what it is given.** It maximises transmission of the
+  beam the source is currently set to produce, and a column tuned for nine ions
+  at 1.5 mm is not necessarily tuned for a wider or more divergent one. It is
+  also a local search: coordinate descent finds the best setting reachable from
+  where it starts, which for a column with several interacting elements is not
+  guaranteed to be the global optimum.
+- **The tuner will not touch an RF quadrupole**, on purpose. Maximum
+  transmission through a mass filter means switching the filter off, so its
+  voltages are not the tuner's business — see
+  [PHYSICS.md §9.5](docs/PHYSICS.md).
 
 ## Layout
 
@@ -180,7 +204,12 @@ src/
   field.js              fast adjust, E = -grad phi, interpolation
   integrator.js         RK4 and velocity Verlet, adaptive step
   ion.js                practical units -> SI; beam factories
-  geometries/einzel.js  the first element
+  spacecharge.js        ring/Gauss and discrete Coulomb models
+  frames.js             rigid placements: where each element sits
+  beamline.js           the column: layout, lookup, bounds, alignment
+  optimize.js           voltage search for maximum transmission
+  elements/             drift, aperture, einzel, quadrupole, deflector
+    index.js            the registry the UI is generated from
   main.js               UI wiring and canvas rendering
 tests/                  physics validation suite
 docs/PHYSICS.md         equations, assumptions, and every omission

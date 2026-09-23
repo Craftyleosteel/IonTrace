@@ -757,7 +757,152 @@ so rather than reporting a large figure as though something were wrong.
 
 ---
 
-## 9. Known limitations of this version
+## 9. The quadrupole deflector
+
+### 9.1 A quadrupole *in* the bend plane
+
+The bender in this simulator is not a cylindrical sector. It is the device a
+real beamline uses to fold its path: four curved electrodes filling the corners
+of a grounded box, at $+V$ and $-V$ on the diagonals, with the beam entering
+through the gap on one axis and leaving through the gap on the perpendicular
+one.
+
+The distinction is not cosmetic. A sector deflects with a field everywhere
+perpendicular to the orbit, and the trajectory is a circular arc. A quadrupole
+deflector sets up a two-dimensional quadrupole potential **in the plane the
+beam travels in**,
+
+$$\phi = C\,x\,z,$$
+
+which couples the two axes rather than acting centrally:
+
+$$m\ddot{x} = -qC z, \qquad m\ddot{z} = -qC x.$$
+
+Axial velocity is traded for transverse velocity as the ion crosses, and the
+path is **not** an arc. Diagonalising with $u = x+z$ and $w = x-z$ separates
+them, at the cost of making plain what kind of device this is:
+
+$$\ddot{u} = -b\,u \quad\text{(oscillatory)}, \qquad
+  \ddot{w} = +b\,w \quad\text{(exponential)}, \qquad b = qC/m.$$
+
+Half of the motion **grows** rather than oscillating. That is why a deflector
+is touchy: an ion that is off-energy or off-axis does not merely lag the design
+orbit, it departs from it exponentially. It is also what makes the device an
+energy filter rather than merely a corner.
+
+### 9.2 The matched voltage, and its evil twin
+
+Requiring the ion to reach the exit aperture with both the right position and
+the right direction closes the problem. With $s$ half the transit phase, the
+oscillatory branch demands $v/(a\omega) = \cot s$ and the exponential branch
+demands $v/(a\omega) = \tanh s$, so the design condition is
+
+$$\cot s = \tanh s \;\Longrightarrow\; s = 0.937552,\quad
+  \left(\tfrac{a\omega}{v}\right)^2 = \coth^2 s = 1.85565,$$
+
+whence, with $T$ the kinetic energy, $r_0$ the aperture radius and $a$ the
+half-width of the field region,
+
+$$V_0 = 1.8556\,\frac{T}{q}\left(\frac{r_0}{a}\right)^2 .$$
+
+That equation has further roots, the next near $s = 2.347$ giving $k = 0.9641$,
+and direct integration of the coupled equations confirms it is *also* a clean
+ninety degrees — the ion takes a longer way round, bending the other way. **It
+is not usable.** On that branch the oscillatory amplitude is $1.427a$ rather
+than $1.241a$, carrying the orbit out to $\rho = 1.01a$: past the electrode
+faces at $r_0$, which is necessarily smaller than $a$. The ion lands on an
+electrode instead of reaching the exit. The short branch peaks at $0.88a$ and
+clears the aperture. Picking the wrong root is not a small error, and it does
+not announce itself as one — the algebra is equally valid either way, and only
+integrating the orbit tells them apart.
+
+### 9.3 What the solved field does instead
+
+The formula assumes the ideal quadrupole potential everywhere inside the box
+and nothing outside it. The solved field is neither: electrodes subtend finite
+arcs, the grounded box shapes the field near the apertures, and the field does
+not stop abruptly at the entrance plane. Measured against the solved field,
+with a nine-ion beam of 1.5 mm radius and $V/V_0$ the voltage as a multiple of
+the ideal one:
+
+| $r_0/a$ | turns exactly 90° at | transmits 9/9 over |
+|---|---|---|
+| 0.655 | $V/V_0 \approx 1.00$ | 0.75 – 1.05 |
+| 0.905 | $V/V_0 \approx 1.02$ | 0.85 – 1.05 |
+| 0.950 | $V/V_0 \approx 1.07$ | 0.90 – 1.10 |
+
+The closed form predicts the right angle well at every proportion, drifting a
+few per cent high as the electrodes thin and the box moves in. The window is at
+least a tenth either side throughout, which is the tolerance the interface
+shows. It is **asymmetric**, and which way it leans depends on the geometry —
+thick electrodes tolerate too little voltage, thin ones tolerate too much.
+
+### 9.4 The box has holes in it
+
+The Laplace problem needs the domain closed, so the grounded box is painted all
+the way round the solve. The beam apertures are real, though, and the collision
+test carves them back out: a clear channel of half-width $r_\text{outer}\sin
+\gamma$ on the entrance ($-Z$) and exit ($-X$) faces, where $\gamma$ is the
+angle by which the electrodes stop short of each axis. Treating the closed rim
+as metal destroys every ion on the entrance plane.
+
+This is the same approximation as the open end faces of §2.1, and it has the
+same justification: a grounded plane with a hole in it is very nearly a
+grounded plane. Note that the grid's default open faces are the *wrong* ones
+here — this element and the mass filter both solve in a plane of their own, so
+for them the grid's $z$ ends are ordinary walls, and both close them
+explicitly.
+
+### 9.5 Tuning
+
+Because every electrode voltage is a multiplier on a stored unit solution
+(§3.2), a search over voltages costs beam flights and no solver time at all.
+`src/optimize.js` exploits that: coordinate descent with a coarse-to-fine
+bracketed scan on each knob, revisiting knobs because they interact.
+
+**The objective.** Transmission is an integer count and therefore flat almost
+everywhere: most voltages transmit nothing, and the search has no direction to
+move in. Two much smaller terms break the flatness — partial credit for how far
+a lost ion travelled down the column, and a tie-break on the size of the
+surviving beam transverse to the **exit** axis. Both are capped below $1/N$, so
+neither can outweigh a single transmitted ion; the reported figure is always
+the honest count.
+
+Gradient descent would be the wrong tool. The objective is genuinely
+discontinuous — an ion either clears an aperture or does not — so a derivative
+is meaningless and a scan is what finds the operating window.
+
+**Where it looks.** A deflector's slider has to reach tens of kilovolts,
+because real deflectors run there, while a 50 eV beam is matched at a few tens
+of volts and its whole window is about a tenth wide. Any affordable sweep of
+the full range steps straight over the answer. So where an element can say what
+voltage it expects — the deflector can, from §9.2 — the sweep is centred on
+that estimate instead, spanning $\pm 3 V_0$ so the opposite polarity a negative
+ion needs is still reachable. The estimate itself, both polarities, and the
+setting already in place are all tried explicitly, rather than left to whether
+an evenly spaced scan happens to land on them.
+
+Each refinement then brackets $\pm$ one sample spacing around the best point.
+That width is the right one by construction: a scan at spacing $d$ can only
+have missed the optimum by less than $d$. A fixed fraction of the range would
+not close in at all on a knob whose range is three orders of magnitude wider
+than its answer.
+
+**What it will not touch.** Only voltages: geometry needs a fresh solve, and
+leaving it alone is the constraint an operator at a real instrument works under
+anyway. And *not the RF quadrupole*, which is the one exclusion worth arguing
+about. Its voltages do change transmission — but a mass filter's job is
+selectivity, and the setting that transmits the most beam is the one that
+filters nothing. Given the RF amplitude to play with, the search turns it down
+until the rods stop selecting: measured on a lens–filter–deflector column, it
+dropped 250 V to 40 V and counted it an improvement. That is the optimiser
+working correctly on the wrong objective. Tuning a filter means tuning $(a, q)$
+for a target mass, a different search with a different goal, and it does not
+belong behind a button labelled "best transmission".
+
+---
+
+## 10. Known limitations of this version
 
 **1. The lens does not converge at second order, and the reason is not
 staircasing.** Measured Richardson orders for `buildEinzelLens` at
