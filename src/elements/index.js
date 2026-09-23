@@ -16,6 +16,8 @@ import { createAperture, APERTURE_DEFAULTS } from './aperture.js';
 import { createEinzel, EINZEL_ELEMENT_DEFAULTS } from './einzel.js';
 import { createQuadrupole, QUADRUPOLE_DEFAULTS, amplitudeForQ } from './quadrupole.js';
 import { createBender, BENDER_DEFAULTS, matchedVoltage } from './bender.js';
+import { createMultipole, MULTIPOLE_DEFAULTS } from './multipole.js';
+import { createFunnel, FUNNEL_DEFAULTS } from './funnel.js';
 
 /** @typedef {{key: string, label: string, unit?: string, min: number, max: number, step: number, rebuild: boolean, help?: string, scale?: Function}} FieldSpec */
 
@@ -35,6 +37,17 @@ const ICONS = {
     '<circle cx="9" cy="13" r="2.6"/><circle cx="23" cy="13" r="2.6"/>',
   // Four curved electrodes in a grounded box, with the beam entering on one
   // axis and leaving on the perpendicular one.
+  // Eight rods around an aperture, seen end on.
+  multipole:
+    '<circle cx="16" cy="9" r="7.4" opacity=".25"/>' +
+    '<circle cx="16" cy="2.4" r="1.9"/><circle cx="20.7" cy="4.3" r="1.9"/>' +
+    '<circle cx="22.6" cy="9" r="1.9"/><circle cx="20.7" cy="13.7" r="1.9"/>' +
+    '<circle cx="16" cy="15.6" r="1.9"/><circle cx="11.3" cy="13.7" r="1.9"/>' +
+    '<circle cx="9.4" cy="9" r="1.9"/><circle cx="11.3" cy="4.3" r="1.9"/>',
+  // A stack of rings closing down towards the exit.
+  funnel:
+    '<path d="M2 1v3M6 1v4M10 1v5M14 1v6M18 1v6.6M22 1v7M26 1v7.4M30 1v7.6"/>' +
+    '<path d="M2 17v-3M6 17v-4M10 17v-5M14 17v-6M18 17v-6.6M22 17v-7M26 17v-7.4M30 17v-7.6"/>',
   bender:
     '<rect x="9.5" y="1.5" width="15" height="15" rx="1" opacity=".3"/>' +
     '<path d="M21.7 7.29A5 5 0 0 0 18.71 4.3"/>' +
@@ -94,6 +107,45 @@ export const ELEMENT_TYPES = {
       { key: 'boreRadius', label: 'Bore', unit: 'mm', min: 3, max: 10, step: 0.5, rebuild: true },
       { key: 'centreLength', label: 'Centre length', unit: 'mm', min: 5, max: 40, step: 1, rebuild: true },
       { key: 'gap', label: 'Gap', unit: 'mm', min: 1, max: 12, step: 0.5, rebuild: true },
+    ],
+  },
+
+  multipole: {
+    icon: ICONS.multipole,
+    label: 'Multipole guide',
+    blurb:
+      'Six, eight or more rods in alternating RF phase. The effective potential goes as r^(2n−2), so it is flat across the middle and steep at the rods — which guides ions of every mass instead of selecting one, the opposite of what a quadrupole is for.',
+    create: createMultipole,
+    defaults: MULTIPOLE_DEFAULTS,
+    fields: [
+      { key: 'rfAmplitude', label: 'RF amplitude', unit: 'V', min: 0, max: 20000, step: 10, rebuild: false, help: 'Zero-to-peak on each rod, with adjacent rods in antiphase. Deeper well, but also more RF heating.' },
+      { key: 'frequency', label: 'Frequency', unit: 'MHz', min: 0.1, max: 10, step: 0.05, rebuild: false, help: 'The well depth goes as 1/f², so a lower frequency traps harder — until the drive is no longer fast compared with the ion’s own motion.' },
+      { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false },
+      { key: 'poles', label: 'Rods', unit: '', min: 4, max: 24, step: 2, rebuild: true, help: '4 is a quadrupole, 6 a hexapole, 8 an octopole. More rods flatten the bottom of the well and steepen its walls.' },
+      { key: 'length', label: 'Rod length', unit: 'mm', min: 10, max: 400, step: 5, rebuild: false },
+      { key: 'fieldRadius', label: 'Field radius r₀', unit: 'mm', min: 1.5, max: 15, step: 0.25, rebuild: true },
+      { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 0.5, max: 8, step: 0.1, rebuild: true },
+    ],
+  },
+
+  funnel: {
+    icon: ICONS.funnel,
+    label: 'Ion funnel',
+    blurb:
+      'A stack of rings with a shrinking aperture, adjacent rings in opposite RF phase and a DC gradient down the stack. Real ones work at 1–30 mbar and rely on the gas to damp the ions — which IonTrace does not model, so this reproduces a funnel’s field but not its ability to collect a warm cloud.',
+    create: createFunnel,
+    defaults: FUNNEL_DEFAULTS,
+    fields: [
+      { key: 'rfAmplitude', label: 'RF amplitude', unit: 'V', min: 0, max: 2000, step: 5, rebuild: false, help: 'Zero-to-peak, alternating ring to ring. This is what builds the wall the ions are held off.' },
+      { key: 'frequency', label: 'Frequency', unit: 'MHz', min: 0.05, max: 5, step: 0.05, rebuild: false },
+      { key: 'dcEntry', label: 'DC at the entry', unit: 'V', min: -500, max: 500, step: 1, rebuild: false, help: 'The gradient from here to the exit is what pushes ions along the stack.' },
+      { key: 'dcExit', label: 'DC at the exit', unit: 'V', min: -500, max: 500, step: 1, rebuild: false },
+      { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false },
+      { key: 'rings', label: 'Rings', unit: '', min: 3, max: 40, step: 1, rebuild: true },
+      { key: 'entryRadius', label: 'Entry aperture', unit: 'mm', min: 2, max: 30, step: 0.5, rebuild: true },
+      { key: 'exitRadius', label: 'Exit aperture', unit: 'mm', min: 0.5, max: 15, step: 0.25, rebuild: true },
+      { key: 'pitch', label: 'Ring pitch', unit: 'mm', min: 1, max: 10, step: 0.25, rebuild: true },
+      { key: 'ringThickness', label: 'Ring thickness', unit: 'mm', min: 0.2, max: 3, step: 0.1, rebuild: true },
     ],
   },
 

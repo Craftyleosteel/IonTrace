@@ -28,6 +28,8 @@ and fly ions through the result:
 | **Aperture plate** | A charged plate with a hole. Not a passive opening — the equipotentials bulge through it, so it acts as a lens. |
 | **Einzel lens** | Three coaxial cylinders, outer two grounded. Does no net work on a transmitted ion, and focuses for either polarity. |
 | **Quadrupole** | Four rods, RF and DC. Converges in one transverse plane and diverges in the other at every instant; the RF is what makes it net-focusing in both. |
+| **Multipole guide** | Six, eight or more rods in alternating RF phase. $\|E\| \propto r^{n-1}$, so the effective potential is flat across the middle and steep at the rods — it guides every mass instead of selecting one, the opposite of a quadrupole's job. |
+| **Ion funnel** | A stack of rings with a shrinking aperture, alternating RF and a DC gradient. Reproduces a funnel's field; **not** its ability to collect a warm cloud, which needs the buffer gas this does not model. |
 | **Quadrupole deflector** | Four curved electrodes in a grounded box, at $\pm V$ on the diagonals, turning the beam 90°. Not a sector: the field is a quadrupole *in* the bend plane, so the two axes couple and the path is not an arc. Rolls to any angle, so the column can turn left, down, or anywhere between. |
 
 **A column can branch.** A quadrupole deflector has **three** exits — its box
@@ -194,6 +196,8 @@ output:
 | Folded columns | a column bent through two right angles transmits; no branch of it claims another's ions; the beam is measured transversely to the axis it is actually on |
 | Fringe fields | decay inside a grounded pipe matches $e^{-2.405z/R}$; a grounded plate measurably shields a charged one; a column solve agrees with the isolated solve where it should (an einzel, to 0.00 %) |
 | Branching | each branch is placed where its own exit points, with the right path length; the beam switches with the voltage; an orphaned branch leaves with its junction; no element can be moved below itself |
+| Multipole | $\|E\| \propto r^{n-1}$ recovered from the solved field to 2 % for 4, 6, 8 and 12 rods; well depth within 15 % of the Dehmelt closed form and correctly weaker for round rods; more rods guide better |
+| Ion funnel | the aperture narrows monotonically; the DC ramp falls monotonically along the axis; the RF wall reverses ring to ring; DC and RF stay independent over one solve |
 | Eigensolver | $Av = \lambda v$ and orthonormality to $10^{-10}$ on known, degenerate, near-singular and indefinite matrices |
 | Refinement | the beam is measured on the target plane rather than at the ion's last step; no refinement is kept that loses an ion or fails to improve |
 | Speed work | the element-lookup cache reproduces trajectories to the last bit; the coarse scan reaches the same answer as a full-fidelity one |

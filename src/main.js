@@ -551,6 +551,13 @@ function summarise(e) {
       return p.rfAmplitude === 0
         ? `DC ${p.dcVoltage} V · ${p.length} mm`
         : `${p.rfAmplitude} V @ ${p.frequency} MHz · ${p.length} mm`;
+    case 'multipole':
+      return `${e.poles} rods · ${p.rfAmplitude} V @ ${p.frequency} MHz · r₀ ${p.fieldRadius} mm`;
+    case 'funnel':
+      return (
+        `${p.rings} rings · ⌀${p.entryRadius * 2}→${p.exitRadius * 2} mm · ` +
+        `${p.rfAmplitude} V @ ${p.frequency} MHz`
+      );
     case 'bender':
       return `90° ${p.bendPlane === 0 ? 'horizontal' : 'vertical'} · ±${p.voltage.toFixed(
         0
@@ -836,7 +843,9 @@ function renderInspector() {
     <h2>${escapeHtml(e.label)} ${backButton()}</h2>
     <p class="hint">${escapeHtml(spec.blurb)}</p>
     ${rows}
-    <div id="derived">${bendDirectionRow(e)}${benderReadout(e)}${quadrupoleReadout(e)}</div>
+    <div id="derived">${bendDirectionRow(e)}${benderReadout(e)}${quadrupoleReadout(e)}${multipoleReadout(
+      e
+    )}${funnelReadout(e)}</div>
     ${tuneRow(e)}
     ${alignmentRows(e)}
     <div class="row-actions">
@@ -901,7 +910,7 @@ function refreshInspector() {
 
   const derived = inspectorEl.querySelector('#derived');
   if (derived) {
-    derived.innerHTML = bendDirectionRow(e) + benderReadout(e) + quadrupoleReadout(e);
+    derived.innerHTML = bendDirectionRow(e) + benderReadout(e) + quadrupoleReadout(e) + multipoleReadout(e) + funnelReadout(e);
   }
 }
 
@@ -1102,6 +1111,83 @@ function quadrupoleReadout(e) {
             'loses ions whatever (a, q) says. Lengthen the rods or raise the frequency.'
           : 'long enough for the stability numbers above to mean something'
       }</span>
+    </div>`;
+}
+
+/** RF periods an ion of the current beam sees crossing an element. */
+function rfCycles(e) {
+  const mass = readNumber(inputs.mass, 100);
+  const charge = Math.abs(readNumber(inputs.charge, 1)) || 1;
+  const speed = Math.sqrt(
+    (2 * readNumber(inputs.energy, 50) * ELEMENTARY_CHARGE * charge) /
+      (mass * ATOMIC_MASS_UNIT)
+  );
+  return speed > 0 ? (e.length / speed) * e.params.frequency * 1e6 : 0;
+}
+
+/**
+ * What governs a multipole guide: the depth of its effective potential well,
+ * and whether the approximation that produced it applies.
+ */
+function multipoleReadout(e) {
+  if (e.typeKey !== 'multipole') return '';
+  const mass = readNumber(inputs.mass, 100);
+  const charge = Math.abs(readNumber(inputs.charge, 1)) || 1;
+  const { depth, q, valid } = e.trapping(mass, charge);
+  const cycles = rfCycles(e);
+  const brief = cycles < RF_CYCLES_MIN;
+  return `
+    <div class="mathieu ${valid ? 'ok' : 'bad'}">
+      <span>well ${depth.toFixed(2)} eV</span>
+      <span>q = ${q.toFixed(3)}</span>
+      <span class="verdict">${
+        valid
+          ? 'the drive is fast enough for an effective potential to mean something'
+          : `q above 0.3 — the effective potential stops describing the motion, so ` +
+            'this depth is not what the ion actually feels'
+      }</span>
+    </div>
+    <div class="mathieu ${brief ? 'bad' : 'ok'}">
+      <span>${cycles.toFixed(1)} RF cycles</span>
+      <span class="verdict">${
+        brief
+          ? 'too few to guide on — lengthen the rods or raise the frequency'
+          : 'long enough to guide on'
+      }</span>
+    </div>`;
+}
+
+/**
+ * What governs an ion funnel here, which is not what governs a real one.
+ */
+function funnelReadout(e) {
+  if (e.typeKey !== 'funnel') return '';
+  const mass = readNumber(inputs.mass, 100);
+  const charge = Math.abs(readNumber(inputs.charge, 1)) || 1;
+  const well = e.wellAt(e.rings - 2, mass, charge);
+  const cycles = rfCycles(e);
+  const brief = cycles < RF_CYCLES_MIN;
+  const push = e.params.dcEntry - e.params.dcExit;
+  return `
+    <div class="mathieu ${brief ? 'bad' : 'ok'}">
+      <span>${cycles.toFixed(1)} RF cycles</span>
+      <span>wall ${well.toFixed(1)} eV</span>
+      <span>DC push ${push.toFixed(0)} V</span>
+      <span class="verdict">${
+        brief
+          ? 'too few cycles for the RF wall to mean anything — raise the frequency'
+          : 'the drive is fast enough for the RF wall to hold'
+      }</span>
+    </div>
+    <div class="mathieu bad">
+      <span class="verdict">
+        No buffer gas. A real funnel works at 1–30 mbar and relies on collisions
+        to damp the ions into the well; without that a <em>deeper</em> wall
+        transmits <em>worse</em>, because the heating it causes has nowhere to
+        go. Measured here: 1.1 eV of wall passes everything, 17 eV passes
+        nothing. So this reproduces a funnel’s field, not its ability to
+        collect a warm cloud.
+      </span>
     </div>`;
 }
 

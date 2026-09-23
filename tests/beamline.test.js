@@ -1154,6 +1154,242 @@ describe('A beam expanding under its own charge', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* multipole guides                                                    */
+/* ------------------------------------------------------------------ */
+
+describe('Multipole guide', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 5 };
+
+  /** The largest rod that fits between 2n of them around r0, at 60 %. */
+  const fitRod = (poles, r0 = 5) => {
+    const s = Math.sin(Math.PI / poles);
+    return Math.min(Math.round(((r0 * s) / (1 - s)) * 0.6 * 10) / 10, 3);
+  };
+
+  const build = (poles, over = {}) =>
+    createElement('multipole', {
+      poles,
+      fieldRadius: 5,
+      rodRadius: fitRod(poles),
+      length: 120,
+      rfAmplitude: 300,
+      frequency: 2,
+      gridStep: 0.25,
+      ...over,
+    });
+
+  /** Field magnitude averaged round a circle of radius r. */
+  const ring = (e, r) => {
+    let sum = 0;
+    const n = 32;
+    for (let k = 0; k < n; k++) {
+      const a = (2 * Math.PI * k) / n;
+      const f = e.field.fieldAt(r * Math.cos(a), r * Math.sin(a));
+      sum += Math.hypot(f.Ez, f.Er);
+    }
+    return sum / n;
+  };
+
+  it('produces a field going as r^(n-1), the ideal multipole form', () => {
+    // The defining property. An ideal 2n-pole has phi ~ r^n cos(n theta), so
+    // |E| ~ r^(n-1): linear in r for a quadrupole, cubic for an octopole.
+    // Fitted from the SOLVED field of real round rods, near the rim - for a
+    // 12-pole the multipole term at a third of the field radius is a quarter
+    // of a per cent of the rim field, and anything else present swamps it.
+    for (const poles of [4, 6, 8, 12]) {
+      const e = build(poles);
+      const k =
+        Math.log(ring(e, mmToM(4.5)) / ring(e, mmToM(3))) / Math.log(4.5 / 3);
+      assertClose(k, poles / 2 - 1, 0.1, `${poles} rods should give |E| ~ r^${poles / 2 - 1}`);
+    }
+  });
+
+  it('deepens its well as the pole count rises', () => {
+    // At fixed voltage and radius, a flatter-bottomed well is also a deeper
+    // one, which is why octopoles are used to hold ions and quadrupoles to
+    // select them.
+    let last = 0;
+    for (const poles of [4, 6, 8]) {
+      const { depth } = build(poles).trapping(SPEC.mass, SPEC.charge);
+      assert(depth > last, `${poles} rods should trap harder than fewer`);
+      last = depth;
+    }
+  });
+
+  it('matches the closed-form well depth for an ideal quadrupole', () => {
+    // Dehmelt: U* = q^2 E0^2 / (4 m Omega^2), with |E0| = 2V/r0 at the field
+    // radius of an ideal quadrupole. Round rods at the classic 1.1487 r0 are
+    // not hyperbolic, so agreement is close rather than exact - and which way
+    // it misses is the point: the solved field is the weaker one.
+    const e = build(4, { rodRadius: 5.74, housingRadius: 22, gridStep: 0.25 });
+    const { depth } = e.trapping(100, 1);
+    const r0 = mmToM(5);
+    const w = 2 * Math.PI * 2e6;
+    const E0 = (2 * 300) / r0;
+    const ideal =
+      (ELEMENTARY_CHARGE * ELEMENTARY_CHARGE * E0 * E0) /
+      (4 * 100 * ATOMIC_MASS_UNIT * w * w) /
+      ELEMENTARY_CHARGE;
+    assertRelClose(depth, ideal, 0.15, 'within fifteen per cent of the ideal form');
+    assert(depth < ideal, 'and round rods give a weaker field than hyperbolic ones');
+  });
+
+  it('guides better with more rods', () => {
+    // The reason the element exists. Same voltage, same aperture, same beam.
+    const through = (poles) => {
+      const bl = new Beamline([
+        createElement('drift', { length: 10, bore: 4 }),
+        build(poles),
+        createElement('drift', { length: 15, bore: 4 }),
+      ]);
+      const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 9, radius: 1.5 }), {
+        cfl: 0.05,
+        maxSteps: 600000,
+      });
+      return tracks.filter((t) => t.stop === 'exited').length;
+    };
+    const four = through(4);
+    const eight = through(8);
+    assert(eight >= four, `eight rods should guide at least as well: ${four} vs ${eight}`);
+    assert(eight >= 8, `an octopole should pass nearly everything, got ${eight}/9`);
+  });
+
+  it('refuses rods that will not fit', () => {
+    // Adjacent rods touching would short the two phases together, which is not
+    // a multipole at all.
+    let threw = false;
+    try {
+      createElement('multipole', { poles: 12, fieldRadius: 5, rodRadius: 3 });
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'twelve fat rods around a small aperture is not a geometry');
+  });
+
+  it('flags a drive too slow for an effective potential to mean anything', () => {
+    // The whole idea rests on the drive being fast compared with the ion's
+    // motion. Past a Mathieu q of about 0.3 it is not, and a depth quoted from
+    // it would be a number about a model that no longer applies.
+    const slow = build(8, { frequency: 0.3 });
+    assert(!slow.trapping(SPEC.mass, SPEC.charge).valid, 'a slow drive is flagged');
+    assert(build(8, { frequency: 4 }).trapping(SPEC.mass, SPEC.charge).valid, 'a fast one is not');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* ion funnels                                                         */
+/* ------------------------------------------------------------------ */
+
+describe('Ion funnel', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 5 };
+
+  it('narrows its aperture down the stack', () => {
+    const f = createElement('funnel', { entryRadius: 12, exitRadius: 2, rings: 14 });
+    assertRelClose(f.apertureOf(0), mmToM(12), 1e-9, 'first ring');
+    assertRelClose(f.apertureOf(13), mmToM(2), 1e-9, 'last ring');
+    for (let k = 1; k < 14; k++) {
+      assert(f.apertureOf(k) < f.apertureOf(k - 1), `ring ${k} is narrower than the one before`);
+    }
+  });
+
+  it('carries a monotonic DC ramp along its axis', () => {
+    /*
+      The failure this guards against was total and did not look like a bug.
+      With the domain's end faces grounded, a DC ramp painted on the rings
+      becomes a HILL: zero at the entrance, up to 13 V inside, back to zero at
+      the exit. A 5 eV beam is reflected in its entirety - 0 of 9 through at
+      every width - and nothing about that says "boundary condition". The end
+      faces belong to the ring beside them instead, which is what a funnel
+      embedded in a longer line actually looks like.
+    */
+    const f = createElement('funnel', { dcEntry: 20, dcExit: 0 });
+    const zs = [0, 0.25, 0.5, 0.75, 1].map((t) => t * f.length);
+    const phi = zs.map((z) => f.dcField.potentialAt3D(0, 0, z));
+    assertClose(phi[0], 20, 1.5, 'starts at the entry potential');
+    assertClose(phi[phi.length - 1], 0, 1.5, 'ends at the exit potential');
+    for (let i = 1; i < phi.length; i++) {
+      assert(phi[i] < phi[i - 1], `the ramp must fall all the way: ${phi.join(' -> ')}`);
+    }
+  });
+
+  it('keeps the DC and RF patterns independent over one solve', () => {
+    // Two weighted readings of the same basis. Changing the amplitude must not
+    // touch the ramp, and it must not re-solve.
+    const f = createElement('funnel', {});
+    const grid = f.grid;
+    const mid = f.length / 2;
+    const dcBefore = f.dcField.potentialAt3D(0, 0, mid);
+    const rfBefore = f.field.potentialAt3D(0, 0, mmToM(1));
+
+    f.setVoltage(400);
+    assert(f.grid === grid, 'the same grid, not a fresh solve');
+    assertClose(f.dcField.potentialAt3D(0, 0, mid), dcBefore, 1e-9, 'the ramp is untouched');
+    // The RF map is held at unit amplitude and scaled by the drive, so it too
+    // is unchanged - the amplitude lives in the drive, not in the map.
+    assertClose(f.field.potentialAt3D(0, 0, mmToM(1)), rfBefore, 1e-9, 'the RF map is untouched');
+  });
+
+  it('drives the rings in alternating phase', () => {
+    // Adjacent rings at the same potential would make the stack a tube, not a
+    // funnel: there would be no RF wall at all.
+    const f = createElement('funnel', { rings: 8 });
+    for (let k = 0; k < 8; k++) {
+      assertClose(f.field.voltageOf(`ring${k}`), k % 2 === 0 ? 1 : -1, 1e-12, `ring ${k}`);
+    }
+
+    /*
+      And it reaches the beam - measured just inside each aperture, where the
+      wall the ions are held off actually is.
+
+      Not on the axis. Near the wide end the rings are far closer together
+      than the aperture is across, so their opposite phases very nearly cancel
+      before they get there and the axial RF is almost nothing. That is not a
+      defect, it is the reason a funnel has to narrow: the wall only closes in
+      on the beam once the aperture becomes comparable to the pitch.
+    */
+    const rim = (k) => {
+      const r = f.rects[k];
+      return f.field.fieldAt((r.z0 + r.z1) / 2, Math.max(r.r0 - f.grid.step * 2, f.grid.step));
+    };
+    for (let k = 1; k < 8; k++) {
+      const a = rim(k - 1);
+      const b = rim(k);
+      assert(
+        a.Er * b.Er < 0,
+        `the RF wall must reverse from ring ${k - 1} to ring ${k}`
+      );
+    }
+  });
+
+  it('transmits a cold beam at its defaults', () => {
+    // Which the defaults were chosen to do. They are NOT the settings a real
+    // funnel runs at - see the note in the element - because without gas to
+    // carry the RF heating away, a deeper wall transmits worse.
+    const bl = new Beamline([
+      createElement('drift', { length: 8, bore: 12 }),
+      createElement('funnel', {}),
+      createElement('drift', { length: 20, bore: 3 }),
+    ]);
+    const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 9, radius: 1.5 }), {
+      cfl: 0.05,
+      maxSteps: 1200000,
+    });
+    const n = tracks.filter((t) => t.stop === 'exited').length;
+    assert(n >= 8, `expected a cold beam through, got ${n}/9`);
+  });
+
+  it('refuses rings that would touch', () => {
+    let threw = false;
+    try {
+      createElement('funnel', { ringThickness: 3, pitch: 2 });
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'rings thicker than their pitch are not a stack');
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* branching                                                           */
 /* ------------------------------------------------------------------ */
 

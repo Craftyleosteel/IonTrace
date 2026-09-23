@@ -821,6 +821,94 @@ so rather than reporting a large figure as though something were wrong.
 
 ---
 
+## 8.9 Multipole guides and ion funnels
+
+Both are RF devices, and neither is governed by Mathieu stability. What governs
+them is the **effective potential** — Dehmelt's result for an ion in a field
+oscillating faster than the ion can follow:
+
+$$U^* = \frac{q^2 E_0^2}{4 m \Omega^2}$$
+
+with $E_0$ the local field *amplitude*. IonTrace evaluates it from the solved
+field rather than from an ideal form, so the depth quoted is for the device as
+drawn.
+
+### 8.9.1 Why more poles guide better
+
+The ideal $2n$-pole potential is $\phi = V (r/r_0)^n \cos n\theta$, so
+$|E| \propto r^{n-1}$ and therefore $U^* \propto r^{2n-2}$: **flat across the
+middle and steep at the rods**. An ion spends most of its time where the RF is
+weak, so it is heated less and the guide accepts a far wider mass range than a
+quadrupole. The cost is a weak restoring force near the axis, which is why
+multipoles make good traps and poor filters.
+
+Recovered from the solved field of real round rods, fitting $|E| \propto r^k$
+near the rim:
+
+| Rods | $k$ measured | $n-1$ |
+|---|---|---|
+| 4 | 1.02 | 1 |
+| 6 | 2.01 | 2 |
+| 8 | 3.02 | 3 |
+| 12 | 5.02 | 5 |
+
+Fitted **near the rim** deliberately. For a 12-pole the multipole term at a
+third of the field radius is a quarter of a per cent of the rim field, so
+anything else present — and round rods always leave something — swamps it.
+Measured at $r = 0.3r_0$ the same fit returns 3.97 rather than 5, which is a
+statement about round rods, not about the solver.
+
+Against the closed form for an ideal quadrupole, the solved well comes out
+**9 % shallower**: round rods at the classic $1.1487 r_0$ cancel the 12-pole
+term but do not reproduce a hyperbola, and the field at $r_0$ is correspondingly
+weaker.
+
+### 8.9.2 The funnel, and the gas that is not here
+
+An ion funnel is a stack of rings with a shrinking aperture, adjacent rings in
+opposite RF phase, and a DC gradient down the stack. It is solved in $r$–$z$
+like a lens, with each ring its own electrode so that the DC ramp and the RF
+alternation are two weighted readings of one basis:
+
+$$\phi(r,z,t) = \phi_{\mathrm{DC}}(r,z) + \cos(\Omega t)\,\phi_{\mathrm{RF}}(r,z)$$
+
+Both terms are fast adjusts; changing the gradient or the amplitude never
+re-solves.
+
+**A boundary condition that silently destroyed the beam.** With the domain's
+end faces grounded, a DC ramp painted on the rings becomes a *hill*: zero at
+the entrance, 13 V inside, zero again at the exit. A 5 eV beam was reflected in
+its entirety — 0 of 9 through at every beam width — and nothing about that
+looked like a boundary-condition error. Each end face now takes the potential
+of the ring beside it, which is what a funnel embedded in a longer line
+actually looks like, and the ramp falls monotonically from end to end.
+
+**Without buffer gas, a deeper well transmits worse.** This is the honest core
+of it. Measured on the shipped stack at 4 MHz:
+
+| RF wall depth | Through |
+|---|---|
+| 0.3 eV | 9/9 |
+| 1.1 eV | 9/9 |
+| 4.3 eV | 3/9 |
+| 17 eV | 0/9 |
+
+The wall confines, but the RF heating that comes with it has nowhere to go, so
+the ion climbs out. In a real funnel — 1 to 30 mbar — collisions carry that
+energy away continuously, and that is not a detail of the device, it is the
+mechanism. At the frequency a real funnel runs at, 0.5–1 MHz, a 100 u ion
+crosses this stack in under six RF cycles, too few for an effective potential
+to mean anything at all, and transmission is zero.
+
+So this element reproduces a funnel's **field**, and the guiding a cold
+near-axis beam gets from it. It does not reproduce a funnel's ability to
+collect a warm, diffuse cloud, which is the job funnels exist to do. Its
+defaults are chosen to work in vacuum and are therefore *not* the settings the
+hardware is operated at. The interface says so rather than letting a
+transmission figure stand unqualified.
+
+---
+
 ## 9. The quadrupole deflector
 
 ### 9.1 A quadrupole *in* the bend plane
