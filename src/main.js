@@ -44,7 +44,6 @@ const cross = el('cross');
 const crossCtx = cross.getContext('2d');
 const statusEl = el('status');
 const readoutEl = el('readout');
-const trackEl = el('track');
 const inspectorEl = el('inspector');
 const addPanel = el('addPanel');
 const toolsEl = el('tools');
@@ -61,8 +60,7 @@ const fringeToggle = el('fringe');
 const fringeNote = el('fringeNote');
 const repulsionNote = el('repulsionNote');
 const flowEl = el('flow');
-const tabList = el('tabList');
-const tabFlow = el('tabFlow');
+const readoutHint = el('readoutHint');
 
 const inputs = {
   mass: el('mass'),
@@ -329,6 +327,33 @@ function worldAt(px, py) {
   return T.unproject(px, py);
 }
 
+/**
+ * Is the cursor on a drawn trajectory?
+ *
+ * Tested in screen pixels rather than in world coordinates, so the target is
+ * the same size however far the view is zoomed out - which is what makes a
+ * thin line clickable at all. Points are compared directly rather than by
+ * distance to each segment: they are recorded densely enough that the gap
+ * between them is well under the tolerance.
+ */
+function onTrajectory(px, py, tol = 7) {
+  const T = paneAt(py);
+  if (!T) return false;
+  for (const t of trajectories) {
+    const pts = t.points;
+    if (!pts) continue;
+    // Every few points is plenty for a hit test and keeps this cheap on a
+    // beam of twenty thousand recorded steps.
+    const stride = Math.max(1, Math.floor(pts.length / 400));
+    for (let i = 0; i < pts.length; i += stride) {
+      const p = pts[i];
+      const [sx, sy] = T.project([p.x, p.y ?? 0, p.z]);
+      if (Math.abs(sx - px) <= tol && Math.abs(sy - py) <= tol) return true;
+    }
+  }
+  return false;
+}
+
 /** The element under a world point, or -1. */
 function elementIndexAtWorld(g) {
   for (let i = 0; i < beamline.elements.length; i++) {
@@ -417,6 +442,15 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  // A click on the beam itself selects the beam. The ions are the most
+  // clickable thing on screen and used not to be clickable at all, so their
+  // settings could only be reached through the one box at the far left of the
+  // beamline panel.
+  if (onTrajectory(px, py)) {
+    select({ kind: 'source' });
+    return;
+  }
+
   const index = elementIndexAtWorld(worldAt(px, py));
   if (index < 0) {
     // Clicking empty space deselects, which is what collapses the panel back
@@ -440,7 +474,9 @@ canvas.addEventListener('pointermove', (e) => {
       ? 'grab'
       : elementIndexAtWorld(worldAt(px, py)) >= 0
         ? 'grab'
-        : 'default';
+        : onTrajectory(px, py)
+          ? 'pointer'
+          : 'default';
     return;
   }
 
@@ -525,87 +561,15 @@ function summarise(e) {
 }
 
 /**
- * The beamline, drawn as what it now is: a tree.
+ * The beamline panel.
  *
- * A column used to be a list, and a list rendered as a list. Once a deflector
- * can have hardware on both of its exits the shape on screen has to be the
- * shape of the thing - otherwise two branches appear as one line and the
- * picture lies about where the beam can go.
- *
- * Every element is followed by its children, indented under the port they hang
- * from. A port with nothing on it is drawn as an empty socket you can add to,
- * which is how a second branch gets started at all.
+ * One view: the flow chart. A column used to be a list and rendered as a list,
+ * but once a deflector can have hardware on three of its exits the shape on
+ * screen has to be the shape of the thing - a nested list puts two branches
+ * one above the other, which reads as a sequence and is a lie about where the
+ * beam can go.
  */
 function renderTrack() {
-  const idx = selectedIndex();
-
-  const chip = (e) => {
-    const i = beamline.elements.indexOf(e);
-    const off = Math.hypot(e.align.dx, e.align.dy);
-    const kids = beamline.childrenOf(e);
-    return `
-      <li class="chip ${i === idx ? 'sel' : ''} chip-${e.typeKey}">
-        <button class="chip-body" data-act="select" data-index="${i}">
-          <span class="chip-name">${escapeHtml(e.label)}${
-            off > 0 ? ' <span class="nudged" title="Misaligned">off</span>' : ''
-          }</span>
-          <span class="chip-meta">${escapeHtml(summarise(e))}</span>
-          <span class="chip-len">${mToMm(e.length).toFixed(0)} mm</span>
-        </button>
-        <span class="chip-tools">
-          <button data-act="left" data-index="${i}"
-            ${e.from?.parent ? '' : 'disabled'}
-            title="Move upstream" aria-label="Move ${escapeHtml(e.label)} upstream">◀</button>
-          <button data-act="right" data-index="${i}" ${kids.length === 1 ? '' : 'disabled'}
-            title="Move downstream" aria-label="Move ${escapeHtml(e.label)} downstream">▶</button>
-          <button data-act="remove" data-index="${i}"
-            ${beamline.elements.length <= 1 ? 'disabled' : ''}
-            title="Remove" aria-label="Remove ${escapeHtml(e.label)}">×</button>
-        </span>
-      </li>`;
-  };
-
-  /** One element and everything below it. */
-  const branch = (e) => {
-    const exits = exitsOf(e);
-    // A single unnamed exit is just "what comes next" and needs no label; a
-    // junction does, or the two lines below it are indistinguishable.
-    const junction = exits.length > 1;
-    const below = exits
-      .map((exit) => {
-        const child = beamline.childAt(e, exit.port);
-        const i = beamline.elements.indexOf(e);
-        const head = junction
-          ? `<li class="port-label">${escapeHtml(exit.label)}</li>`
-          : '';
-        const body = child
-          ? branch(child)
-          : `<li class="port-open">
-               <button data-act="port" data-index="${i}" data-port="${exit.port}"
-                       title="Start a line on this exit">
-                 + ${escapeHtml(junction ? exit.label.toLowerCase() : 'add here')}
-               </button>
-             </li>`;
-        return head + body;
-      })
-      .join('');
-    return chip(e) + (below ? `<li><ul class="track-sub">${below}</ul></li>` : '');
-  };
-
-  // The source is part of the column as far as selection goes.
-  trackEl.innerHTML =
-    `<li class="chip chip-source ${selection?.kind === 'source' ? 'sel' : ''}">
-       <button class="chip-body" data-act="source">
-         <span class="chip-name">Ion source</span>
-         <span class="chip-meta">${escapeHtml(summariseBeam())}</span>
-         <span class="chip-len">entrance</span>
-       </button>
-     </li>` +
-    (beamline.roots().map(branch).join('') ||
-      `<li class="port-open">
-         <button data-act="port" data-index="-1" data-port="out">+ add an element</button>
-       </li>`);
-
   autoAlignBtn.hidden = !beamline.misaligned;
   renderFlow();
 }
@@ -614,7 +578,15 @@ function renderTrack() {
 /* flow chart                                                          */
 /* ------------------------------------------------------------------ */
 
-const FLOW = { w: 150, h: 46, gapX: 46, gapY: 16, pad: 14 };
+/*
+  Flow-chart geometry, in CSS pixels.
+
+  Sized to be read rather than to fit. The panel scrolls in both directions, so
+  a long column runs off to the right and a branching one runs off the bottom,
+  and neither is shrunk to squeeze into the panel - which would make the chart
+  least legible exactly when there is most in it.
+*/
+const FLOW = { w: 210, h: 66, gapX: 62, gapY: 26, pad: 18 };
 
 /**
  * Lay the column out as a tidy tree.
@@ -659,7 +631,10 @@ function flowLink(x1, y1, x2, y2) {
 }
 
 function renderFlow() {
-  if (flowEl.hidden) return;
+  // Keep the scroll position across a redraw. Selecting a box, nudging a
+  // voltage or flying the beam all redraw this, and having the panel jump back
+  // to the top left every time would make a long column unusable.
+  const { scrollLeft, scrollTop } = flowEl;
   const { pos, sourceRow, lanes } = flowLayout();
   const cols = Math.max(2, ...[...pos.values()].map((p) => p.col + 1));
   const width = flowX(cols) + FLOW.pad;
@@ -738,12 +713,21 @@ function renderFlow() {
       }
     }
 
+    const nudged = Math.hypot(e.align.dx, e.align.dy) > 0;
     parts.push(
-      `<g class="node ${i === idx ? 'sel' : ''} node-${e.typeKey}"
-          data-act="select" data-index="${i}">
-         <rect x="${x}" y="${y}" width="${FLOW.w}" height="${FLOW.h}" rx="8"/>
-         <text x="${x + 12}" y="${y + 19}">${escapeHtml(e.label)}</text>
-         <text class="sub" x="${x + 12}" y="${y + 34}">${escapeHtml(summarise(e))}</text>
+      `<g class="node ${i === idx ? 'sel' : ''} node-${e.typeKey}">
+         <rect class="hit" x="${x}" y="${y}" width="${FLOW.w}" height="${FLOW.h}" rx="9"
+               data-act="select" data-index="${i}"/>
+         <text class="name" x="${x + 14}" y="${y + 24}" data-act="select" data-index="${i}"
+           >${escapeHtml(e.label)}${nudged ? ' ·off axis' : ''}</text>
+         <text class="sub" x="${x + 14}" y="${y + 42}" data-act="select" data-index="${i}"
+           >${escapeHtml(summarise(e))}</text>
+         <text class="len" x="${x + 14}" y="${y + 57}" data-act="select" data-index="${i}"
+           >${mToMm(e.length).toFixed(0)} mm</text>
+         <g class="kill" data-act="remove" data-index="${i}">
+           <circle cx="${x + FLOW.w - 16}" cy="${y + 16}" r="9"/>
+           <text x="${x + FLOW.w - 16}" y="${y + 20}">×</text>
+         </g>
        </g>`
     );
   }
@@ -752,6 +736,9 @@ function renderFlow() {
     `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">` +
     parts.join('') +
     '</svg>';
+
+  flowEl.scrollLeft = scrollLeft;
+  flowEl.scrollTop = scrollTop;
 }
 
 function summariseBeam() {
@@ -797,6 +784,9 @@ function renderInspector() {
   addPanel.hidden = selection !== null;
   beamPanel.hidden = !isSource;
   inspectorEl.hidden = selection === null;
+  // The flight readout belongs to the ions, so it appears with them.
+  readoutEl.hidden = !isSource;
+  readoutHint.hidden = isSource;
 
   if (isSource) {
     inspectorEl.innerHTML = `
@@ -2588,22 +2578,7 @@ function onStructureClick(e) {
   if (hit) handleAction(hit.dataset.act, Number(hit.dataset.index));
 }
 
-trackEl.addEventListener('click', onStructureClick);
 flowEl.addEventListener('click', onStructureClick);
-
-/** Which view of the beamline is showing. */
-function showFlow(on) {
-  flowEl.hidden = !on;
-  trackEl.hidden = on;
-  tabFlow.classList.toggle('sel', on);
-  tabList.classList.toggle('sel', !on);
-  tabFlow.setAttribute('aria-selected', String(on));
-  tabList.setAttribute('aria-selected', String(!on));
-  renderTrack();
-}
-
-tabList.addEventListener('click', () => showFlow(false));
-tabFlow.addEventListener('click', () => showFlow(true));
 
 inspectorEl.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-act]');
@@ -2860,7 +2835,7 @@ selection = null;
 syncOutputs();
 describeFringe();
 renderTools();
-showFlow(true);
+renderTrack();
 renderInspector();
 render();
 drawReadout();

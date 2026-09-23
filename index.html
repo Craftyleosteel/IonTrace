@@ -258,22 +258,18 @@
         <div class="track-wrap">
           <div class="track-head">
             <h2>Beamline</h2>
-            <!-- The flow chart leads, because a column that can branch has a
-                 shape and the shape is the point. The list is still there for
-                 a straight line, where it is more compact. -->
-            <div class="tabs" role="tablist" aria-label="Beamline view">
-              <button class="tab sel" id="tabFlow" type="button" role="tab"
-                      aria-selected="true">Flow chart</button>
-              <button class="tab" id="tabList" type="button" role="tab"
-                      aria-selected="false">List</button>
-            </div>
           </div>
-          <ol class="track" id="track" aria-label="Beamline elements" hidden></ol>
-          <div class="flow" id="flow" aria-label="Beamline flow chart"></div>
+          <!--
+            Scrolls in both directions. A branching column grows to the right
+            as it gets longer and downward as it gets more branches, and
+            shrinking it to fit would make it unreadable exactly when there is
+            most to read.
+          -->
+          <div class="flow" id="flow" aria-label="Beamline flow chart" tabindex="0"></div>
           <p class="hint track-hint">
-            Click anything to select it and see its settings; click empty space
-            to deselect. Drag an element on the diagram to hang it somewhere
-            else, and drag the green handles at the entrance to resize the beam.
+            Click a box to select it and see its settings; click the ions to
+            see the beam. Drag an element on the diagram above to hang it
+            somewhere else.
           </p>
         </div>
 
@@ -288,7 +284,16 @@
           </span>
         </div>
 
-        <div class="readout" id="readout"></div>
+        <!--
+          What the beam did. Shown only while the ions are selected: it is
+          about them, not about the column, and it is a wall of numbers that
+          does not need to be on screen while you are placing hardware. Click
+          the beam in the diagram, or the ion source in the flow chart.
+        -->
+        <div class="readout" id="readout" hidden></div>
+        <p class="hint readout-hint" id="readoutHint">
+          Click the beam to see what it did.
+        </p>
 
         <details class="notes">
           <summary>What this model does and does not include</summary>
