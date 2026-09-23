@@ -185,13 +185,28 @@
       <!-- viewport                                                    -->
       <!-- ---------------------------------------------------------- -->
       <section class="viewport">
-        <div class="canvas-frame">
+        <div class="canvas-frame" id="canvasFrame">
           <canvas id="scene" role="img"
             aria-label="Side view of the beamline with ion trajectories overlaid on the electrostatic potential."></canvas>
           <canvas id="cross" class="cross" role="img"
             aria-label="Beam cross-section, looking along the axis."></canvas>
           <p id="status" class="status" role="status">Solving…</p>
           <p id="scaleNote" class="scale-note" hidden></p>
+          <!--
+            Controls that live on the diagram itself, so they are still there
+            when it is the only thing on screen. The Fly button is duplicated
+            rather than moved: in the normal layout the one in the sidebar is
+            where it belongs, and full screen has no sidebar.
+          -->
+          <div class="view-tools">
+            <button class="view-btn" id="viewFly" type="button" hidden>
+              Fly ions
+            </button>
+            <button class="view-btn" id="fullscreen" type="button"
+                    title="Show the beamline full screen">
+              Full screen
+            </button>
+          </div>
         </div>
 
         <!-- The beamline itself: elements in order, left to right. -->

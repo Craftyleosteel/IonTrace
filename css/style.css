@@ -42,6 +42,11 @@
   --radius: 10px;
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, monospace;
+
+  /* One width for the whole page, so the toolbar and the layout below it line
+     up. The diagram takes whatever is left after the fixed sidebar, so raising
+     this makes the beamline view wider and nothing else. */
+  --page-max: 1720px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -97,7 +102,7 @@ body {
 }
 
 .masthead-inner {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: 20px 24px;
 }
@@ -132,7 +137,7 @@ body {
 }
 
 .toolbar-inner {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: 10px 24px;
   display: flex;
@@ -212,7 +217,7 @@ body {
 /* ------------------------------------------------------------------ */
 
 .layout {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: 24px;
   display: grid;
@@ -460,6 +465,56 @@ input[type="range"]:focus-visible {
   overflow: hidden;
 }
 
+/*
+  Full screen. The frame becomes the whole display, so its own controls come
+  with it - there is no sidebar to reach for out here.
+*/
+.canvas-frame:fullscreen {
+  border: none;
+  border-radius: 0;
+  background: var(--surface-page);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.view-tools {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.view-btn {
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.view-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+/* The Fly button earns its colour out here: it is the only action available. */
+.canvas-frame:fullscreen #viewFly {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: transparent;
+  font-weight: 650;
+}
+
+.canvas-frame:fullscreen #viewFly.stale {
+  animation: fly-nudge 1.6s ease-in-out infinite;
+}
+
 #scene {
   display: block;
   width: 100%;
@@ -547,7 +602,7 @@ input[type="range"]:focus-visible {
 /* What the tuner settled on. Wraps rather than truncating: the voltages are
    the point of the exercise. */
 .tune-note {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: 0 24px 10px;
   font-size: 12px;
@@ -564,6 +619,46 @@ input[type="range"]:focus-visible {
   align-items: flex-start;
   flex-direction: column;
   gap: 4px;
+}
+
+/* Which way a bender turns the beam. The angle is continuous; these are the
+   four anyone actually asks for. */
+.dirs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.dir {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 6px 2px;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.dir:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.dir.sel {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+}
+
+.dir-glyph {
+  font-size: 15px;
+  line-height: 1;
 }
 
 .back {
@@ -1040,7 +1135,7 @@ a {
 /* ------------------------------------------------------------------ */
 
 .colophon {
-  max-width: 1400px;
+  max-width: var(--page-max);
   margin: 0 auto;
   padding: 20px 24px 40px;
   display: flex;

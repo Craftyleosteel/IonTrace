@@ -54,6 +54,9 @@ const optimizeBtn = el('optimize');
 const tuneNote = el('tuneNote');
 const scaleNote = el('scaleNote');
 const flyButton = el('fly');
+const canvasFrame = el('canvasFrame');
+const viewFly = el('viewFly');
+const fullscreenBtn = el('fullscreen');
 
 const inputs = {
   mass: el('mass'),
@@ -217,7 +220,7 @@ function setParam(index, key, value) {
 
   markStale();
   renderTrack();
-  renderInspector();
+  refreshInspector();
   render();
   drawReadout();
 }
@@ -616,8 +619,7 @@ function renderInspector() {
     <h2>${escapeHtml(e.label)} ${backButton()}</h2>
     <p class="hint">${escapeHtml(spec.blurb)}</p>
     ${rows}
-    ${benderReadout(e)}
-    ${quadrupoleReadout(e)}
+    <div id="derived">${bendDirectionRow(e)}${benderReadout(e)}${quadrupoleReadout(e)}</div>
     ${tuneRow(e)}
     ${alignmentRows(e)}
     <div class="row-actions">
@@ -649,6 +651,41 @@ function tuneRow(e) {
         alone. Optimise voltages, in the toolbar, moves the whole column at once.
       </span>
     </div>`;
+}
+
+/**
+ * Update the inspector without rebuilding it.
+ *
+ * `renderInspector` replaces the panel's HTML, which destroys the very input
+ * the user is typing into - the field loses focus and the caret on every
+ * keystroke, so nothing longer than one character can be typed. Anything that
+ * fires while a field is being edited must come through here instead: it
+ * writes to the existing nodes rather than replacing them.
+ *
+ * The value of a field is deliberately not written back while it has focus.
+ * Doing so fights the person typing: "-3" would be clamped to the minimum and
+ * rewritten under the caret before the rest of the number arrived.
+ */
+function refreshInspector() {
+  const e = beamline.elements[selectedIndex()];
+  if (!e) return;
+  const spec = ELEMENT_TYPES[e.typeKey];
+  const ion = beamSpec();
+
+  for (const f of spec.fields) {
+    const input = inspectorEl.querySelector(`input[data-param="${f.key}"]`);
+    if (!input) continue;
+    const r = fieldRange(f, e.params, ion);
+    input.min = r.min;
+    input.max = r.max;
+    input.step = r.step;
+    if (document.activeElement !== input) input.value = e.params[f.key];
+  }
+
+  const derived = inspectorEl.querySelector('#derived');
+  if (derived) {
+    derived.innerHTML = bendDirectionRow(e) + benderReadout(e) + quadrupoleReadout(e);
+  }
 }
 
 const backButton = () =>
@@ -697,6 +734,34 @@ function alignmentRows(e) {
  * itself bad news, and narrow enough to be worth showing.
  */
 const BENDER_WINDOW = 0.1;
+
+/**
+ * The four directions a bend is usually wanted in, as buttons.
+ *
+ * The roll angle is continuous and any value works, but "turn it left" should
+ * not require knowing that left is zero degrees. The angle control stays for
+ * everything in between.
+ */
+const BEND_DIRECTIONS = [
+  { deg: 0, label: 'Left', glyph: '←' },
+  { deg: 90, label: 'Down', glyph: '↓' },
+  { deg: 180, label: 'Right', glyph: '→' },
+  { deg: 270, label: 'Up', glyph: '↑' },
+];
+
+function bendDirectionRow(e) {
+  if (e.typeKey !== 'bender') return '';
+  const now = ((e.params.bendPlane % 360) + 360) % 360;
+  const buttons = BEND_DIRECTIONS.map(
+    (d) =>
+      `<button class="dir ${Math.abs(now - d.deg) < 0.5 ? 'sel' : ''}"
+               data-act="bend" data-index="${d.deg}"
+               title="Bend ${d.label.toLowerCase()} (${d.deg}°)">
+         <span class="dir-glyph">${d.glyph}</span>${escapeHtml(d.label)}
+       </button>`
+  ).join('');
+  return `<div class="dirs">${buttons}</div>`;
+}
 
 function benderReadout(e) {
   if (e.typeKey !== 'bender') return '';
@@ -782,6 +847,7 @@ function markStale() {
   if (trajectories.length === 0) return;
   stale = true;
   flyButton.classList.add('stale');
+  viewFly.classList.add('stale');
 }
 
 /** The ion the source is set to produce, without its spatial distribution. */
@@ -915,6 +981,7 @@ function fly() {
 
   stale = false;
   flyButton.classList.remove('stale');
+  viewFly.classList.remove('stale');
 
   if (!flight) {
     render();
@@ -969,7 +1036,31 @@ function tick() {
 function setFlyLabel(label, hint) {
   flyButton.innerHTML =
     `<span class="fly-label">${label}</span><span class="fly-hint">${hint}</span>`;
+  viewFly.textContent = label;
 }
+
+/* ------------------------------------------------------------------ */
+/* full screen                                                         */
+/* ------------------------------------------------------------------ */
+
+const isFullscreen = () => document.fullscreenElement === canvasFrame;
+
+function toggleFullscreen() {
+  if (isFullscreen()) document.exitFullscreen();
+  else canvasFrame.requestFullscreen?.().catch((err) => console.warn(err));
+}
+
+/*
+  The canvas is sized from its container, and going full screen changes that
+  container's size without resizing the window - so the redraw has to be hung
+  on the fullscreen event rather than on `resize`.
+*/
+document.addEventListener('fullscreenchange', () => {
+  viewFly.hidden = !isFullscreen();
+  fullscreenBtn.textContent = isFullscreen() ? 'Exit full screen' : 'Full screen';
+  render();
+  drawReadout();
+});
 
 /* ------------------------------------------------------------------ */
 /* voltage tuning                                                      */
@@ -1686,9 +1777,27 @@ function render() {
           bounds.maxX - bounds.minX + 2 * margin,
           bounds.maxY - bounds.minY + 2 * margin
         );
+  /*
+    How tall each pane may be.
+
+    True scale is kept by `fitScale`, so this is a budget rather than a
+    setting: give the panes more room and the whole column is drawn larger,
+    up to the point where the aspect ratio of the beamline itself is the
+    limit. The old ceiling of 320 px was well below that for any column
+    shorter than about a metre, which is all of them.
+
+    Full screen gets the display; otherwise a little over half the window,
+    which leaves the beamline track and the readout visible beneath.
+  */
+  const budget = isFullscreen()
+    ? window.innerHeight - 16
+    : Math.min(760, Math.round(window.innerHeight * 0.58));
   const paneHeight = Math.max(
     150,
-    Math.min(320, Math.round((cssWidth * spanT) / Math.max(1e-9, spanZ)))
+    Math.min(
+      Math.floor(budget / panes),
+      Math.round((cssWidth * spanT) / Math.max(1e-9, spanZ))
+    )
   );
   const cssHeight = paneHeight * panes;
 
@@ -1918,11 +2027,13 @@ for (const [id, input] of Object.entries(inputs)) {
   input.addEventListener(event, () => {
     syncOutputs();
     if (!displayOnly) markStale();
-    // Mathieu numbers and the bender's matched voltage depend on the ion, so
-    // the inspector follows the beam.
+    // Mathieu numbers, the bender's matched voltage and the step a control
+    // nudges by all depend on the ion, so the inspector follows the beam.
+    // Refreshed in place rather than rebuilt: a rebuild would pull the focus
+    // out of whatever is being typed into.
     if (id === 'mass' || id === 'charge' || id === 'energy') {
       renderTrack();
-      renderInspector();
+      refreshInspector();
     }
     render();
     if (!displayOnly) drawReadout();
@@ -1967,6 +2078,13 @@ function handleAction(act, index) {
       const spec = ELEMENT_TYPES.bender.fields.find((f) => f.key === 'voltage');
       const { step } = fieldRange(spec, e.params, beamSpec());
       setParam(selectedIndex(), 'voltage', Math.round(V / step) * step);
+      return true;
+    }
+    case 'bend': {
+      // `index` carries the roll angle here, not an element index.
+      const i = selectedIndex();
+      if (beamline.elements[i]?.typeKey !== 'bender') return true;
+      setParam(i, 'bendPlane', index);
       return true;
     }
     case 'tune': {
@@ -2121,6 +2239,8 @@ inspectorEl.addEventListener('change', (e) => {
 });
 
 flyButton.addEventListener('click', fly);
+viewFly.addEventListener('click', fly);
+fullscreenBtn.addEventListener('click', toggleFullscreen);
 
 window.addEventListener('keydown', (e) => {
   if (e.key !== ' ' && e.key !== 'Enter') return;
