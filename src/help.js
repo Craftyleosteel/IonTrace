@@ -160,7 +160,9 @@ export const HELP = {
   potentialMap: {
     title: 'Potential map',
     body: [
-      'Colour is the potential: negative one way, positive the other, with zero in the middle of the scale. It shows where the high and low ground is, which is what an ion rolls down.',
+      'Colour is the potential: negative one way, positive the other. It shows where the high and low ground is, which is what an ion rolls down.',
+      'Where there is no potential there is no colour — the map fades out rather than stopping at an edge. That matters because the region solved is much larger than the hardware in it, so a map painted right to its boundary drew a rectangle around every element that had nothing physical about it.',
+      'The dashed lines across the beam are the other half of the same idea: they mark where one solve ends and the next begins, so they appear only between elements solved separately. Turn on fringe fields and the ones inside a shared solve disappear, because there is no longer a seam there.',
     ],
   },
 

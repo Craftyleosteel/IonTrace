@@ -1968,15 +1968,36 @@ function drawElementField(e, T) {
   const offCtx = off.getContext('2d');
   const img = offCtx.createImageData(nz, rows);
 
+  /*
+    Transparent where there is no potential, rather than a flat midpoint grey.
+
+    Painted opaque, every element laid a solid rectangle the size of its own
+    solve across the page - and since that rectangle is the DOMAIN, not the
+    hardware, it was mostly empty space at zero volts. Two elements butted hard
+    against each other still read as two boxes, each with a hard edge where
+    nothing physical happens, and the edges were the most visible thing in the
+    picture.
+
+    Alpha from |phi| fixes that at the source: a region at zero volts paints
+    nothing, so there is no rectangle to see. What remains visible is the
+    field, which is the only thing that was ever meant to be.
+
+    The 0.55 power is a display gamma, not physics. A weak fringe is a small
+    fraction of the peak and would be invisible on a linear alpha ramp, which
+    would hide the very thing fringe fields are turned on to show; the curve
+    lifts it without letting it claim the same weight as the centre of a lens.
+  */
+  const GAMMA = 0.55;
   for (let row = 0; row < rows; row++) {
     const j = Math.abs(nr - 1 - row);
     for (let i = 0; i < nz; i++) {
-      const [r, g, b] = divergingColour(field.phi[j * nz + i] / maxAbs, neg, zero, pos);
+      const t = field.phi[j * nz + i] / maxAbs;
+      const [r, g, b] = divergingColour(t, neg, zero, pos);
       const p = (row * nz + i) * 4;
       img.data[p] = r;
       img.data[p + 1] = g;
       img.data[p + 2] = b;
-      img.data[p + 3] = 255;
+      img.data[p + 3] = Math.round(255 * Math.min(1, Math.abs(t) ** GAMMA));
     }
   }
   offCtx.putImageData(img, 0, 0);
@@ -2383,12 +2404,34 @@ function drawReferencePath(T) {
  * element's entrance face rather than a full-height line, since the faces are
  * no longer parallel once the column bends.
  */
+/**
+ * Where one solve stops and the next begins.
+ *
+ * These dashed lines used to mark every element boundary, which made a packed
+ * column look chopped into segments even when the field ran straight through
+ * them. That is backwards: an element boundary is not a physical surface, and
+ * drawing one where nothing happens is drawing an artefact.
+ *
+ * So a boundary is drawn only where the model really does change hands -
+ * between two elements solved separately, each behind its own grounded end
+ * faces. Inside a shared column solve there is no such seam, and none is
+ * drawn. The dashes then carry information rather than decoration: they are
+ * exactly the places a field line cannot cross, and turning fringe fields on
+ * visibly removes them.
+ */
 function drawBoundaries(T) {
   ctx.save();
   ctx.strokeStyle = cssVar('--gridline');
   ctx.lineWidth = 1;
   ctx.setLineDash([2, 3]);
-  for (const e of beamline.elements) {
+  beamline.elements.forEach((e, i) => {
+    const parent = e.from?.parent ?? null;
+    if (parent) {
+      const run = beamline.runFor(i);
+      // Same run as whatever feeds it: one grid spans the join, so there is
+      // no boundary here to draw.
+      if (run && run === beamline.runFor(beamline.elements.indexOf(parent))) return;
+    }
     const r = e.outerRadius * 1.1;
     const a = T.project(toGlobal(e.frame, across(T, r)));
     const b = T.project(toGlobal(e.frame, across(T, -r)));
@@ -2396,7 +2439,7 @@ function drawBoundaries(T) {
     ctx.moveTo(a[0], a[1]);
     ctx.lineTo(b[0], b[1]);
     ctx.stroke();
-  }
+  });
   ctx.restore();
 }
 
