@@ -1047,18 +1047,42 @@ interrupt the diagonals, and the field does not stop abruptly at the entrance
 plane. Each of those moves the voltage that turns the beam through exactly 90°
 away from $V_0$ by a few per cent.
 
-> **This table is missing on purpose.** The calibration that used to sit here —
-> $V/V_0$ against $r_0/a$, and the transmission window either side — was
-> measured on the *previous* electrode shape: thin annular arcs separated by
-> wedge-shaped gaps.
->
-> Reshaping the electrodes into filled blocks with corner posts turns out, by
-> §9.1.1, to leave the aperture field alone entirely, so the old numbers should
-> still hold *provided the arc coverage matches* — which is why the default
-> channel width is chosen to reproduce $\psi_0 = 16°$. They have not been
-> restored because that argument has not been checked against a measurement,
-> and an unchecked table is the thing this section exists to avoid. Re-measure
-> with a sweep of $V/V_0$ against the turn angle before quoting any.
+Measured against the solved field, with a nine-ion beam of 1.5 mm radius at
+100 u and 50 eV. An ion counts only if it leaves **by the bend port** — the
+deflector has four, and with nothing attached to the straight one an ion that
+sails through unbent also leaves the column, so counting exits alone would
+score an *off* deflector as perfectly tuned:
+
+| $r_0/a$ | turns 90° at | all nine bent over |
+|---|---|---|
+| 0.655 (shipped) | $V/V_0 = 1.22$ | 0.84 – 1.38 |
+| 0.792 | 1.20 | 0.86 – 1.34 |
+| 0.905 | 1.30 | 0.92 – 1.46 |
+| 0.950 | 1.38 | 0.96 – 1.56 |
+
+The closed form is systematically **low**, by 20–40 %, and never right. That is
+not a defect in the algebra — it is §9.1.3 arriving: the ideal derivation knows
+only the aperture, while a real ion is also kicked by the entrance and exit
+channels on its way through. The window is wide enough (±25 % or better) that
+$V_0$ always transmits, which is what makes it a usable starting point, but it
+does not turn a right angle and the tuner is what finds the voltage that does.
+
+The channel is the dominant control, at fixed $r_0/a = 0.655$:
+
+| channel | turns 90° at | all nine bent over |
+|---|---|---|
+| 10.5 mm | $V/V_0 = 0.86$ | 0.70 – 0.96 |
+| 13 mm | 1.02 | 0.76 – 1.14 |
+| 15 mm (shipped) | 1.22 | 0.84 – 1.38 |
+| 18 mm | 1.48 | 0.96 – 1.70 |
+
+A *narrower* channel needs *less* voltage, and by a lot — far more than the
+8.5 % the aperture field moves across this range. The reason is that the
+channel kick points **the same way as the bend**: the $+V$ wall is the one on
+the outside of the turn, so the slot starts steering the ion before it reaches
+the aperture and the two effects add. Narrowing the channel strengthens that
+kick as $1/w$ while barely touching the quadrupole, which is why $V_{90}$ moves
+so much more than $F$ does.
 
 What does not depend on that measurement: the closed form is the right *size*,
 not the final answer, and the voltage tuner (§10) searches the solved field for

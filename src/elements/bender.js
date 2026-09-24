@@ -135,22 +135,27 @@
  *
  * What the formula assumes, and therefore what to expect
  * ------------------------------------------------------
- * It assumes the ideal quadrupole potential everywhere inside the box and
- * nothing outside it. The solved field is neither: real electrodes subtend
- * finite arcs, the grounded box shapes the field near the apertures, grounded
- * posts interrupt the diagonals, and the field does not stop abruptly at the
- * entrance plane. Every one of those pushes the voltage that turns the beam
- * through exactly ninety degrees away from V0, by a few per cent, in a
- * direction that depends on the proportions.
+ * It assumes the ideal quadrupole potential inside the aperture and nothing
+ * outside it, and the second half of that is the problem: a real ion is kicked
+ * by the entrance and exit channels as well, and those kicks point the same
+ * way as the bend. Measured against the solved field, with nine ions of 1.5 mm
+ * radius at 100 u and 50 eV, counting only ions that left by the BEND port:
  *
- * What the two changes above do to that number, in opposite directions:
- * filling the electrode corners strengthens the field per volt, so less
- * voltage is needed; the grounded posts weaken it, so more is. Which wins at
- * a given set of proportions is a question for a measurement, and the
- * calibration table that used to sit here was measured on the previous
- * electrode shape - thin annular arcs with wedge-shaped gaps - so it has been
- * removed rather than left to mislead. Re-measure it with `npm test`, or with
- * a sweep of V/V0 against the turn angle, before quoting numbers.
+ *     r0/a     turns 90 deg at    all nine bent over
+ *     0.655 (shipped)  1.22 V0      0.84 .. 1.38
+ *     0.792            1.20 V0      0.86 .. 1.34
+ *     0.905            1.30 V0      0.92 .. 1.46
+ *     0.950            1.38 V0      0.96 .. 1.56
+ *
+ * and against channel width at the shipped proportions:
+ *
+ *     10.5 mm  0.86 V0      13 mm  1.02 V0
+ *     15 mm    1.22 V0      18 mm  1.48 V0
+ *
+ * So the closed form is systematically LOW, by twenty to forty per cent, and
+ * never exactly right. The window either side is wide enough that V0 always
+ * transmits - which is what makes it a usable starting point - but it does not
+ * turn a right angle.
  *
  * So the matched voltage is a starting point of the right size, not the final
  * answer - which is exactly why a real deflector of this kind is followed by a
