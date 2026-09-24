@@ -952,21 +952,42 @@ circle. Projecting the boundary onto $\sin 2\theta$,
 $$\phi = \frac{4V}{\pi}\sin 2\alpha \left(\frac{r}{r_0}\right)^{2}\sin 2\theta
        = F\,V\,\frac{2XZ}{r_0^{2}}, \qquad F = \frac{4}{\pi}\cos 2\psi_0,$$
 
-so $F$ is the factor by which a real electrode beats — or misses — the ideal
-normalisation $V_0$ assumes, and the voltage needed scales as $1/F$:
+so $F$ would be the factor by which a real electrode beats — or misses — the
+ideal normalisation $V_0$ assumes, with the voltage needed scaling as $1/F$.
 
-| channel | $\psi_0$ | $F$ |
-|---|---|---|
-| $w \to 0$ (fully covered) | 0° | 1.273 |
-| 10.5 mm (shipped) | 16.0° | 1.080 |
-| 16 mm | 24.9° | 0.822 |
+**It over-predicts threefold, and the reason matters more than the model.**
+Between a 10.5 mm channel and a 16 mm one, $F$ says the field should fall to
+0.762. Measured on the solved field: **0.915**.
 
-The estimate treats the open channel mouths as grounded, which they are not, so
-it is a guide to the **scaling** rather than a number to quote. It was enough to
-explain a suite-wide failure: widening the default channel from an effective
-5.24 mm half-width to 8 mm dropped $F$ by 24 %, and every test flying at the
-ideal voltage under-bent into an electrode. The default is now chosen so that
-$\psi_0$ matches the coverage the element was calibrated at.
+The model assumes the gaps sit at zero, as a gap in a driven boundary would. A
+channel is not a gap. Its two walls belong to *neighbouring* blocks, which are
+at opposite polarity, so the slot is lined with $+V$ facing $-V$ and goes on
+driving field into the aperture long after the arc has ended. Widening the
+channel moves those walls apart; it does not remove them. So the aperture field
+is far less sensitive to channel width than arc coverage alone suggests, and
+$F$ is useful only as a statement of direction.
+
+### 9.1.3 The channel is a deflector in its own right
+
+That $+V$ facing $-V$ across a slot is a **parallel-plate deflector**, and the
+beam must cross one to get in. Treating the slot as uniform, of length
+$L = $ `electrodeThickness` and half-gap $w$, the sideways throw at the matched
+voltage is
+
+$$d \;\approx\; \frac{k}{4}\left(\frac{r_0}{a}\right)^{2}\frac{L^{2}}{w},
+\qquad k = 1.8556,$$
+
+growing with the **square** of electrode depth and falling only as $1/w$. At the
+shipped proportions with a 10.5 mm channel that is 3.1 mm of throw against
+5.25 mm of clearance — and the measured transmission was 4 of 9.
+
+This is real behaviour rather than a modelling artefact: a deflector with deep
+channels really does steer its own beam into its entrance, which is why
+instruments put a grounded aperture plate across the mouth. This model has no
+such plate, so the default channel width is chosen against $d$ rather than
+against $F$ — the field barely notices the difference, and the acceptance does.
+A thin-electrode geometry has a short slot and never sees the effect at all,
+which is why the calibration tests in §9.2 pin their own channel width.
 
 The distinction is not cosmetic. A sector deflects with a field everywhere
 perpendicular to the orbit, and the trajectory is a circular arc. A quadrupole

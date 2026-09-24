@@ -46,17 +46,38 @@
  *     phi = (4V/pi) sin(2.alpha) (r/r0)^2 sin(2.theta)
  *         = F . V . 2XZ/r0^2,        F = (4/pi) cos(2.psi0),
  *
- * so F is the factor by which the real electrode beats - or misses - the
- * ideal normalisation the matched voltage assumes, and the voltage needed
- * scales as 1/F. Fully covered boundary (w -> 0): F = 4/pi = 1.273. At the
- * shipped 10.5 mm channel: psi0 = 16.0 deg, F = 1.080. At a 16 mm channel:
- * psi0 = 24.9 deg, F = 0.822 - a THIRD more voltage for the same bend.
+ * so F is the factor by which the real electrode beats - or misses - the ideal
+ * normalisation the matched voltage assumes, and the voltage needed scales as
+ * 1/F. Fully covered boundary (w -> 0): F = 4/pi = 1.273.
  *
- * That estimate treats the open channel mouths as sitting at zero, which they
- * do not, so it is a guide to the scaling rather than a number to quote. It
- * was enough to explain a suite-wide failure: widening the default channel
- * from an effective 5.24 mm half-width to 8 mm dropped F by 24 per cent, and
- * every test that flew at the ideal voltage under-bent into an electrode.
+ * It over-predicts, and the reason is the interesting part
+ * -------------------------------------------------------
+ * Between a 10.5 mm channel and a 16 mm one, F says the field should fall to
+ * 0.762 of its value. Measured on the solved field: 0.915. The model is wrong
+ * by a factor of three in the SENSITIVITY, and wrong because of what it
+ * assumes about the gaps - that they sit at zero potential, as a gap in a
+ * driven boundary would.
+ *
+ * They do not, because a channel is not a gap. Its two walls belong to
+ * NEIGHBOURING blocks, which are at opposite polarity, so the slot is lined
+ * with +V on one side and -V on the other and goes on driving field into the
+ * aperture long after the arc has ended. Widening the channel moves those
+ * walls apart but does not remove them.
+ *
+ * Which is also the warning
+ * -------------------------
+ * A slot with +V and -V facing each other across it is a parallel-plate
+ * deflector, and the beam has to cross one to get in. Its kick is
+ *
+ *     d ~ (k/4) (r0/a)^2 L^2 / w,       L = electrodeThickness,
+ *
+ * so it grows with the square of the electrode depth and falls only as 1/w. At
+ * the shipped proportions with a 10.5 mm channel that is 3.1 mm of sideways
+ * throw against 5.25 mm of clearance, and the measured transmission was 4 of
+ * 9. This is real behaviour, not an artefact: a deep-channel deflector really
+ * does steer its own beam into its entrance, which is why instruments put a
+ * grounded aperture plate across the mouth. The default channel is sized
+ * against this rather than against F.
  *
  * Why it is not a sector bender
  * -----------------------------
@@ -150,15 +171,20 @@ export const BENDER_DEFAULTS = {
   /*
     Full width of the four straight beam channels.
 
-    This is the parameter that sets the operating voltage, so its default is
-    not a round number chosen for looks. The channel edge cuts the electrode
-    arc short, and the arc's angular extent is what sets the quadrupole
-    strength (see the form factor in the header). 10.5 mm puts the edge at
-    asin(5.25/19) = 16.0 degrees, the same coverage as the calibrated default
-    this element shipped with before the electrodes were reshaped - so the
-    matched voltage carries across the change instead of moving 30 per cent.
+    The default is set by ACCEPTANCE, not by the field. Each channel is a slot
+    `electrodeThickness` long whose two walls belong to neighbouring blocks and
+    are therefore at OPPOSITE polarity - a parallel-plate deflector the ion has
+    to cross before it reaches the aperture at all (see the header). The
+    sideways kick it delivers goes as 1/w, so a narrow channel throws ions into
+    its own walls: at 10.5 mm the estimate is 3.1 mm of displacement against
+    5.25 mm of clearance, and the measured transmission was 4 of 9.
+
+    Widening costs little, because the field in the aperture turns out to be
+    weakly sensitive to this - those same driven walls keep pushing field
+    inward, which is why the naive form factor in the header over-predicts.
+    Measured: widening from 10.5 mm to 16 mm cost 8.5 per cent of the field.
   */
-  channelWidth: 10.5, // mm
+  channelWidth: 15, // mm
   cornerSize: 5, // mm, the grounded corner posts (0 leaves them out)
   height: 30, // mm, aperture perpendicular to the bend plane
   voltage: 0, // V on each electrode (+V and -V on the diagonals)
@@ -301,10 +327,10 @@ export function createBender(params = {}, solverOpts = {}) {
    * beam channels of half-width `w` along both axes, and its diagonal corner
    * cut back to clear the grounded post.
    *
-   * The concave face is what makes the field quadrupolar near the centre; the
-   * filled corners are what make it strong. An annular arc of the same inner
-   * radius leaves the quadrant behind it empty, and that emptiness is a region
-   * the grounded box reaches into.
+   * The concave face is what makes the field quadrupolar near the centre. The
+   * filled corner does nothing to the beam - it is behind the arc, and the
+   * block shields the aperture from everything behind it - but it is the shape
+   * the instrument has, and it is what the channel walls are cut out of.
    *
    * The grid's "z" axis carries the axial coordinate Z and its "r" axis the
    * transverse X, both measured from the deflector centre.
