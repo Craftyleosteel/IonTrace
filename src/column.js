@@ -66,8 +66,16 @@ import { PotentialArray, CYLINDRICAL } from './grid.js';
 import { solveBasis } from './laplace.js';
 import { Field } from './field.js';
 
-/** Element types whose geometry is a body of revolution about the beam. */
-export const AXISYMMETRIC = new Set(['drift', 'aperture', 'einzel']);
+/**
+ * Element types whose geometry is a body of revolution about the beam.
+ *
+ * Membership is what lets an element share an r-z grid with its neighbours,
+ * and it is the whole reason the conductor element is axisymmetric by
+ * construction: stacking several of them to build a compound optic only works
+ * if they can be solved together, and a shape with corners in the transverse
+ * plane could not be.
+ */
+export const AXISYMMETRIC = new Set(['drift', 'aperture', 'einzel', 'tube', 'electrode']);
 
 /** First zero of J0: sets how fast a field dies inside a grounded pipe. */
 export const BESSEL_J01 = 2.404825557695773;

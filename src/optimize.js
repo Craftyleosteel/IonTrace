@@ -60,6 +60,12 @@ export const TUNABLE = {
   aperture: ['voltage'],
   einzel: ['voltage'],
   bender: ['voltage'],
+  tube: ['voltage'],
+  // One conductor is one voltage, which is exactly why this element holds one
+  // conductor. A stack of them in the beamline gives the optimiser a knob per
+  // piece of metal, where an element carrying an array of electrodes would
+  // have given it one knob for the lot.
+  electrode: ['voltage'],
   // The RF quadrupole is deliberately NOT here, and this is the one entry
   // worth arguing about. Its voltages do change transmission, so they look
   // tunable - but a mass filter's job is selectivity, and the setting that

@@ -199,6 +199,24 @@ export const HELP = {
     ],
   },
 
+  tube: {
+    title: 'Biased tube',
+    body: [
+      'A single cylinder at a DC voltage — an einzel lens with its two grounded guard cylinders taken away. Inside it the ion is at a different kinetic energy, which is the point of biasing it.',
+      'Across the whole element the energy is unchanged, because the domain is closed by grounded faces at both ends: the ion starts and finishes at the same potential, so the exit fringe returns whatever the entrance fringe took. It focuses; it does not accelerate.',
+      'That is a fact about the hardware, not the model. A tube only changes a beam’s energy if what comes after it sits at a different potential — so an accelerating stage needs this tube and a downstream element, solved together with fringe fields on.',
+    ],
+  },
+
+  electrode: {
+    title: 'Conductor',
+    body: [
+      'One piece of metal, any shape of revolution, at a DC voltage. Four numbers set the shape: thin in z is a plate, long in z is a tube, an inner radius of zero is a solid disc, and a narrow band of radius is a ring.',
+      'It holds one conductor rather than a list of them because the beamline already composes things. Stack several with fringe fields on and they are solved together on one grid — the same answer a multi-electrode element would give, except each piece can be selected, tuned, dragged and saved on its own.',
+      'Being a body of revolution is a real restriction. It can be a ring but never a pair of rods or a slit, because anything with corners in the transverse plane could not share an r-z solve with its neighbours — which is most of the point of being able to stack them.',
+    ],
+  },
+
   einzel: {
     title: 'Einzel lens',
     body: [

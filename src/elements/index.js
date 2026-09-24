@@ -19,6 +19,8 @@ import { createBender, BENDER_DEFAULTS, matchedVoltage } from './bender.js';
 import { createMultipole, MULTIPOLE_DEFAULTS } from './multipole.js';
 import { createFunnel, FUNNEL_DEFAULTS } from './funnel.js';
 import { createDetector, DETECTOR_DEFAULTS } from './detector.js';
+import { createTube, TUBE_DEFAULTS } from './tube.js';
+import { createElectrode, ELECTRODE_DEFAULTS } from './electrode.js';
 
 /** @typedef {{key: string, label: string, unit?: string, min: number, max: number, step: number, rebuild: boolean, help?: string, scale?: Function}} FieldSpec */
 
@@ -32,6 +34,19 @@ import { createDetector, DETECTOR_DEFAULTS } from './detector.js';
 const ICONS = {
   drift: '<path d="M2 4h28M2 14h28"/>',
   aperture: '<path d="M16 1v6M16 11v6"/><path d="M2 9h28" opacity=".35"/>',
+  // One cylinder with vacuum either side - a drift's rails, interrupted. The
+  // gaps are the point: that is where the fringe field is, and what makes this
+  // a lens rather than a tube you happen to have biased.
+  tube:
+    '<path d="M9 4h14M9 14h14"/>' +
+    '<path d="M2 4h5M25 4h5M2 14h5M25 14h5" opacity=".3"/>' +
+    '<path d="M2 9h28" opacity=".35"/>',
+  // A block of metal with nothing decided about it: the shape is whatever the
+  // four numbers say, so the glyph shows a bare annulus rather than a device.
+  electrode:
+    '<rect x="13" y="1.5" width="6" height="5.5" rx="0.8"/>' +
+    '<rect x="13" y="11" width="6" height="5.5" rx="0.8"/>' +
+    '<path d="M2 9h28" opacity=".35"/>',
   einzel: '<path d="M3 4h7M3 14h7M13 4h6M13 14h6M22 4h7M22 14h7"/>',
   quadrupole:
     '<circle cx="9" cy="5" r="2.6"/><circle cx="23" cy="5" r="2.6"/>' +
@@ -92,6 +107,47 @@ export const ELEMENT_TYPES = {
     ],
   },
 
+  tube: {
+    icon: ICONS.tube,
+    label: 'Biased tube',
+    blurb:
+      'A single cylinder at a DC voltage — an einzel lens with its grounded guards removed. Focuses without changing the exit energy.',
+    create: createTube,
+    defaults: TUBE_DEFAULTS,
+    fields: [
+      // As a multiple of T/q, for the same reason the einzel's is: what a lens
+      // does depends only on E/q. A bare tube needs far less than an einzel's
+      // six, because an einzel's grounded guard cylinders shield most of its
+      // centre electrode away and this has no guards at all. The multiple
+      // below is measured, not assumed — see the tube tests.
+      { key: 'voltage', label: 'Potential', unit: 'V', min: -10000, max: 10000, step: 25, rebuild: false, scale: (params, ion) => (-1.5 * ion.energy) / (ion.charge || 1) },
+      { key: 'bore', label: 'Bore', unit: 'mm', min: 1, max: 14, step: 0.5, rebuild: true },
+      { key: 'tubeLength', label: 'Tube length', unit: 'mm', min: 2, max: 80, step: 1, rebuild: true },
+      { key: 'margin', label: 'Vacuum margin', unit: 'mm', min: 2, max: 60, step: 1, rebuild: true, help: 'Empty space between the tube and this element’s own grounded end faces. With no guard cylinders the fringe reaches a long way, and too small a margin means the element is shielding itself. It warns when that happens.' },
+      { key: 'housingRadius', label: 'Housing radius', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'The grounded pipe around everything. It also sets how fast the fringe dies: the decay length is this radius divided by 2.405, so a wider housing needs a longer margin.' },
+    ],
+  },
+
+  electrode: {
+    icon: ICONS.electrode,
+    label: 'Conductor',
+    blurb:
+      'One piece of metal, any shape of revolution, at a DC voltage. A plate, a tube, a ring or a solid stop, depending on the four numbers.',
+    create: createElectrode,
+    defaults: ELECTRODE_DEFAULTS,
+    fields: [
+      // Defaults to a plate, so it is scaled like one: weaker than a tube,
+      // because a thin plate presents far less driven surface to the beam.
+      { key: 'voltage', label: 'Potential', unit: 'V', min: -10000, max: 10000, step: 25, rebuild: false, scale: (params, ion) => (-1.5 * ion.energy) / (ion.charge || 1) },
+      { key: 'r0', label: 'Inner radius', unit: 'mm', min: 0, max: 40, step: 0.5, rebuild: true, help: 'Where the metal starts. Set it to 0 for a solid disc — a beam stop or a cup face — which blocks the axis entirely.' },
+      { key: 'r1', label: 'Outer radius', unit: 'mm', min: 0.5, max: 40, step: 0.5, rebuild: true, help: 'Where the metal ends. Take it out to the housing for a plate mounted across the tube, or keep it in for a ring insulated from the wall.' },
+      { key: 'z0', label: 'Metal starts at', unit: 'mm', min: 0, max: 200, step: 0.5, rebuild: true },
+      { key: 'z1', label: 'Metal ends at', unit: 'mm', min: 0.5, max: 200, step: 0.5, rebuild: true, help: 'Thin in z makes a plate, long in z makes a tube. Everything between the two is the same conductor at one potential.' },
+      { key: 'length', label: 'Element length', unit: 'mm', min: 2, max: 200, step: 1, rebuild: true, help: 'The whole box, metal plus the vacuum either side of it. That vacuum is what keeps this element’s own grounded end faces out of its fringe field.' },
+      { key: 'housingRadius', label: 'Housing radius', unit: 'mm', min: 1, max: 40, step: 0.5, rebuild: true },
+    ],
+  },
+
   einzel: {
     icon: ICONS.einzel,
     label: 'Einzel lens',
@@ -137,7 +193,7 @@ export const ELEMENT_TYPES = {
     icon: ICONS.multipole,
     label: 'Multipole guide',
     blurb:
-      'Six, eight or more rods in alternating RF phase. The effective potential goes as r^(2n−2), so it is flat across the middle and steep at the rods — which guides ions of every mass instead of selecting one, the opposite of what a quadrupole is for.',
+      'Six, eight or more rods in alternating RF phase. The effective potential goes as r^(2nâˆ’2), so it is flat across the middle and steep at the rods — which guides ions of every mass instead of selecting one, the opposite of what a quadrupole is for.',
     create: createMultipole,
     defaults: MULTIPOLE_DEFAULTS,
     fields: [
@@ -146,7 +202,7 @@ export const ELEMENT_TYPES = {
       { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false },
       { key: 'poles', label: 'Rods', unit: '', min: 4, max: 24, step: 2, rebuild: true, help: '4 is a quadrupole, 6 a hexapole, 8 an octopole. More rods flatten the bottom of the well and steepen its walls.' },
       { key: 'length', label: 'Rod length', unit: 'mm', min: 10, max: 400, step: 5, rebuild: false },
-      { key: 'fieldRadius', label: 'Field radius r₀', unit: 'mm', min: 1.5, max: 15, step: 0.25, rebuild: true },
+      { key: 'fieldRadius', label: 'Field radius râ‚€', unit: 'mm', min: 1.5, max: 15, step: 0.25, rebuild: true },
       { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 0.5, max: 8, step: 0.1, rebuild: true },
     ],
   },
@@ -176,7 +232,7 @@ export const ELEMENT_TYPES = {
     icon: ICONS.bender,
     label: 'Quadrupole deflector',
     blurb:
-      'Four curved electrodes in a grounded box, at +V and −V on the diagonals, turning the beam ninety degrees. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
+      'Four curved electrodes in a grounded box, at +V and âˆ’V on the diagonals, turning the beam ninety degrees. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
     create: createBender,
     defaults: BENDER_DEFAULTS,
     fields: [
@@ -190,16 +246,16 @@ export const ELEMENT_TYPES = {
       // Signed by the charge: the matched voltage is a magnitude, but which
       // diagonal carries it decides which way the beam turns, and a negative
       // ion at a positive ion's polarity is steered into the wall.
-      { key: 'voltage', label: 'Electrode voltage', unit: 'V', min: -60000, max: 60000, step: 1, rebuild: false, scale: (params, ion) => matchedVoltage(params, ion.energy, Math.abs(ion.charge) || 1) * Math.sign(ion.charge || 1), help: 'Applied as +V and −V on opposite diagonals. A new deflector arrives already matched to the beam.' },
+      { key: 'voltage', label: 'Electrode voltage', unit: 'V', min: -60000, max: 60000, step: 1, rebuild: false, scale: (params, ion) => matchedVoltage(params, ion.energy, Math.abs(ion.charge) || 1) * Math.sign(ion.charge || 1), help: 'Applied as +V and âˆ’V on opposite diagonals. A new deflector arrives already matched to the beam.' },
       // Any angle, not just the four right angles it used to offer. The roll
       // is a rotation about the beam applied when the field is evaluated, so
       // an arbitrary angle costs nothing and needs no re-solve — there was
       // never a reason for the quarter-turn steps beyond the slider that used
       // to set it.
       { key: 'bendPlane', label: 'Bend plane', unit: '°', min: -360, max: 360, step: 5, rebuild: false, help: 'Which plane the bending happens in: 0° horizontal, 90° vertical, anything between at that angle. Which of the two ways WITHIN that plane the beam goes is set by the sign of the voltage, and the two are separate exits — so one deflector can feed a line on each.' },
-      { key: 'apertureRadius', label: 'Aperture radius r₀', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (r₀/a)², so this and the two below set the operating voltage between them.' },
+      { key: 'apertureRadius', label: 'Aperture radius râ‚€', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (râ‚€/a)², so this and the two below set the operating voltage between them.' },
       { key: 'electrodeThickness', label: 'Electrode thickness', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true },
-      { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. r₀ plus these two is the half-width a.' },
+      { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. râ‚€ plus these two is the half-width a.' },
       { key: 'channelWidth', label: 'Beam channel', unit: 'mm', min: 2, max: 40, step: 0.5, rebuild: true, help: 'The clear straight-sided gap between neighbouring electrodes, on all four sides — the beam’s way in and out. Its two walls are at opposite polarity, so each channel is also a small parallel-plate deflector the beam crosses on the way in: narrowing this throws ions into the channel walls, while the field in the aperture barely changes. Widen it if the deflector is losing beam it should be turning.' },
       { key: 'cornerSize', label: 'Corner posts', unit: 'mm', min: 0, max: 20, step: 0.5, rebuild: true, help: 'Grounded posts on the diagonals, as the real instrument has. They sit behind the electrodes, which shield the aperture from them completely, so they change the field the beam sees not at all — structure, not tuning. 0 removes them.' },
       { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 60, step: 1, rebuild: true },
@@ -222,8 +278,8 @@ export const ELEMENT_TYPES = {
       { key: 'frequency', label: 'Frequency', unit: 'MHz', min: 0.1, max: 5, step: 0.05, rebuild: false },
       { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false, help: 'RF phase when the simulation starts. Real transmission depends on it.' },
       { key: 'length', label: 'Rod length', unit: 'mm', min: 10, max: 200, step: 5, rebuild: false },
-      { key: 'fieldRadius', label: 'Field radius r₀', unit: 'mm', min: 1.5, max: 10, step: 0.25, rebuild: true },
-      { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 1.5, max: 12, step: 0.1, rebuild: true, help: 'The ratio 1.1487 × r₀ cancels the 12-pole for round rods.' },
+      { key: 'fieldRadius', label: 'Field radius râ‚€', unit: 'mm', min: 1.5, max: 10, step: 0.25, rebuild: true },
+      { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 1.5, max: 12, step: 0.1, rebuild: true, help: 'The ratio 1.1487 Ã— râ‚€ cancels the 12-pole for round rods.' },
     ],
   },
 };
@@ -344,3 +400,4 @@ export function startingParams(type, ion = null) {
   }
   return out;
 }
+
