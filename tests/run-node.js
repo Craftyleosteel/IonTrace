@@ -11,6 +11,7 @@ import './physics.test.js';
 import './beamline.test.js';
 import './electrode.test.js';
 import './branches.test.js';
+import './columnfield.test.js';
 import './tutorial.test.js';
 
 const t0 = performance.now();

@@ -176,6 +176,8 @@ export const HELP = {
     body: [
       'Lines along E, running from positive metal to negative and crossing equipotentials at right angles. They are the clearest way to see a fringe field reaching out of an element — or being stopped by a grounded surface.',
       'They are not trajectories. An ion has inertia and generally does not follow one.',
+      'Whether a line runs on into the next element tells you something real. With fringe fields off, each element is solved behind its own grounded end faces, so the field genuinely stops at the boundary and so does the line. Turn fringe fields on and neighbouring elements share one solve — the map runs unbroken and the lines carry through the joins, because there is no longer a boundary there to stop at.',
+      'A deflector still breaks the chain either side of it: it is not a body of revolution, so it cannot share a grid with its neighbours.',
     ],
   },
 

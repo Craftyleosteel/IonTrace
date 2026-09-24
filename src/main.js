@@ -2005,6 +2005,49 @@ function drawElementField(e, T) {
  * -y, at the view's scale - so an element can draw itself as though it were
  * at the origin facing along the axis, wherever it has actually ended up.
  */
+/**
+ * What to paint the field from: one entry per SOLVED FIELD, not per element.
+ *
+ * With column solves on, several elements share one grid, and that shared
+ * solve is the field the ions actually fly through. Drawing each element's own
+ * isolated field instead was not merely a missed opportunity to join the
+ * pictures up - it drew a field the simulation was not using, with every
+ * element's fringe stopping dead at a boundary the ions do not see.
+ *
+ * So a run is handed to the drawing code as a single stand-in element. It
+ * needs three things - a grid, a field and a frame - and the frame is the
+ * first element's, because a run's grid starts where that element starts and
+ * every member is axisymmetric and unmisaligned, so their frames differ only
+ * by a shift along the shared axis.
+ *
+ * The consequence on screen is the one worth having: the potential map runs
+ * unbroken across the whole run, and a field line traced through it crosses
+ * from one element into the next instead of ending at the join. Where the
+ * field genuinely does stop - either side of a deflector, or anywhere with
+ * column solves off - the lines still stop, because there the boundary is
+ * real.
+ */
+function fieldDrawables() {
+  const out = [];
+  const seen = new Set();
+  beamline.elements.forEach((e, i) => {
+    const run = beamline.runFor(i);
+    if (!run) {
+      out.push(e);
+      return;
+    }
+    if (seen.has(run)) return;
+    seen.add(run);
+    out.push({
+      typeKey: 'run',
+      grid: run.grid,
+      field: run.field,
+      frame: beamline.elements[run.indices[0]].frame,
+    });
+  });
+  return out;
+}
+
 function withElementTransform(e, T, body) {
   const [ox, oy] = T.project(e.frame.o);
   const f = forwardOf(e.frame);
@@ -2750,14 +2793,17 @@ function drawPane(T, width) {
   ctx.rect(0, T.top, width, T.height);
   ctx.clip();
 
+  const wantsField =
+    inputs.showField.checked || inputs.showContours.checked || inputs.showLines.checked;
+  const drawables = wantsField ? fieldDrawables() : [];
   if (inputs.showField.checked) {
-    for (const e of beamline.elements) drawElementField(e, T);
+    for (const d of drawables) drawElementField(d, T);
   }
   if (inputs.showContours.checked) {
-    for (const e of beamline.elements) drawContours(e, T);
+    for (const d of drawables) drawContours(d, T);
   }
   if (inputs.showLines.checked) {
-    for (const e of beamline.elements) drawFieldLines(e, T);
+    for (const d of drawables) drawFieldLines(d, T);
   }
   drawBoundaries(T);
   drawReferencePath(T);
