@@ -82,6 +82,25 @@
   box-sizing: border-box;
 }
 
+/*
+  Make the `hidden` attribute actually hide things.
+
+  The browser's own rule is `[hidden] { display: none }`, and ANY author rule
+  setting `display` outruns it - so `.controls { display: flex }` quietly beat
+  `hidden`, and a panel JavaScript believed it had hidden stayed on screen.
+
+  That is not cosmetic. The controls panel kept its cell in the layout grid, so
+  the tutorial took the first column, the controls took the second, and the
+  diagram - the thing the page exists to show - wrapped onto a second row at a
+  third of its width.
+
+  Nearly every panel here is toggled with `hidden`, so the guard belongs once,
+  at the top, rather than as a `display: none` each component has to remember.
+*/
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   padding: 0;
