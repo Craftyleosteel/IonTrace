@@ -1167,6 +1167,308 @@ input[type="range"]:focus-visible {
   color: var(--text-muted);
 }
 
+/* ------------------------------------------------------------------ */
+/* help                                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+  Recessive until wanted. A question mark next to every control is a lot of
+  question marks, so they read as punctuation at rest and only look like
+  buttons under the pointer.
+*/
+.help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  flex: none;
+}
+
+.help-btn:hover,
+.help-btn:focus-visible {
+  border-color: var(--accent, #4a90d9);
+  color: var(--accent, #4a90d9);
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+
+.help-btn[aria-expanded='true'] {
+  border-color: var(--accent, #4a90d9);
+  color: var(--surface-1);
+  background: var(--accent, #4a90d9);
+}
+
+/* A checkbox and its question mark, so the mark sits on the same line. */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.check-row .check {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.help-pop {
+  position: fixed;
+  z-index: 60;
+  width: min(330px, calc(100vw - 16px));
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+  padding: 12px 14px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+}
+
+.help-pop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.help-pop-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.help-pop-close {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.help-pop-close:hover {
+  color: var(--text-primary);
+}
+
+.help-pop-body p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.help-pop-body p:last-child {
+  margin-bottom: 0;
+}
+
+.help-pop-more {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* tabs and the tutorial                                               */
+/* ------------------------------------------------------------------ */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.tab {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text-primary);
+}
+
+.tab.on {
+  border-color: var(--border);
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  color: var(--text-primary);
+}
+
+.tut {
+  display: grid;
+  grid-template-columns: minmax(150px, 210px) 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .tut {
+    grid-template-columns: 1fr;
+  }
+}
+
+/*
+  min-width: 0 because a grid column will not shrink below the widest
+  unbreakable thing inside it otherwise, and a lesson summary is a long line of
+  text. Without this the sidebar pushes the lesson body off screen on a phone.
+*/
+.tut-side {
+  min-width: 0;
+}
+
+.tut-lessons {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+/* Stacked on a narrow screen, the list is a picker rather than a sidebar, so
+   it should not eat a third of the height before the lesson starts. */
+@media (max-width: 720px) {
+  .tut-lessons {
+    max-height: 168px;
+  }
+}
+
+.tut-lesson {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tut-lesson:hover {
+  background: var(--surface-2, rgba(127, 127, 127, 0.1));
+}
+
+.tut-lesson.on {
+  border-color: var(--border);
+  background: var(--surface-2, rgba(127, 127, 127, 0.14));
+}
+
+.tut-lesson-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 620;
+  color: var(--text-primary);
+}
+
+.tut-lesson-sum {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.tut-main {
+  min-width: 0;
+}
+
+.tut-crumb {
+  margin: 0 0 4px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.tut-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 620;
+  color: var(--text-primary);
+}
+
+.tut-body p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.tut-run {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+/*
+  The one button on the page that DOES something to the column rather than
+  describing it, so it is the one thing in the tutorial that is not grey.
+*/
+.primary-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.primary-btn:hover {
+  filter: brightness(1.08);
+}
+
+.primary-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.tut-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.tut-progress {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .mathieu {
   display: flex;
   flex-wrap: wrap;

@@ -47,6 +47,8 @@
                   title="Search the electrode voltages for the best transmission">
             Optimise voltages
           </button>
+          <button class="help-btn" type="button" data-help="optimise"
+                  aria-label="About optimising voltages">?</button>
           <!--
             A column is saved as JSON: it is a tree, every browser parses it
             without a library, and a person can open the file and read it.
@@ -56,6 +58,8 @@
                   title="Save this column to a file">Save</button>
           <button class="ghost-btn" id="load" type="button"
                   title="Load a column from a file">Load</button>
+          <button class="help-btn" type="button" data-help="saveLoad"
+                  aria-label="About saving and loading">?</button>
           <input id="loadFile" type="file" accept="application/json,.json" hidden />
         </div>
       </div>
@@ -113,7 +117,11 @@
           <h2>Physics</h2>
 
           <label class="field">
-            <span class="field-label">Ion–ion repulsion</span>
+            <span class="field-label">
+              Ion–ion repulsion
+              <button class="help-btn" type="button" data-help="repulsion"
+                      aria-label="About ion–ion repulsion">?</button>
+            </span>
             <select id="repulsion">
               <option value="none" selected>Off — ions fly independently</option>
               <option value="beam">Beam — a continuous current</option>
@@ -135,10 +143,14 @@
             <output id="ionsPerParticleOut">1e6</output>
           </label>
 
-          <label class="check">
-            <input id="fringe" type="checkbox" />
-            <span>Fringe fields</span>
-          </label>
+          <div class="check-row">
+            <label class="check">
+              <input id="fringe" type="checkbox" />
+              <span>Fringe fields</span>
+            </label>
+            <button class="help-btn" type="button" data-help="fringe"
+                    aria-label="About fringe fields">?</button>
+          </div>
           <p class="hint" id="fringeNote"></p>
         </section>
 
@@ -209,23 +221,36 @@
         -->
         <section class="group" id="viewPanel">
           <h2>Show</h2>
-          <label class="check">
-            <input id="showField" type="checkbox" checked />
-            <span>Potential map</span>
-          </label>
-          <label class="check">
-            <input id="showContours" type="checkbox" />
-            <span>Equipotentials</span>
-          </label>
-          <label class="check">
-            <input id="showLines" type="checkbox" />
-            <span>Field lines</span>
-          </label>
-          <p class="hint">
-            Field lines run along <strong>E</strong>, from positive metal to
-            negative, and cross equipotentials at right angles. They are where
-            a fringe field reaching out of an element is easiest to see.
-          </p>
+          <!--
+            The explanations that used to sit under these as a permanent
+            paragraph are behind the question marks now. They were three lines
+            of prose that a person reads once and then scrolls past forever,
+            occupying the sidebar of every session after the first.
+          -->
+          <div class="check-row">
+            <label class="check">
+              <input id="showField" type="checkbox" checked />
+              <span>Potential map</span>
+            </label>
+            <button class="help-btn" type="button" data-help="potentialMap"
+                    aria-label="About the potential map">?</button>
+          </div>
+          <div class="check-row">
+            <label class="check">
+              <input id="showContours" type="checkbox" />
+              <span>Equipotentials</span>
+            </label>
+            <button class="help-btn" type="button" data-help="equipotentials"
+                    aria-label="About equipotentials">?</button>
+          </div>
+          <div class="check-row">
+            <label class="check">
+              <input id="showLines" type="checkbox" />
+              <span>Field lines</span>
+            </label>
+            <button class="help-btn" type="button" data-help="fieldLines"
+                    aria-label="About field lines">?</button>
+          </div>
         </section>
       </aside>
 
@@ -264,17 +289,61 @@
           you start a line on an unused exit.
         -->
         <div class="track-wrap">
+          <!--
+            Two views of the column, not two pages. The tutorial builds real
+            columns in the diagram above, so switching to it does not take you
+            away from the thing being explained - it puts the explanation next
+            to it.
+          -->
           <div class="track-head">
-            <h2>Beamline</h2>
+            <div class="tabs" role="tablist" aria-label="Beamline views">
+              <button class="tab" id="tabBeamline" type="button" role="tab"
+                      aria-selected="true" aria-controls="panelBeamline">
+                Beamline
+              </button>
+              <button class="tab" id="tabTutorial" type="button" role="tab"
+                      aria-selected="false" aria-controls="panelTutorial">
+                Tutorial
+              </button>
+            </div>
+            <button class="help-btn" type="button" data-help="flowChart"
+                    aria-label="About the beamline chart">?</button>
           </div>
+
           <!--
             Scrolls in both directions. A branching column grows to the right
             as it gets longer and downward as it gets more branches, and
             shrinking it to fit would make it unreadable exactly when there is
             most to read.
           -->
-          <div class="flow" id="flow" aria-label="Beamline flow chart" tabindex="0"></div>
-          <p class="hint track-hint" id="trackHint"></p>
+          <div id="panelBeamline" role="tabpanel" aria-labelledby="tabBeamline">
+            <div class="flow" id="flow" aria-label="Beamline flow chart" tabindex="0"></div>
+            <p class="hint track-hint" id="trackHint"></p>
+          </div>
+
+          <div id="panelTutorial" role="tabpanel" aria-labelledby="tabTutorial" hidden>
+            <div class="tut">
+              <nav class="tut-side" aria-label="Lessons">
+                <ol class="tut-lessons" id="tutLessons"></ol>
+              </nav>
+              <div class="tut-main">
+                <p class="tut-crumb" id="tutCrumb"></p>
+                <h3 class="tut-title" id="tutTitle"></h3>
+                <div class="tut-body" id="tutBody"></div>
+                <div class="tut-run">
+                  <button class="primary-btn" id="tutDo" type="button" hidden></button>
+                  <button class="ghost-btn" id="tutWhy" type="button" hidden>
+                    Why this works
+                  </button>
+                </div>
+                <div class="tut-nav">
+                  <button class="ghost-btn" id="tutPrev" type="button">Back</button>
+                  <span class="tut-progress" id="tutProgress" role="status"></span>
+                  <button class="ghost-btn" id="tutNext" type="button">Next</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="legend">
@@ -339,6 +408,24 @@
       <a href="tests/index.html">Run the physics tests</a>
       <a href="https://github.com/Craftyleosteel/IonTrace">Source</a>
     </footer>
+
+    <!--
+      One popover for every question mark in the interface.
+
+      A popover rather than text that expands in place: the help sits beside
+      controls in a narrow sidebar, and unfolding a paragraph there pushes
+      everything below it down, moving the control you were about to touch out
+      from under the pointer. This never shifts the layout.
+    -->
+    <div class="help-pop" id="helpPop" role="dialog" aria-labelledby="helpPopTitle" hidden>
+      <div class="help-pop-head">
+        <h3 id="helpPopTitle"></h3>
+        <button class="help-pop-close" id="helpPopClose" type="button"
+                aria-label="Close">&times;</button>
+      </div>
+      <div class="help-pop-body" id="helpPopBody"></div>
+      <p class="help-pop-more" id="helpPopMore" hidden></p>
+    </div>
 
     <script type="module" src="src/main.js"></script>
   </body>

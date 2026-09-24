@@ -9,6 +9,7 @@
 import { run } from './harness.js';
 import './physics.test.js';
 import './beamline.test.js';
+import './tutorial.test.js';
 
 const t0 = performance.now();
 

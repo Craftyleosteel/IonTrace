@@ -27,6 +27,8 @@ import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
 import { tunableKnobs, optimizeVoltages, TUNABLE } from './optimize.js';
 import { serialise, restore } from './scene.js';
+import { topic } from './help.js';
+import { LESSONS, allSteps } from './tutorial.js';
 import {
   joulesToEV,
   mToMm,
@@ -871,16 +873,20 @@ function renderInspector() {
           <span class="field-label">
             ${escapeHtml(f.label)}${instant}
             <span class="unit">${escapeHtml(f.unit ?? '')}</span>
+            ${f.help ? helpButton(f.help, f.label) : ''}
           </span>
           <input type="number" data-param="${f.key}" data-rebuild="${f.rebuild ? 1 : 0}"
                  min="${f.min}" max="${f.max}" step="${r.step}" value="${value}" />
-          ${f.help ? `<span class="field-help">${escapeHtml(f.help)}</span>` : ''}
         </label>`;
     })
     .join('');
 
   inspectorEl.innerHTML = `
-    <h2>${escapeHtml(e.label)} ${backButton()}</h2>
+    <h2>
+      ${escapeHtml(e.label)}
+      ${topic(e.typeKey) ? helpTopicButton(e.typeKey, e.label) : ''}
+      ${backButton()}
+    </h2>
     <p class="hint">${escapeHtml(spec.blurb)}</p>
     ${rows}
     <div id="derived">${bendDirectionRow(e)}${benderReadout(e)}${quadrupoleReadout(e)}${multipoleReadout(
@@ -3242,6 +3248,288 @@ window.addEventListener('resize', () => {
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
 
 /* ------------------------------------------------------------------ */
+/* help                                                                */
+/* ------------------------------------------------------------------ */
+
+const helpPop = el('helpPop');
+const helpPopTitle = el('helpPopTitle');
+const helpPopBody = el('helpPopBody');
+const helpPopMore = el('helpPopMore');
+
+/**
+ * A question mark carrying its own text.
+ *
+ * Used for the per-parameter explanations, which live beside the parameter in
+ * the element registry rather than in the topic list - they are about one
+ * number on one element, and hoisting them somewhere central would separate
+ * them from the thing they describe.
+ */
+function helpButton(text, about = '') {
+  return `<button class="help-btn" type="button" data-help-text="${escapeHtml(text)}"
+    data-help-title="${escapeHtml(about)}" aria-label="About ${escapeHtml(about || 'this')}">?</button>`;
+}
+
+/** A question mark pointing at a shared topic. */
+function helpTopicButton(key, about = '') {
+  return `<button class="help-btn" type="button" data-help="${escapeHtml(key)}"
+    aria-label="About ${escapeHtml(about || key)}">?</button>`;
+}
+
+let helpAnchor = null;
+
+function hideHelp() {
+  helpPop.hidden = true;
+  helpAnchor?.setAttribute('aria-expanded', 'false');
+  helpAnchor = null;
+}
+
+/**
+ * Put the popover beside its button, then pull it back on screen.
+ *
+ * Preferred position is just below and left-aligned, which reads naturally
+ * next to a control. The clamp matters more than the preference: these buttons
+ * sit at the right-hand edge of a narrow sidebar, so the natural position is
+ * very often off screen, and a help popover that opens where it cannot be read
+ * is worse than none.
+ */
+function placeHelp(button) {
+  const pad = 8;
+  const r = button.getBoundingClientRect();
+  helpPop.style.left = '0px';
+  helpPop.style.top = '0px';
+  helpPop.hidden = false;
+  const w = helpPop.offsetWidth;
+  const h = helpPop.offsetHeight;
+
+  let left = r.left;
+  left = Math.min(left, window.innerWidth - w - pad);
+  left = Math.max(pad, left);
+
+  // Below unless that runs off the bottom and there is more room above.
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - pad && r.top - h - 6 > pad) top = r.top - h - 6;
+  top = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+
+  helpPop.style.left = `${Math.round(left)}px`;
+  helpPop.style.top = `${Math.round(top)}px`;
+}
+
+function showHelp(button) {
+  const key = button.dataset.help;
+  const t = key ? topic(key) : null;
+  const title = t?.title ?? button.dataset.helpTitle ?? 'About this';
+  const paras = t ? t.body : [button.dataset.helpText ?? ''];
+
+  helpPopTitle.textContent = title;
+  helpPopBody.innerHTML = paras
+    .filter(Boolean)
+    .map((p) => `<p>${escapeHtml(p)}</p>`)
+    .join('');
+  if (t?.more) {
+    helpPopMore.textContent = `The full argument: ${t.more}`;
+    helpPopMore.hidden = false;
+  } else {
+    helpPopMore.hidden = true;
+  }
+
+  helpAnchor?.setAttribute('aria-expanded', 'false');
+  helpAnchor = button;
+  button.setAttribute('aria-expanded', 'true');
+  placeHelp(button);
+}
+
+/*
+  One listener for every question mark in the document, present or future.
+
+  The inspector rebuilds its HTML whenever the selection changes, so its help
+  buttons are not the same elements from one moment to the next. Delegating
+  from the document is what lets a button that did not exist when this ran
+  still work - and `preventDefault` matters because several of these sit inside
+  a <label>, where a click would otherwise be forwarded to the input.
+*/
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest?.('.help-btn');
+  if (btn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (helpAnchor === btn) hideHelp();
+    else showHelp(btn);
+    return;
+  }
+  if (!helpPop.hidden && !ev.target.closest?.('.help-pop')) hideHelp();
+});
+
+el('helpPopClose').addEventListener('click', hideHelp);
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !helpPop.hidden) hideHelp();
+});
+window.addEventListener('resize', () => {
+  if (helpAnchor) placeHelp(helpAnchor);
+});
+
+/* ------------------------------------------------------------------ */
+/* tutorial                                                            */
+/* ------------------------------------------------------------------ */
+
+const tabBeamline = el('tabBeamline');
+const tabTutorial = el('tabTutorial');
+const panelBeamline = el('panelBeamline');
+const panelTutorial = el('panelTutorial');
+
+function showTab(which) {
+  const tut = which === 'tutorial';
+  panelBeamline.hidden = tut;
+  panelTutorial.hidden = !tut;
+  tabBeamline.setAttribute('aria-selected', String(!tut));
+  tabTutorial.setAttribute('aria-selected', String(tut));
+  tabBeamline.classList.toggle('on', !tut);
+  tabTutorial.classList.toggle('on', tut);
+  if (tut) renderTutorial();
+}
+
+tabBeamline.addEventListener('click', () => showTab('beamline'));
+tabTutorial.addEventListener('click', () => showTab('tutorial'));
+
+const STEPS = allSteps();
+let stepAt = 0;
+
+/**
+ * What a tutorial step is allowed to do.
+ *
+ * Everything here is something a person could do with the ordinary controls,
+ * which is the point: a step cannot demonstrate behaviour the interface cannot
+ * reproduce, so following the tutorial teaches the actual program rather than
+ * a private back door into the model.
+ */
+const tutorialApi = {
+  build(specs) {
+    statusEl.classList.add('busy');
+    const made = specs.map((s) => createElement(s.type, s.params ?? {}));
+    for (let i = 1; i < made.length; i++) {
+      made[i].from = { parent: made[i - 1], port: exitsOf(made[i - 1])[0].port };
+    }
+    if (made.length) made[0].from = { parent: null, port: 'out' };
+    beamline = new Beamline();
+    beamline.fringe = fringeToggle.checked;
+    beamline.adopt(made);
+    statusEl.classList.remove('busy');
+    selection = null;
+    armPort(null);
+    afterStructureChange();
+  },
+
+  beam(spec) {
+    for (const [k, v] of Object.entries(spec)) {
+      if (inputs[k]) inputs[k].value = String(v);
+    }
+    syncOutputs();
+    markStale();
+    render();
+  },
+
+  physics(spec) {
+    if (spec.repulsion !== undefined) inputs.repulsion.value = spec.repulsion;
+    if (spec.beamCurrent !== undefined) inputs.beamCurrent.value = String(spec.beamCurrent);
+    if (spec.fringe !== undefined) {
+      fringeToggle.checked = Boolean(spec.fringe);
+      statusEl.classList.add('busy');
+      beamline.setFringe(fringeToggle.checked);
+      statusEl.classList.remove('busy');
+      describeFringe();
+    }
+    syncOutputs();
+    markStale();
+    render();
+  },
+
+  view(spec) {
+    for (const [k, v] of Object.entries(spec)) {
+      const key = `show${k[0].toUpperCase()}${k.slice(1)}`;
+      if (inputs[key]) inputs[key].checked = Boolean(v);
+    }
+    render();
+  },
+
+  select(target) {
+    if (target === null) select(null);
+    else if (target === 'source') select({ kind: 'source' });
+    else select({ kind: 'element', index: target });
+  },
+
+  fly() {
+    fly();
+  },
+
+  async optimise() {
+    await runTuner(tunableKnobs(beamline, beamSpec()), optimizeBtn, 'the whole column');
+  },
+};
+
+function renderTutorial() {
+  const here = STEPS[stepAt];
+  if (!here) return;
+  const { lesson, step, lessonIndex, stepIndex } = here;
+
+  el('tutLessons').innerHTML = LESSONS.map((l, i) => {
+    const first = STEPS.findIndex((s) => s.lesson === l);
+    return `<li>
+      <button type="button" class="tut-lesson${i === lessonIndex ? ' on' : ''}"
+              data-step="${first}">
+        <span class="tut-lesson-title">${escapeHtml(l.title)}</span>
+        <span class="tut-lesson-sum">${escapeHtml(l.summary)}</span>
+      </button>
+    </li>`;
+  }).join('');
+
+  el('tutCrumb').textContent = `${lesson.title} · step ${stepIndex + 1} of ${lesson.steps.length}`;
+  el('tutTitle').textContent = step.title;
+  el('tutBody').innerHTML = step.body.map((p) => `<p>${escapeHtml(p)}</p>`).join('');
+
+  const doBtn = el('tutDo');
+  doBtn.hidden = !step.action;
+  if (step.action) doBtn.textContent = step.action.label;
+
+  const whyBtn = el('tutWhy');
+  whyBtn.hidden = !step.topic;
+  if (step.topic) whyBtn.dataset.help = step.topic;
+
+  el('tutProgress').textContent = `${stepAt + 1} / ${STEPS.length}`;
+  el('tutPrev').disabled = stepAt === 0;
+  el('tutNext').disabled = stepAt === STEPS.length - 1;
+}
+
+el('tutLessons').addEventListener('click', (ev) => {
+  const b = ev.target.closest('.tut-lesson');
+  if (!b) return;
+  stepAt = Number(b.dataset.step);
+  renderTutorial();
+});
+
+el('tutPrev').addEventListener('click', () => {
+  stepAt = Math.max(0, stepAt - 1);
+  renderTutorial();
+});
+el('tutNext').addEventListener('click', () => {
+  stepAt = Math.min(STEPS.length - 1, stepAt + 1);
+  renderTutorial();
+});
+
+el('tutDo').addEventListener('click', async () => {
+  const step = STEPS[stepAt]?.step;
+  if (!step?.action) return;
+  const btn = el('tutDo');
+  btn.disabled = true;
+  try {
+    await step.action.run(tutorialApi);
+  } catch (err) {
+    setTuneNote(`That step could not run: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    renderTutorial();
+  }
+});
+
+/* ------------------------------------------------------------------ */
 /* start                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -3254,6 +3542,8 @@ syncOutputs();
 describeFringe();
 renderTools();
 armPort(null);
+showTab('beamline');
+renderTutorial();
 renderTrack();
 renderInspector();
 render();
