@@ -3373,13 +3373,26 @@ window.addEventListener('resize', () => {
 
 const tabBeamline = el('tabBeamline');
 const tabTutorial = el('tabTutorial');
-const panelBeamline = el('panelBeamline');
+const panelControls = el('panelControls');
 const panelTutorial = el('panelTutorial');
+const layoutEl = document.querySelector('.layout');
 
+/**
+ * Swap the sidebar between the controls and the tutorial.
+ *
+ * Only the sidebar: the viewport keeps the diagram, the beamline chart and the
+ * readout on screen throughout, because every lesson builds a real column and
+ * flies it. A tutorial that covered the thing it was describing would be
+ * asking the reader to take its word for the result.
+ *
+ * The layout widens in tutorial mode - 290 px is right for a stack of number
+ * inputs and too narrow for prose.
+ */
 function showTab(which) {
   const tut = which === 'tutorial';
-  panelBeamline.hidden = tut;
+  panelControls.hidden = tut;
   panelTutorial.hidden = !tut;
+  layoutEl.classList.toggle('tutoring', tut);
   tabBeamline.setAttribute('aria-selected', String(!tut));
   tabTutorial.setAttribute('aria-selected', String(tut));
   tabBeamline.classList.toggle('on', !tut);
