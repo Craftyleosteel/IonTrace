@@ -192,7 +192,20 @@ export const BENDER_DEFAULTS = {
   channelWidth: 15, // mm
   cornerSize: 5, // mm, the grounded corner posts (0 leaves them out)
   height: 30, // mm, aperture perpendicular to the bend plane
-  voltage: 0, // V on each electrode (+V and -V on the diagonals)
+  /*
+    A deflector that arrives at zero volts is a deflector that does nothing,
+    and "nothing" is the one behaviour this element is least likely to be
+    wanted for. Placed from the toolbar it gets a voltage matched to the ion in
+    the source, but anything that builds one from bare defaults - a tutorial
+    step, a test, a saved file predating the parameter - got a straight-through
+    pipe and no hint that it was meant to bend.
+
+    So the default bends. 43 V is the measured right angle for the beam this
+    program starts with, 100 u singly charged at 50 eV: 1.08 times the
+    closed-form 39.8 V, per DEFLECTOR_TURN_FACTOR below. For any other ion the
+    toolbar overrides it and the tuner corrects it.
+  */
+  voltage: 43, // V on each electrode (+V and -V on the diagonals)
   bendPlane: 0, // degrees of roll: 0 bends horizontally, 90 vertically
   gridStep: 0.5, // mm, in the bend plane
 };

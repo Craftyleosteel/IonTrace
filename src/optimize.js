@@ -44,6 +44,7 @@
  */
 
 import { flyBeam } from './integrator.js';
+import { exitsOf } from './beamline.js';
 import { ELEMENT_TYPES } from './elements/index.js';
 import { toLocal } from './frames.js';
 import { refineNullSpace } from './reduced.js';
@@ -561,4 +562,84 @@ export async function optimizeVoltages(beamline, makeIons, knobs, options = {}) 
     exitRadius: bestResult.exitRadius,
     refinement,
   };
+}
+
+/** A readable name for one open end: which element, and which way out of it. */
+export function branchLabel(end) {
+  const exit = exitsOf(end.element).find((x) => x.port === end.port);
+  return exit?.label && end.port !== 'out'
+    ? `${end.element.label} — ${exit.label}`
+    : end.element.label;
+}
+
+/**
+ * Tune the column once for every branch, and keep all the answers.
+ *
+ * Why this cannot be one tuning
+ * -----------------------------
+ * A deflector is a switch: the voltage that sends the beam out of its bent
+ * port is not the voltage that sends it straight through, and no single
+ * setting delivers to both. So a branching column does not HAVE a best
+ * setting - it has one per destination, and which you want is a question about
+ * what you are doing rather than about the column.
+ *
+ * That is also why this returns the settings instead of applying them. The
+ * column is left exactly as it was found, and choosing a branch is a separate,
+ * deliberate act. Tuning nine branches and silently leaving the column on
+ * whichever happened to be last would be the wrong kind of helpful.
+ *
+ * Every branch starts from the SAME voltages - the ones the column had when
+ * this was called - rather than from wherever the previous branch finished.
+ * Otherwise each tuning inherits the last one's answer as its starting point,
+ * and a branch's result would depend on the order the branches were visited.
+ *
+ * A branch that cannot be reached is reported with what it managed rather than
+ * dropped: "this port gets none of the beam at any voltage I tried" is a
+ * finding about the column, and often the one worth knowing.
+ *
+ * @returns {Promise<{branches: object[], original: number[], cancelled: boolean}>}
+ */
+export async function optimizeBranches(beamline, makeIons, knobs, options = {}) {
+  const { onProgress, shouldStop, ...rest } = options;
+  const ends = beamline.openEnds();
+  const original = readKnobs(beamline, knobs);
+  const branches = [];
+  let cancelled = false;
+
+  for (let i = 0; i < ends.length; i++) {
+    if (shouldStop?.()) {
+      cancelled = true;
+      break;
+    }
+    const end = ends[i];
+    const label = branchLabel(end);
+
+    writeKnobs(beamline, knobs, original);
+    const result = await optimizeVoltages(beamline, makeIons, knobs, {
+      ...rest,
+      flight: { ...(rest.flight ?? {}), target: end },
+      shouldStop,
+      onProgress: (p) =>
+        onProgress?.({ ...p, branch: i, branchCount: ends.length, branchLabel: label }),
+    });
+
+    branches.push({
+      end,
+      label,
+      settings: readKnobs(beamline, knobs),
+      transmitted: result.transmitted,
+      count: result.count,
+      exitRadius: result.exitRadius,
+      improved: result.improved,
+      cancelled: result.cancelled,
+    });
+    if (result.cancelled) {
+      cancelled = true;
+      break;
+    }
+  }
+
+  // Put the column back. Nothing here is applied without being asked for.
+  writeKnobs(beamline, knobs, original);
+  return { branches, original, cancelled };
 }

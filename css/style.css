@@ -1389,6 +1389,67 @@ input[type="range"]:focus-visible {
   min-width: 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* per-branch tunings                                                  */
+/* ------------------------------------------------------------------ */
+
+.branch-list {
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: 0 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.branch-row {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) 46px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+/* A destination nothing reaches is still listed - that is a fact about the
+   column - but it is not offered as something to switch to. */
+.branch-row.dead {
+  opacity: 0.55;
+}
+
+.branch-name {
+  font-weight: 620;
+  color: var(--text-primary);
+}
+
+.branch-score {
+  font-family: var(--mono);
+  color: var(--text-secondary);
+}
+
+.branch-volts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .branch-row {
+    grid-template-columns: 1fr auto;
+  }
+  .branch-volts {
+    grid-column: 1 / -1;
+    white-space: normal;
+  }
+}
+
 .tut-lessons {
   list-style: none;
   margin: 0;

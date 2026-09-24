@@ -240,16 +240,20 @@ export const LESSONS = [
         body: [
           'The deflector’s box has an opening on all four faces. One is the entrance; the other three are all reachable, and the voltage alone decides which the beam takes — positive bends one way, zero goes straight through, negative bends the other.',
           'That is what these devices are for: sending a beam down one of three lines without moving any hardware.',
+          'This builds one already bending. Select the deflector, set its voltage to zero and fly again: the beam goes straight out of the opposite face. Make it negative and it leaves by the other side. No hardware moved.',
         ],
         action: {
           label: 'Build a switch',
           run: (api) => {
             api.build([
               DRIFT(20, 6),
-              { type: 'bender', params: { voltage: 0 } },
+              // Bare defaults, which now bend: a deflector demonstrating a
+              // switch should be switched to something.
+              { type: 'bender', params: {} },
               DRIFT(40, 6),
             ]);
             api.beam({ mass: 100, charge: 1, energy: 50, rays: 9, beamRadius: 1.0 });
+            api.select(1);
             api.fly();
           },
         },

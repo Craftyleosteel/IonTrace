@@ -25,7 +25,13 @@ import {
 import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
 import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
-import { tunableKnobs, optimizeVoltages, TUNABLE } from './optimize.js';
+import {
+  tunableKnobs,
+  optimizeVoltages,
+  optimizeBranches,
+  writeKnobs,
+  TUNABLE,
+} from './optimize.js';
 import { serialise, restore } from './scene.js';
 import { topic } from './help.js';
 import { LESSONS, allSteps } from './tutorial.js';
@@ -299,6 +305,11 @@ function moveElement(index, delta) {
 
 function afterStructureChange() {
   markStale();
+  // Branch tunings belong to the shape of the column that produced them. Once
+  // an element moves, a set of voltages labelled "out of the bent port" may
+  // name a port that is no longer there, so the offer is withdrawn rather than
+  // left to be applied to a different column.
+  syncBranchButton();
   describeFringe();
   renderTrack();
   renderInspector();
@@ -1528,6 +1539,143 @@ function setTuneNote(text, bad = false) {
   tuneNote.hidden = !text;
   tuneNote.classList.toggle('warn', Boolean(bad));
 }
+
+/* ------------------------------------------------------------------ */
+/* tuning each branch                                                  */
+/* ------------------------------------------------------------------ */
+
+const tuneBranchesBtn = el('tuneBranches');
+const branchListEl = el('branchList');
+
+/** The last set of per-branch tunings, so a row can still be applied later. */
+let branchTunes = null;
+
+/**
+ * Offer per-branch tuning only when there is a choice to make.
+ *
+ * With one open end there is one destination, and "tune each branch" is just
+ * "tune", with a longer name and a confusing result.
+ */
+function syncBranchButton() {
+  tuneBranchesBtn.hidden = beamline.openEnds().length < 2;
+  // Any structural change invalidates every tuning: the voltages were found
+  // for a particular set of destinations, and a row labelled "out of the bent
+  // port" must not be applicable to a column that no longer has one.
+  clearBranchList();
+}
+
+function clearBranchList() {
+  branchTunes = null;
+  branchListEl.hidden = true;
+  branchListEl.innerHTML = '';
+}
+
+/**
+ * One row per destination, each able to put its own voltages on the column.
+ *
+ * The settings are shown, not just the transmission, because the number that
+ * tells you what a branch costs is the voltage it needs - a port that only
+ * takes the beam at forty kilovolts is reachable in principle and not in the
+ * instrument you have.
+ */
+function renderBranchList(branches, knobs) {
+  branchTunes = { branches, knobs };
+  branchListEl.hidden = branches.length === 0;
+  branchListEl.innerHTML = branches
+    .map((b, i) => {
+      const volts = knobs
+        .map((k, j) => `${beamline.elements[k.index].label}: ${b.settings[j].toFixed(0)} V`)
+        .join(' · ');
+      const got = `${b.transmitted}/${b.count}`;
+      const dead = b.transmitted === 0;
+      return `
+        <div class="branch-row${dead ? ' dead' : ''}">
+          <span class="branch-name">${escapeHtml(b.label)}</span>
+          <span class="branch-score">${got}</span>
+          <span class="branch-volts">${escapeHtml(volts)}</span>
+          <button class="ghost-btn" type="button" data-branch="${i}"
+                  ${dead ? 'disabled' : ''}>Use</button>
+        </div>`;
+    })
+    .join('');
+}
+
+branchListEl.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-branch]');
+  if (!btn || !branchTunes) return;
+  const b = branchTunes.branches[Number(btn.dataset.branch)];
+  if (!b) return;
+
+  writeKnobs(beamline, branchTunes.knobs, b.settings);
+  markStale();
+  refreshInspector();
+  render();
+  setTuneNote(
+    `Set for ${b.label} — ${b.transmitted} of ${b.count} ions delivered there. ` +
+      'The other branches are still listed; pick one to switch.'
+  );
+});
+
+async function runBranchTuner() {
+  if (tuning) {
+    tuning.stop = true;
+    return;
+  }
+  const knobs = tunableKnobs(beamline, beamSpec());
+  if (knobs.length === 0) {
+    setTuneNote('Nothing to tune — this column has no adjustable voltages.', true);
+    return;
+  }
+
+  cancelAnimationFrame(animation.frame);
+  animation.running = false;
+  clearBranchList();
+
+  const label = tuneBranchesBtn.textContent;
+  tuning = { stop: false, button: tuneBranchesBtn };
+  tuneBranchesBtn.classList.add('busy');
+  optimizeBtn.disabled = true;
+  flyButton.disabled = true;
+
+  const ends = beamline.openEnds().length;
+  setTuneNote(
+    `Tuning ${ends} branches, one at a time — each is a full search, so this takes ` +
+      `about ${ends} times as long as tuning once. Press again to stop.`
+  );
+
+  let out;
+  try {
+    out = await optimizeBranches(beamline, () => makeBeam(), knobs, {
+      flight: { cfl: readNumber(inputs.cfl, 0.05), method: inputs.method.value },
+      shouldStop: () => tuning.stop,
+      onProgress: async (p) => {
+        tuneBranchesBtn.textContent =
+          `${p.branch + 1}/${p.branchCount} · ${Math.round(p.fraction * 100)}% — cancel`;
+        await new Promise((r) => setTimeout(r, 0));
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    setTuneNote(`Tuning failed: ${err.message}`, true);
+    return;
+  } finally {
+    tuning = null;
+    tuneBranchesBtn.textContent = label;
+    tuneBranchesBtn.classList.remove('busy');
+    optimizeBtn.disabled = false;
+    flyButton.disabled = false;
+  }
+
+  renderBranchList(out.branches, knobs);
+  const reachable = out.branches.filter((b) => b.transmitted > 0).length;
+  setTuneNote(
+    `${out.cancelled ? 'Stopped early. ' : ''}Tuned ${out.branches.length} branch` +
+      `${out.branches.length === 1 ? '' : 'es'}; ${reachable} can receive the beam. ` +
+      'The column is unchanged — choose a branch below to apply its voltages.'
+  );
+}
+
+tuneBranchesBtn.addEventListener('click', runBranchTuner);
 
 async function runTuner(knobs, button, what) {
   if (tuning) {
@@ -3382,24 +3530,26 @@ window.addEventListener('resize', () => {
 
 const tabBeamline = el('tabBeamline');
 const tabTutorial = el('tabTutorial');
-const panelControls = el('panelControls');
 const panelTutorial = el('panelTutorial');
 const layoutEl = document.querySelector('.layout');
 
 /**
- * Swap the sidebar between the controls and the tutorial.
+ * Show or hide the tutorial at the top of the sidebar.
  *
- * Only the sidebar: the viewport keeps the diagram, the beamline chart and the
- * readout on screen throughout, because every lesson builds a real column and
- * flies it. A tutorial that covered the thing it was describing would be
- * asking the reader to take its word for the result.
+ * It ADDS to the sidebar rather than replacing it. The controls stay where
+ * they are, so a lesson that says "select the lens and change its voltage" can
+ * be followed without leaving the lesson - clicking an element still opens its
+ * settings, just below the step instead of at the top of the column.
  *
- * The layout widens in tutorial mode - 290 px is right for a stack of number
+ * The viewport is untouched either way: the diagram, the beamline chart and
+ * the readout keep the second column at full width, because every lesson
+ * builds a real column and flies it.
+ *
+ * The sidebar widens in tutorial mode - 290 px is right for a stack of number
  * inputs and too narrow for prose.
  */
 function showTab(which) {
   const tut = which === 'tutorial';
-  panelControls.hidden = tut;
   panelTutorial.hidden = !tut;
   layoutEl.classList.toggle('tutoring', tut);
   tabBeamline.setAttribute('aria-selected', String(!tut));
@@ -3564,6 +3714,7 @@ syncOutputs();
 describeFringe();
 renderTools();
 armPort(null);
+syncBranchButton();
 showTab('beamline');
 renderTutorial();
 renderTrack();
