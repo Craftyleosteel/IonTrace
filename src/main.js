@@ -29,6 +29,9 @@ import {
   tunableKnobs,
   optimizeVoltages,
   optimizeBranches,
+  branchLabel,
+  scoreBeamline,
+  readKnobs,
   writeKnobs,
   TUNABLE,
 } from './optimize.js';
@@ -930,17 +933,49 @@ function renderInspector() {
  * every voltage together is named right next to it.
  */
 function tuneRow(e) {
+  /*
+    Tuning the branch this element is on.
+
+    Offered whenever the column has somewhere else the beam could go and this
+    element leads to exactly one of them. With several ends below - a deflector
+    has three - "this branch" names nothing, and the toolbar's per-branch
+    tuning is the honest way to handle that.
+  */
+  const below = beamline.endsBelow(e);
+  const branchBtn =
+    beamline.openEnds().length > 1 && below.length === 1
+      ? `<button data-act="tune-branch" data-index="${selectedIndex()}">
+           Tune the ${escapeHtml(branchLabel(below[0]))} branch
+         </button>`
+      : '';
+
   const keys = TUNABLE[e.typeKey];
-  if (!keys?.length) return '';
+  if (!keys?.length) {
+    return branchBtn
+      ? `<div class="row-actions tune-row">${branchBtn}
+           <span class="field-help">
+             Moves every voltage in the column, scoring only the ions that reach
+             this line's end. Other branches are left where they are.
+           </span>
+         </div>`
+      : '';
+  }
+
   const what = keys.length === 1 ? 'this voltage' : 'these voltages';
   return `
     <div class="row-actions tune-row">
       <button data-act="tune" data-index="${selectedIndex()}">Tune ${escapeHtml(
         e.label
       )}</button>
+      ${branchBtn}
       <span class="field-help">
         Searches ${what} for the best transmission, leaving everything else
         alone. Optimise voltages, in the toolbar, moves the whole column at once.
+        ${
+          branchBtn
+            ? 'Tuning the branch moves every voltage, but scores only the ions that reach this line’s end.'
+            : ''
+        }
       </span>
     </div>`;
 }
@@ -1593,6 +1628,8 @@ function renderBranchList(branches, knobs) {
           <span class="branch-name">${escapeHtml(b.label)}</span>
           <span class="branch-score">${got}</span>
           <span class="branch-volts">${escapeHtml(volts)}</span>
+          <button class="ghost-btn" type="button" data-retune="${i}"
+                  title="Search again for this branch only">Tune</button>
           <button class="ghost-btn" type="button" data-branch="${i}"
                   ${dead ? 'disabled' : ''}>Use</button>
         </div>`;
@@ -1600,9 +1637,23 @@ function renderBranchList(branches, knobs) {
     .join('');
 }
 
-branchListEl.addEventListener('click', (ev) => {
+branchListEl.addEventListener('click', async (ev) => {
+  if (!branchTunes) return;
+
+  // Re-search one branch, leaving the others' answers alone. Cheaper than
+  // tuning the lot, and the usual thing to want after changing a geometry on
+  // the line you actually care about.
+  const again = ev.target.closest('[data-retune]');
+  if (again) {
+    const i = Number(again.dataset.retune);
+    const b = branchTunes.branches[i];
+    if (!b) return;
+    await tuneOneBranch(i);
+    return;
+  }
+
   const btn = ev.target.closest('[data-branch]');
-  if (!btn || !branchTunes) return;
+  if (!btn) return;
   const b = branchTunes.branches[Number(btn.dataset.branch)];
   if (!b) return;
 
@@ -1615,6 +1666,40 @@ branchListEl.addEventListener('click', (ev) => {
       'The other branches are still listed; pick one to switch.'
   );
 });
+
+/**
+ * Tune one branch and update just its row.
+ *
+ * The column goes back to where it was afterwards, exactly as tuning them all
+ * does: a row is an offer, and it is applied by pressing Use.
+ */
+async function tuneOneBranch(i) {
+  const { branches, knobs } = branchTunes;
+  const b = branches[i];
+  const before = readKnobs(beamline, knobs);
+
+  await runTuner(knobs, tuneBranchesBtn, `the ${b.label} branch`, b.end);
+  if (tuning) return; // a search was already running; runTuner said so
+
+  const settings = readKnobs(beamline, knobs);
+  const scored = scoreBeamline(beamline, () => makeBeam(), { target: b.end });
+  writeKnobs(beamline, knobs, before);
+
+  branches[i] = {
+    ...b,
+    settings,
+    transmitted: scored.transmitted,
+    count: scored.count,
+    exitRadius: scored.exitRadius,
+  };
+  renderBranchList(branches, knobs);
+  markStale();
+  render();
+  setTuneNote(
+    `Re-tuned ${b.label}: ${scored.transmitted} of ${scored.count} delivered. ` +
+      'The column is unchanged — press Use to apply it.'
+  );
+}
 
 async function runBranchTuner() {
   if (tuning) {
@@ -1677,7 +1762,10 @@ async function runBranchTuner() {
 
 tuneBranchesBtn.addEventListener('click', runBranchTuner);
 
-async function runTuner(knobs, button, what) {
+/**
+ * @param {object|null} target an open end to aim at, or null for the main line
+ */
+async function runTuner(knobs, button, what, target = null) {
   if (tuning) {
     // A press during a search stops it rather than starting a competing one.
     // Pressing a *different* tune button does the same, so say so - otherwise
@@ -1709,7 +1797,18 @@ async function runTuner(knobs, button, what) {
   let result;
   try {
     result = await optimizeVoltages(beamline, () => makeBeam(), knobs, {
-      flight: { cfl: readNumber(inputs.cfl, 0.05), method: inputs.method.value },
+      /*
+        `target` is omitted rather than passed as null when there is none.
+        scoreBeamline reads a missing target as "the main line" and an explicit
+        null as "anywhere will do" - and anywhere will do is how you tune a
+        deflector to point at a wall, since every ion that leaves by any port
+        counts as delivered.
+      */
+      flight: {
+        cfl: readNumber(inputs.cfl, 0.05),
+        method: inputs.method.value,
+        ...(target ? { target } : {}),
+      },
       shouldStop: () => tuning.stop,
       onProgress: async (p) => {
         button.textContent = `${Math.round(p.fraction * 100)}% · ${p.transmitted}/${p.count} — cancel`;
@@ -2861,6 +2960,24 @@ function handleAction(act, index) {
     case 'remove':
       removeElement(index);
       return true;
+    case 'tune-branch': {
+      /*
+        Tune the whole column, but score only the ions that reach the end of
+        the line this element is on. Every voltage moves - a branch is fed by
+        everything upstream of it - and the other branches simply stop being
+        the objective.
+      */
+      const e = beamline.elements[index];
+      const below = beamline.endsBelow(e);
+      if (below.length !== 1) return true;
+      runTuner(
+        tunableKnobs(beamline, beamSpec()),
+        optimizeBtn,
+        `the ${branchLabel(below[0])} branch`,
+        below[0]
+      );
+      return true;
+    }
     case 'match': {
       // Put the bender on the matched voltage for the current ion, snapped to
       // the slider's own step so the control shows exactly what was set.

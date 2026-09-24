@@ -1404,7 +1404,7 @@ input[type="range"]:focus-visible {
 
 .branch-row {
   display: grid;
-  grid-template-columns: minmax(120px, auto) 46px 1fr auto;
+  grid-template-columns: minmax(120px, auto) 46px 1fr auto auto;
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
@@ -1442,7 +1442,7 @@ input[type="range"]:focus-visible {
 
 @media (max-width: 720px) {
   .branch-row {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr auto auto;
   }
   .branch-volts {
     grid-column: 1 / -1;

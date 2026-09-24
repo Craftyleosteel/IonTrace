@@ -378,6 +378,33 @@ export class Beamline {
     return out;
   }
 
+  /**
+   * The open ends reachable from `element`, following the beam downstream.
+   *
+   * What "this branch" means when you have selected something. A lens partway
+   * down a line has one end below it; a deflector has up to three, and saying
+   * so is better than picking one of them silently.
+   */
+  endsBelow(element) {
+    if (!element) return [];
+    const out = [];
+    const walk = (e) => {
+      for (const exit of exitsOf(e)) {
+        const child = this.childAt(e, exit.port);
+        if (child) walk(child);
+        else {
+          out.push({
+            element: e,
+            port: exit.port,
+            frame: compose(e.nominalFrame, exit.transform),
+          });
+        }
+      }
+    };
+    walk(element);
+    return out;
+  }
+
   /** Put `elements` back into depth-first order, so display follows the beam. */
   #reorder() {
     const seen = new Set();

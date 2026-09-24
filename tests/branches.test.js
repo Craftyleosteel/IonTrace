@@ -161,6 +161,56 @@ describe('Tuning each branch', () => {
     }
   });
 
+  it('knows which ends lie below an element', () => {
+    /*
+      What "this branch" means when something is selected. A drift partway down
+      one line leads to exactly one end, so tuning it is unambiguous; the
+      deflector above it leads to all of them, so it is not, and the interface
+      has to offer per-branch tuning there instead of guessing.
+    */
+    const bl = switched();
+    const [entry, bend, bentLine, straightLine] = bl.elements;
+
+    assert(bl.endsBelow(bentLine).length === 1, 'a leaf drift has one end below it');
+    assert(bl.endsBelow(straightLine).length === 1, 'so does the other line');
+    assert(
+      bl.endsBelow(bentLine)[0].element === bentLine,
+      'and that end is its own open exit'
+    );
+
+    const below = bl.endsBelow(bend);
+    assert(below.length === bl.openEnds().length, `a deflector leads everywhere, got ${below.length}`);
+    assert(
+      bl.endsBelow(entry).length === below.length,
+      'and so does everything above it'
+    );
+    assert(bl.endsBelow(null).length === 0, 'nothing selected leads nowhere');
+  });
+
+  it('tunes to one named end without touching the others', async () => {
+    // What the per-branch Tune button does: the same search, scored against
+    // one destination instead of the main line.
+    const bl = switched();
+    const knobs = tunableKnobs(bl, SPEC);
+    const ends = bl.openEnds();
+
+    for (const end of ends) {
+      writeKnobs(bl, knobs, knobs.map(() => 0));
+      const { optimizeVoltages } = await import('../src/optimize.js');
+      const r = await optimizeVoltages(bl, beam(), knobs, {
+        ...FAST,
+        flight: { target: end },
+      });
+      // Whatever it found, the score it reports must be the score of the
+      // setting it left behind, measured against the end it was aiming at.
+      const check = scoreBeamline(bl, beam(), { target: end });
+      assert(
+        check.transmitted === r.transmitted,
+        `tuning to ${branchLabel(end)} reported ${r.transmitted} but delivers ${check.transmitted}`
+      );
+    }
+  });
+
   it('stops when asked', async () => {
     const bl = switched();
     const knobs = tunableKnobs(bl, SPEC);

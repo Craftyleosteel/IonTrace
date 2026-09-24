@@ -175,6 +175,13 @@ export const ELEMENT_TYPES = {
       { key: 'boreRadius', label: 'Bore', unit: 'mm', min: 3, max: 10, step: 0.5, rebuild: true },
       { key: 'centreLength', label: 'Centre length', unit: 'mm', min: 5, max: 40, step: 1, rebuild: true },
       { key: 'gap', label: 'Gap', unit: 'mm', min: 1, max: 12, step: 0.5, rebuild: true },
+      // The padding inside the element, either side of the three cylinders.
+      // It was not editable, which meant an einzel always reserved 36 mm of
+      // empty grounded space it did not look like it was using - so two
+      // elements placed hard against each other still had their metal a long
+      // way apart, and there was no way to close the gap.
+      { key: 'entryDrift', label: 'Padding before', unit: 'mm', min: 2, max: 40, step: 1, rebuild: true, help: 'Empty grounded space inside this element, before the first cylinder. It keeps the element’s own end face out of its fringe field — about three bore radii is enough. Shorten it to pack elements closer, and turn on fringe fields when you do, so neighbours are solved together instead of each behind its own grounded cap.' },
+      { key: 'exitDrift', label: 'Padding after', unit: 'mm', min: 2, max: 40, step: 1, rebuild: true, help: 'The same, after the last cylinder. An einzel needs this least of any element here — its outer cylinders are grounded and shield the centre almost completely, to about a part in seven thousand — so this is the safest padding to cut when closing a column up.' },
     ],
   },
 
