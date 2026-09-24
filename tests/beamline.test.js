@@ -32,6 +32,7 @@ import {
   matchedVoltage,
   DEFLECTOR_CONSTANT,
   DEFLECTOR_DESIGN_PHASE,
+  DEFLECTOR_TURN_FACTOR,
 } from '../src/elements/bender.js';
 import {
   compose,
@@ -2302,11 +2303,25 @@ describe('Voltage optimiser', () => {
     const aimed = tunableKnobs(bl, SPEC)[0];
 
     assert(aimed.seed !== null, 'the deflector can suggest a voltage');
+    /*
+      The matched voltage TIMES the measured turn factor, not the closed form
+      alone. V0 is a derivation and stays one; what a deflector should be tried
+      at is a practical question, and the solved field wants more than the
+      algebra says because a real ion is kicked by the entrance and exit
+      channels as well as by the aperture.
+    */
     assertRelClose(
       aimed.seed,
-      matchedVoltage(DEFLECTOR, SPEC.energy, 1),
+      matchedVoltage(DEFLECTOR, SPEC.energy, 1) * DEFLECTOR_TURN_FACTOR,
       1e-12,
-      'and the suggestion is the matched voltage'
+      'the suggestion is the matched voltage, corrected by the measured factor'
+    );
+    // And the correction has to stay inside the span that actually delivers
+    // the beam, or seeding the search there makes it worse rather than better.
+    assert(
+      DEFLECTOR_TURN_FACTOR >= 1.0 && DEFLECTOR_TURN_FACTOR <= 1.12,
+      `the turn factor must lie in the window every measured geometry shares, ` +
+        `got ${DEFLECTOR_TURN_FACTOR}`
     );
     assert(aimed.hi - aimed.lo < (wide.hi - wide.lo) / 2, 'the aimed sweep is narrower');
     assert(aimed.min === wide.min && aimed.max === wide.max, 'but the hard limits are unchanged');

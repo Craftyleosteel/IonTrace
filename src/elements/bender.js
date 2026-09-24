@@ -202,6 +202,37 @@ export const DEFLECTOR_DESIGN_PHASE = 0.937552;
 export const DEFLECTOR_CONSTANT = Math.tanh(DEFLECTOR_DESIGN_PHASE) ** -2; // 1.85565
 
 /**
+ * How much more than V0 the solved field actually wants, measured.
+ *
+ * `matchedVoltage` is the closed form and stays that way - it is a derivation,
+ * and quietly multiplying it by a fudge factor would make every test of the
+ * algebra a test of the fudge instead. This is separate, and it is what a
+ * deflector should ARRIVE at when placed, because a starting voltage is a
+ * practical guess rather than a theoretical claim.
+ *
+ * It cannot be the value that turns a right angle, because there is no such
+ * single value: the factor moves with the channel width most of all, and with
+ * the electrode proportions after that. Measured, counting only ions that left
+ * by the bend port, with the span that delivers all nine:
+ *
+ *     geometry                        turns 90 deg at   all nine over
+ *     shipped defaults, 15 mm chan.        1.22           0.86 .. 1.32
+ *     thin electrodes, 10.5 mm chan.       1.06           0.86 .. 1.12
+ *     thin electrodes, 15 mm chan.         1.38           1.00 .. 1.46
+ *
+ * So the constant is chosen by INTERSECTING the windows, not by averaging the
+ * optima. Those three overlap only on 1.00 .. 1.12, and 1.08 sits in the
+ * middle of that - it delivers the whole beam at every geometry measured,
+ * which is the one thing a starting voltage has to do. Averaging the optima
+ * would have given 1.22, which is outside the second window and loses most of
+ * the beam there; that is not a hypothetical, it is what the optimiser tests
+ * caught when this constant was first set that way.
+ *
+ * Turning an exact right angle is the tuner's job, and it starts from here.
+ */
+export const DEFLECTOR_TURN_FACTOR = 1.08;
+
+/**
  * Ideal matched voltage: V0 = k (T/q) (r0/a)^2.
  *
  * `a` is the half-width of the field region - the distance from the centre to

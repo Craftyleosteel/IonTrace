@@ -15,7 +15,12 @@ import { createDrift, DRIFT_DEFAULTS } from './drift.js';
 import { createAperture, APERTURE_DEFAULTS } from './aperture.js';
 import { createEinzel, EINZEL_ELEMENT_DEFAULTS } from './einzel.js';
 import { createQuadrupole, QUADRUPOLE_DEFAULTS, amplitudeForQ } from './quadrupole.js';
-import { createBender, BENDER_DEFAULTS, matchedVoltage } from './bender.js';
+import {
+  createBender,
+  BENDER_DEFAULTS,
+  matchedVoltage,
+  DEFLECTOR_TURN_FACTOR,
+} from './bender.js';
 import { createMultipole, MULTIPOLE_DEFAULTS } from './multipole.js';
 import { createFunnel, FUNNEL_DEFAULTS } from './funnel.js';
 import { createDetector, DETECTOR_DEFAULTS } from './detector.js';
@@ -193,7 +198,7 @@ export const ELEMENT_TYPES = {
     icon: ICONS.multipole,
     label: 'Multipole guide',
     blurb:
-      'Six, eight or more rods in alternating RF phase. The effective potential goes as r^(2nâˆ’2), so it is flat across the middle and steep at the rods — which guides ions of every mass instead of selecting one, the opposite of what a quadrupole is for.',
+      'Six, eight or more rods in alternating RF phase. The effective potential goes as r^(2n−2), so it is flat across the middle and steep at the rods — which guides ions of every mass instead of selecting one, the opposite of what a quadrupole is for.',
     create: createMultipole,
     defaults: MULTIPOLE_DEFAULTS,
     fields: [
@@ -202,7 +207,7 @@ export const ELEMENT_TYPES = {
       { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false },
       { key: 'poles', label: 'Rods', unit: '', min: 4, max: 24, step: 2, rebuild: true, help: '4 is a quadrupole, 6 a hexapole, 8 an octopole. More rods flatten the bottom of the well and steepen its walls.' },
       { key: 'length', label: 'Rod length', unit: 'mm', min: 10, max: 400, step: 5, rebuild: false },
-      { key: 'fieldRadius', label: 'Field radius râ‚€', unit: 'mm', min: 1.5, max: 15, step: 0.25, rebuild: true },
+      { key: 'fieldRadius', label: 'Field radius r₀', unit: 'mm', min: 1.5, max: 15, step: 0.25, rebuild: true },
       { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 0.5, max: 8, step: 0.1, rebuild: true },
     ],
   },
@@ -232,7 +237,7 @@ export const ELEMENT_TYPES = {
     icon: ICONS.bender,
     label: 'Quadrupole deflector',
     blurb:
-      'Four curved electrodes in a grounded box, at +V and âˆ’V on the diagonals, turning the beam ninety degrees. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
+      'Four curved electrodes in a grounded box, at +V and −V on the diagonals, turning the beam ninety degrees. Its exit faces a different way from its entrance, so everything after it turns too — this is what makes the column a path rather than a line.',
     create: createBender,
     defaults: BENDER_DEFAULTS,
     fields: [
@@ -246,16 +251,21 @@ export const ELEMENT_TYPES = {
       // Signed by the charge: the matched voltage is a magnitude, but which
       // diagonal carries it decides which way the beam turns, and a negative
       // ion at a positive ion's polarity is steered into the wall.
-      { key: 'voltage', label: 'Electrode voltage', unit: 'V', min: -60000, max: 60000, step: 1, rebuild: false, scale: (params, ion) => matchedVoltage(params, ion.energy, Math.abs(ion.charge) || 1) * Math.sign(ion.charge || 1), help: 'Applied as +V and âˆ’V on opposite diagonals. A new deflector arrives already matched to the beam.' },
+      // Scaled by the measured turn factor, not by the closed form alone. V0
+      // is systematically 20-40 % low - it knows only the aperture, while a
+      // real ion is also kicked by the entrance and exit channels - so a
+      // deflector placed at exactly V0 transmits but over-turns, and its beam
+      // visibly misses the reference path the diagram draws for it.
+      { key: 'voltage', label: 'Electrode voltage', unit: 'V', min: -60000, max: 60000, step: 1, rebuild: false, scale: (params, ion) => matchedVoltage(params, ion.energy, Math.abs(ion.charge) || 1) * DEFLECTOR_TURN_FACTOR * Math.sign(ion.charge || 1), help: 'Applied as +V and −V on opposite diagonals. A new deflector arrives at the voltage measured to turn a right angle, which is about a quarter above the closed-form matched value.' },
       // Any angle, not just the four right angles it used to offer. The roll
       // is a rotation about the beam applied when the field is evaluated, so
       // an arbitrary angle costs nothing and needs no re-solve — there was
       // never a reason for the quarter-turn steps beyond the slider that used
       // to set it.
       { key: 'bendPlane', label: 'Bend plane', unit: '°', min: -360, max: 360, step: 5, rebuild: false, help: 'Which plane the bending happens in: 0° horizontal, 90° vertical, anything between at that angle. Which of the two ways WITHIN that plane the beam goes is set by the sign of the voltage, and the two are separate exits — so one deflector can feed a line on each.' },
-      { key: 'apertureRadius', label: 'Aperture radius râ‚€', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (râ‚€/a)², so this and the two below set the operating voltage between them.' },
+      { key: 'apertureRadius', label: 'Aperture radius r₀', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (r₀/a)², so this and the two below set the operating voltage between them.' },
       { key: 'electrodeThickness', label: 'Electrode thickness', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true },
-      { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. râ‚€ plus these two is the half-width a.' },
+      { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. r₀ plus these two is the half-width a.' },
       { key: 'channelWidth', label: 'Beam channel', unit: 'mm', min: 2, max: 40, step: 0.5, rebuild: true, help: 'The clear straight-sided gap between neighbouring electrodes, on all four sides — the beam’s way in and out. Its two walls are at opposite polarity, so each channel is also a small parallel-plate deflector the beam crosses on the way in: narrowing this throws ions into the channel walls, while the field in the aperture barely changes. Widen it if the deflector is losing beam it should be turning.' },
       { key: 'cornerSize', label: 'Corner posts', unit: 'mm', min: 0, max: 20, step: 0.5, rebuild: true, help: 'Grounded posts on the diagonals, as the real instrument has. They sit behind the electrodes, which shield the aperture from them completely, so they change the field the beam sees not at all — structure, not tuning. 0 removes them.' },
       { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 60, step: 1, rebuild: true },
@@ -278,8 +288,8 @@ export const ELEMENT_TYPES = {
       { key: 'frequency', label: 'Frequency', unit: 'MHz', min: 0.1, max: 5, step: 0.05, rebuild: false },
       { key: 'phase', label: 'Entry phase', unit: '°', min: 0, max: 360, step: 5, rebuild: false, help: 'RF phase when the simulation starts. Real transmission depends on it.' },
       { key: 'length', label: 'Rod length', unit: 'mm', min: 10, max: 200, step: 5, rebuild: false },
-      { key: 'fieldRadius', label: 'Field radius râ‚€', unit: 'mm', min: 1.5, max: 10, step: 0.25, rebuild: true },
-      { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 1.5, max: 12, step: 0.1, rebuild: true, help: 'The ratio 1.1487 Ã— râ‚€ cancels the 12-pole for round rods.' },
+      { key: 'fieldRadius', label: 'Field radius r₀', unit: 'mm', min: 1.5, max: 10, step: 0.25, rebuild: true },
+      { key: 'rodRadius', label: 'Rod radius', unit: 'mm', min: 1.5, max: 12, step: 0.1, rebuild: true, help: 'The ratio 1.1487 × r₀ cancels the 12-pole for round rods.' },
     ],
   },
 };

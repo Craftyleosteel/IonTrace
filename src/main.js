@@ -191,9 +191,18 @@ function defaultBeamline() {
       exitDrift: 15,
     }),
     createElement('drift', { length: 14, bore: 5 }),
-    // Matched for a 100 u, 50 eV singly-charged ion: V0 = 1.8556 (T/q)(r0/a)^2
-    // is 39.8 V, and the solved field turns that through 89 degrees.
-    createElement('bender', { voltage: 40 }),
+    /*
+      Tuned for the 100 u, 50 eV ion in the source, and NOT at its closed-form
+      matched voltage. V0 = 1.8556 (T/q)(r0/a)^2 is 39.8 V, and the solved
+      field turns that through 93.3 degrees - the beam leaves over-bent and
+      misses the quarter arc the diagram draws for it by 4.25 mm, a fifth of
+      the aperture radius, which looks exactly as wrong as it is.
+
+      50 V turns 89.9 degrees, delivers all nine ions, and tracks the drawn
+      path to 0.38 mm. See DEFLECTOR_TURN_FACTOR in elements/bender.js for why
+      the closed form runs low.
+    */
+    createElement('bender', { voltage: 50 }),
     createElement('drift', { length: 30, bore: 5 }),
   ]);
 }
