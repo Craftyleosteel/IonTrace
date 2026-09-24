@@ -2541,7 +2541,7 @@ describe('Refining a tuned beamline', () => {
   const SPEC = { mass: 100, charge: 1, energy: 50 };
   const ions = () => discBeam({ ...SPEC, count: 9, radius: 1.0 });
 
-  const column = () =>
+  const columnAt = (voltage) =>
     new Beamline([
       createElement('drift', { length: 12, bore: 6 }),
       createElement('einzel', {
@@ -2549,9 +2549,49 @@ describe('Refining a tuned beamline', () => {
         housingRadius: 15, entryDrift: 14, exitDrift: 14,
       }),
       createElement('drift', { length: 14, bore: 6 }),
-      createElement('bender', { voltage: startingParams('bender', SPEC).voltage }),
+      createElement('bender', { voltage }),
       createElement('drift', { length: 40, bore: 6 }),
     ]);
+
+  /*
+    The deflector voltage this fixture runs at, FOUND rather than assumed.
+
+    These tests need a column that delivers every ion, because `beamQuality`
+    reports no merit at all unless the beam arrives intact - that is the next
+    test down. The obvious way to get one is to set the deflector to its
+    closed-form V0, and that is what this did.
+
+    But V0 is an estimate of an ideal quadrupole, deliberately: the element
+    ships with a tuner precisely because the solved field wants a few per cent
+    either way, and §9.3 of the physics notes refuses to quote a calibration
+    table for exactly this reason. So a fixture that pins V0 is asserting
+    something the rest of the codebase says is not true, and it breaks whenever
+    the electrode geometry moves - which it just did, taking this test from
+    9 of 9 to 8 of 9 on a change that was nothing to do with what it tests.
+
+    Searching costs one extra Laplace solve for the whole block, because a
+    deflector voltage is only a multiplier on the solved field: the scan reuses
+    one column and calls setVoltage. V0 is tried first, so a well-calibrated
+    element pays a single flight for this.
+  */
+  let found = null;
+  function deliveringVoltage() {
+    if (found !== null) return found;
+    const V0 = startingParams('bender', SPEC).voltage;
+    const probe = columnAt(V0);
+    const bender = probe.elements[3];
+    let best = { arrived: -1, v: V0 };
+    for (const f of [1, 0.95, 1.05, 0.9, 1.1, 0.85, 1.15]) {
+      bender.setVoltage(f * V0);
+      const arrived = beamQuality(probe, ions).arrived;
+      if (arrived > best.arrived) best = { arrived, v: f * V0 };
+      if (arrived === 9) break;
+    }
+    found = best.v;
+    return found;
+  }
+
+  const column = () => columnAt(deliveringVoltage());
 
   it('measures the beam at the target plane, not where the ion stopped', () => {
     // The difference between a merit that can be differentiated and one that
@@ -2562,7 +2602,13 @@ describe('Refining a tuned beamline', () => {
     const target = bl.mainEnd;
     const frame = bl.endFrame(target);
     const q = beamQuality(bl, ions);
-    assert(q.arrived === 9, `all nine should arrive, got ${q.arrived}`);
+    assert(
+      q.arrived === 9,
+      `all nine should arrive, got ${q.arrived} at the best of seven voltages ` +
+        `(${deliveringVoltage().toFixed(1)} V) - if no voltage delivers the beam, the ` +
+        'loss is geometric rather than a calibration, so look at the deflector ' +
+        'channel width rather than at the tuning'
+    );
 
     // Every contributing ion is measured exactly on the plane, so the distance
     // along the exit axis is zero rather than a step's worth of overshoot.
