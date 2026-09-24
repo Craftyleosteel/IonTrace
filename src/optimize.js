@@ -62,6 +62,25 @@ export const TUNABLE = {
   einzel: ['voltage'],
   bender: ['voltage'],
   tube: ['voltage'],
+  /*
+    RF guides ARE tunable, and the quadrupole's objection below does not apply
+    to them - it inverts.
+
+    A mass filter's job is selectivity, so the setting that transmits most is
+    the one that filters nothing, and the search destroys the device. A guide's
+    job IS transmission. Turn its RF down and the confinement goes with it, the
+    beam spreads and hits the rods, and throughput falls. So the objective the
+    optimiser maximises is the objective the element exists for, and there is a
+    genuine interior optimum rather than a run to the edge of the range.
+
+    Frequency is included because it is not a free parameter dressed up as one:
+    the well depth goes as 1/f squared, so it trades directly against amplitude
+    and the pair has an optimum neither has alone. The funnel's DC gradient is
+    here for the same reason - it is what pushes ions along the stack, and too
+    little strands them while too much outruns the radial confinement.
+  */
+  multipole: ['rfAmplitude', 'frequency'],
+  funnel: ['rfAmplitude', 'frequency', 'dcEntry', 'dcExit'],
   // One conductor is one voltage, which is exactly why this element holds one
   // conductor. A stack of them in the beamline gives the optimiser a knob per
   // piece of metal, where an element carrying an array of electrodes would

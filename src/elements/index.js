@@ -84,6 +84,26 @@ const ICONS = {
     '<path d="M2 9h15V1" opacity=".55"/>',
 };
 
+/**
+ * The parameters that are empty space inside an element, not hardware.
+ *
+ * Every element reserves vacuum either side of its metal so its own grounded
+ * end faces stay out of its fringe field. That padding is why two elements
+ * placed hard against each other still have their electrodes far apart, and
+ * why a column looks spread out when the instrument it represents is not.
+ *
+ * Listing the keys here lets the interface close a whole column up without
+ * knowing what any particular element is made of. It is only safe to do that
+ * with column solves ON - shortening the padding while each element is still
+ * solved behind its own caps does not pack the column, it corrupts the field.
+ */
+export const PADDING = {
+  aperture: ['margin'],
+  einzel: ['entryDrift', 'exitDrift'],
+  tube: ['margin'],
+  detector: ['margin'],
+};
+
 export const ELEMENT_TYPES = {
   drift: {
     icon: ICONS.drift,

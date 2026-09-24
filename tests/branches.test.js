@@ -211,6 +211,61 @@ describe('Tuning each branch', () => {
     }
   });
 
+  it('does not switch an RF guide off to improve its transmission', async () => {
+    /*
+      The quadrupole is deliberately not tunable, because a mass filter's job
+      is selectivity and the setting that transmits most is the one that
+      filters nothing - asked to maximise transmission it turns the RF down
+      until the rods stop selecting.
+
+      A guide inverts that: confinement IS transmission. This checks the
+      inversion is real rather than assumed, because the failure would look
+      like a success - the optimiser reporting a fine number having quietly
+      disabled the element.
+
+      Measured on this column: RF off passes 3 of 7, 50-400 V passes all
+      seven, and 800 V drops back to 5 as the drive over-heats the ions. So
+      there is an interior optimum, which is exactly what makes the search
+      meaningful.
+    */
+    const { optimizeVoltages } = await import('../src/optimize.js');
+    const ion = { mass: 100, charge: 1, energy: 5 };
+    const ions = () => discBeam({ ...ion, count: 7, radius: 1.2, divergence: 3 });
+    const bl = new Beamline([
+      createElement('drift', { length: 8, bore: 6 }),
+      createElement('multipole', {}),
+      createElement('drift', { length: 15, bore: 6 }),
+    ]);
+    const guide = bl.elements[1];
+
+    // Confined beats unconfined, or there is nothing here to optimise for.
+    guide.params.rfAmplitude = 0;
+    const off = scoreBeamline(bl, ions);
+    guide.params.rfAmplitude = 200;
+    const on = scoreBeamline(bl, ions);
+    assert(
+      on.transmitted > off.transmitted,
+      `RF should help: ${on.transmitted}/${on.count} on versus ${off.transmitted}/${off.count} off`
+    );
+
+    // Starting from OFF, the search must turn it back on.
+    guide.params.rfAmplitude = 0;
+    const knobs = tunableKnobs(bl, ion);
+    assert(
+      knobs.some((k) => k.key === 'rfAmplitude') && knobs.some((k) => k.key === 'frequency'),
+      'amplitude and frequency are both knobs on a guide'
+    );
+    const r = await optimizeVoltages(bl, ions, knobs, {
+      passes: 1, coarse: 11, levels: 2, polish: false,
+    });
+    const amp = bl.elements[1].params.rfAmplitude;
+    assert(amp > 1, `the optimiser left the guide switched off at ${amp} V`);
+    assert(
+      r.transmitted > off.transmitted,
+      `and it should beat the unconfined beam: ${r.transmitted} versus ${off.transmitted}`
+    );
+  });
+
   it('stops when asked', async () => {
     const bl = switched();
     const knobs = tunableKnobs(bl, SPEC);

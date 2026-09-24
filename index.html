@@ -78,6 +78,15 @@
                   title="Tune the column separately for each branch">
             Tune each branch
           </button>
+          <!--
+            Closes the empty space up inside every element and turns on column
+            solves, because packing without them does not pack the column, it
+            corrupts the field.
+          -->
+          <button class="ghost-btn" id="packColumn" type="button"
+                  title="Close the column up and solve the elements together">
+            Pack
+          </button>
           <button class="help-btn" type="button" data-help="optimise"
                   aria-label="About optimising voltages">?</button>
           <!--

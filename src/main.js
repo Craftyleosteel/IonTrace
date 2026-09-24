@@ -17,6 +17,7 @@
 import { Beamline, exitsOf } from './beamline.js';
 import {
   ELEMENT_TYPES,
+  PADDING,
   createElement,
   needsRebuild,
   fieldRange,
@@ -1762,6 +1763,76 @@ async function runBranchTuner() {
 
 tuneBranchesBtn.addEventListener('click', runBranchTuner);
 
+/* ------------------------------------------------------------------ */
+/* packing the column                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Close every element up to its metal, and solve them together.
+ *
+ * The two halves are one action on purpose. Shortening the padding is what
+ * puts the hardware close; turning on column solves is what makes the result
+ * mean anything, because a packed element still solved behind its own grounded
+ * end faces has those faces sitting right on top of its electrodes. Offering
+ * the first without the second would be offering a way to get a wrong answer
+ * that looks tidier.
+ *
+ * Each element is rebuilt rather than adjusted, because padding changes the
+ * grid and so needs a fresh solve - which is why this is a button and not a
+ * slider.
+ */
+function packColumn() {
+  statusEl.classList.add('busy');
+  const closed = [];
+  let saved = 0;
+
+  beamline.elements.forEach((e, i) => {
+    const keys = PADDING[e.typeKey];
+    if (!keys) return;
+    const spec = ELEMENT_TYPES[e.typeKey];
+    const next = { ...e.params };
+    let moved = 0;
+    for (const key of keys) {
+      const f = spec.fields.find((x) => x.key === key);
+      if (!f || !(next[key] > f.min)) continue;
+      moved += next[key] - f.min;
+      next[key] = f.min;
+    }
+    if (moved <= 0) return;
+    const before = e.length;
+    beamline.replace(i, createElement(e.typeKey, next));
+    saved += mToMm(before - beamline.elements[i].length);
+    closed.push(e.label);
+  });
+
+  const wasFringe = fringeToggle.checked;
+  fringeToggle.checked = true;
+  beamline.setFringe(true);
+  statusEl.classList.remove('busy');
+
+  selection = null;
+  describeFringe();
+  afterStructureChange();
+
+  if (closed.length === 0) {
+    setTuneNote(
+      wasFringe
+        ? 'Nothing left to close up — every element is already at its minimum padding.'
+        : 'Every element was already packed; column solves are now on, so they are solved together.'
+    );
+    return;
+  }
+  setTuneNote(
+    `Closed up ${closed.length} element${closed.length === 1 ? '' : 's'}, ` +
+      `${saved.toFixed(0)} mm of empty space removed. Column solves are on, so the ` +
+      'elements either side of each join are solved on one grid — the field runs ' +
+      'through and the seam markers between them are gone. Use the drifts to set the ' +
+      'spacing you actually want.'
+  );
+}
+
+el('packColumn').addEventListener('click', packColumn);
+
 /**
  * @param {object|null} target an open end to aim at, or null for the main line
  */
@@ -2879,6 +2950,55 @@ function stat(label, value, suffix = '', note = '', warn = false) {
     </div>`;
 }
 
+/**
+ * What the flown rays stand for, in real ions.
+ *
+ * The beam is sampled: nine rays are not nine ions, they are nine
+ * representatives of however many the source is actually producing. Reporting
+ * "7 of 9" alone invites reading the sample size as the beam, and the sample
+ * size is a setting - raise it to 21 and nothing about the experiment changed.
+ *
+ * How many real ions that is depends on which repulsion model is in use,
+ * because that is the only place the simulation is told:
+ *
+ *   Coulomb  each ray carries `ionsPerParticle` real ions, so the counts
+ *            multiply straight through.
+ *   Beam     the ions are a continuous current, so the meaningful quantity is
+ *            not a number but a current - the transmitted fraction of it.
+ *   Off      the ions do not see each other and no population was ever
+ *            specified. Inventing one would be inventing physics, so this
+ *            says nothing rather than something made up.
+ */
+function realIonUnit() {
+  const mode = inputs.repulsion.value;
+  if (mode === 'beam') return 'µA out';
+  return '';
+}
+
+function realIonCount(through, total) {
+  const mode = inputs.repulsion.value;
+  if (total === 0) return '';
+
+  if (mode === 'coulomb') {
+    const per = 10 ** readNumber(inputs.ionsPerParticle, 6);
+    const fmt = (n) => {
+      const e = Math.floor(Math.log10(Math.max(n, 1)));
+      return `${(n / 10 ** e).toFixed(1)}e${e}`;
+    };
+    return `${fmt(through * per)} of ${fmt(total * per)} real ions`;
+  }
+
+  if (mode === 'beam') {
+    const current = readNumber(inputs.beamCurrent, 5);
+    const out = (current * through) / total;
+    return `${out.toFixed(2)} µA of ${current.toFixed(2)} µA delivered`;
+  }
+
+  // No population defined, so give the sample honestly as a sample.
+  const pct = ((through / total) * 100).toFixed(0);
+  return `${pct}% of the sampled beam — turn on repulsion to count real ions`;
+}
+
 function drawReadout() {
   if (stats.error) {
     readoutEl.innerHTML = stat('Beam', 'invalid', '', escapeHtml(stats.error), true);
@@ -2915,9 +3035,9 @@ function drawReadout() {
     [
       stat(
         'Transmitted',
-        `${stats.transmitted}/${stats.total}`,
-        '',
-        fate,
+        `${stats.transmitted} of ${stats.total}`,
+        realIonUnit(),
+        [realIonCount(stats.transmitted, stats.total), fate].filter(Boolean).join(' · '),
         stats.transmitted === 0
       ),
       stats.exitRadius === null
