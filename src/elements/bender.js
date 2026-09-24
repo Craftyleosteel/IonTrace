@@ -16,23 +16,47 @@
  * stand on the diagonals, in the corners, and each block is cut back to clear
  * them.
  *
- * Three of those details are load-bearing, not decoration:
+ * Only one of those details reaches the beam, and it is not the obvious one
+ * ------------------------------------------------------------------------
+ * The aperture is bounded by the four electrode arcs and the four channel
+ * mouths, and an electrode is a CONDUCTOR. Nothing behind its surface can
+ * influence the field in front of it. That single fact settles most of the
+ * geometry:
  *
- *   - The arc is what makes the near-axis field quadrupolar. Four flat plates
- *     give a field with a large sextupole term and the device aberrates.
- *   - The FILLED corner is what makes it strong. An annular arc of the same
- *     inner radius leaves the rest of the quadrant empty, and the grounded box
- *     reaches into that emptiness and pulls the potential back down, so more
- *     volts are needed for the same bend.
- *   - The channel being straight, rather than a wedge opening outward, means
- *     the clear width is the same where the beam enters, where it passes the
- *     electrodes and where it leaves. One number describes the acceptance
- *     instead of three.
+ *   - Filling the corners changes nothing inside. The arc is still at +-V and
+ *     the aperture cannot tell what is behind it. The blocks are the right
+ *     shape because that is the instrument, not because the metal does
+ *     anything.
+ *   - The corner posts change nothing inside, for the same reason: they stand
+ *     behind the blocks, which shield them completely. Measured at the shipped
+ *     proportions, the potential 8 mm off axis on the diagonal is 37.28 V with
+ *     posts and 37.28 V without - identical to every digit the test prints.
+ *     They are structure, not field shaping, and the test below pins that.
+ *   - The CHANNEL WIDTH is what reaches the beam, because it is the one choice
+ *     that changes the arcs themselves: a wider channel cuts them shorter, and
+ *     a shorter arc is a weaker quadrupole.
  *
- * The posts are the one part that costs something. They put ground on the
- * diagonal, which is exactly where phi = C X Z is largest, so they can only
- * reduce the field a given electrode voltage produces - the matched voltage
- * goes up. `cornerSize: 0` removes them.
+ * The arc coverage, and what it costs
+ * -----------------------------------
+ * Worth making quantitative, because it is the whole voltage calibration.
+ * Each arc spans a half-angle alpha = pi/4 - psi0 about its diagonal, with
+ * psi0 = asin(w/r0) the angle at which the channel wall cuts the circle.
+ * Projecting the boundary onto sin(2.theta) gives
+ *
+ *     phi = (4V/pi) sin(2.alpha) (r/r0)^2 sin(2.theta)
+ *         = F . V . 2XZ/r0^2,        F = (4/pi) cos(2.psi0),
+ *
+ * so F is the factor by which the real electrode beats - or misses - the
+ * ideal normalisation the matched voltage assumes, and the voltage needed
+ * scales as 1/F. Fully covered boundary (w -> 0): F = 4/pi = 1.273. At the
+ * shipped 10.5 mm channel: psi0 = 16.0 deg, F = 1.080. At a 16 mm channel:
+ * psi0 = 24.9 deg, F = 0.822 - a THIRD more voltage for the same bend.
+ *
+ * That estimate treats the open channel mouths as sitting at zero, which they
+ * do not, so it is a guide to the scaling rather than a number to quote. It
+ * was enough to explain a suite-wide failure: widening the default channel
+ * from an effective 5.24 mm half-width to 8 mm dropped F by 24 per cent, and
+ * every test that flew at the ideal voltage under-bent into an electrode.
  *
  * Why it is not a sector bender
  * -----------------------------
@@ -123,7 +147,18 @@ export const BENDER_DEFAULTS = {
   apertureRadius: 19, // mm, r0 - centre to the concave electrode faces
   electrodeThickness: 9, // mm, metal from the arc to the flat back face
   boxClearance: 1, // mm, gap between electrode backs and the grounded box
-  channelWidth: 16, // mm, full width of the four straight beam channels
+  /*
+    Full width of the four straight beam channels.
+
+    This is the parameter that sets the operating voltage, so its default is
+    not a round number chosen for looks. The channel edge cuts the electrode
+    arc short, and the arc's angular extent is what sets the quadrupole
+    strength (see the form factor in the header). 10.5 mm puts the edge at
+    asin(5.25/19) = 16.0 degrees, the same coverage as the calibrated default
+    this element shipped with before the electrodes were reshaped - so the
+    matched voltage carries across the change instead of moving 30 per cent.
+  */
+  channelWidth: 10.5, // mm
   cornerSize: 5, // mm, the grounded corner posts (0 leaves them out)
   height: 30, // mm, aperture perpendicular to the bend plane
   voltage: 0, // V on each electrode (+V and -V on the diagonals)
@@ -239,15 +274,19 @@ export function createBender(params = {}, solverOpts = {}) {
   grid.paintEnclosure(box);
 
   /*
-    The corner posts, and how much of each electrode they cost.
+    The corner posts.
 
     They sit in the corners of the box, on the diagonals, which is the one
     place a tie rod can run without crossing a beam channel. Being grounded
     they cannot touch the electrodes, so each block's diagonal corner is cut
-    back by a clearance to make room - and that cut is not free. The diagonal
-    is exactly where the quadrupole potential is largest, so replacing driven
-    metal there with ground is a real change to the field, not a detail of the
-    drawing. `cornerSize: 0` removes them and restores the full square block.
+    back by a clearance to make room.
+
+    Neither the post nor that cut changes the field the beam sees. Both are
+    behind the electrode surface, and the block shields the aperture from them
+    completely - which is measured, not assumed: see the `corner posts` tests.
+    They are here because the instrument has them and because an ion that
+    wanders into the corner should hit grounded metal rather than an electrode.
+    `cornerSize: 0` removes them and restores the full square block.
   */
   const postInner = extent - post;
   const blockCut = postInner - clear; // block corners stop here

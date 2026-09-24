@@ -923,23 +923,50 @@ Each electrode is a **square block** filling its quadrant, with a circular arc
 of radius $r_0$ cut out of the inner corner and a **straight-sided channel** of
 width $2w$ between it and each neighbour. Four grounded posts stand on the
 diagonals, in the corners of the box, and each block is cut back to clear them.
-Three consequences, none cosmetic:
 
-- The **arc** is what makes the near-axis potential quadrupolar. Four flat
-  plates give a large sextupole term and the device aberrates.
-- The **filled corner** is what makes the field strong. An annular arc of the
-  same inner radius leaves the rest of its quadrant empty, and the grounded box
-  reaches into that space and pulls the potential back down — so the same bend
-  costs more volts.
-- The **straight channel** means the clear width is the same where the beam
-  enters, where it passes the electrodes and where it leaves, so a single
-  number describes the acceptance. A wedge-shaped gap opening outward needs
-  three.
+### 9.1.1 Only the arcs reach the beam
 
-The posts are the one feature that costs something. They put ground on the
-diagonal, which is precisely where $\phi = Cxz$ is largest, so they can only
-reduce the field a given electrode voltage produces: the matched voltage goes
-**up**. Setting `cornerSize` to zero removes them and restores the full block.
+The aperture is bounded by the four electrode arcs and the four channel mouths,
+and an electrode is a **conductor**: nothing behind its surface can influence
+the field in front of it. That one fact settles most of the geometry, and it is
+worth stating because it is counter-intuitive enough to have been got wrong
+here once already.
+
+- **Filling the corners changes nothing inside.** The arc is still at $\pm V$
+  and the aperture cannot tell what is behind it. The blocks are that shape
+  because that is the instrument.
+- **The posts change nothing inside**, for the same reason — they stand behind
+  the blocks. Measured at the shipped proportions, the potential 8 mm off axis
+  on the diagonal is **37.28 V with posts and 37.28 V without**, identical to
+  every digit the test prints. They are structure, not field shaping.
+- **The channel width is what reaches the beam**, because it is the only choice
+  here that changes the arcs themselves: a wider channel cuts them shorter, and
+  a shorter arc is a weaker quadrupole.
+
+### 9.1.2 Arc coverage sets the voltage
+
+Each arc spans a half-angle $\alpha = \pi/4 - \psi_0$ about its diagonal, where
+$\psi_0 = \arcsin(w/r_0)$ is the angle at which the channel wall cuts the
+circle. Projecting the boundary onto $\sin 2\theta$,
+
+$$\phi = \frac{4V}{\pi}\sin 2\alpha \left(\frac{r}{r_0}\right)^{2}\sin 2\theta
+       = F\,V\,\frac{2XZ}{r_0^{2}}, \qquad F = \frac{4}{\pi}\cos 2\psi_0,$$
+
+so $F$ is the factor by which a real electrode beats — or misses — the ideal
+normalisation $V_0$ assumes, and the voltage needed scales as $1/F$:
+
+| channel | $\psi_0$ | $F$ |
+|---|---|---|
+| $w \to 0$ (fully covered) | 0° | 1.273 |
+| 10.5 mm (shipped) | 16.0° | 1.080 |
+| 16 mm | 24.9° | 0.822 |
+
+The estimate treats the open channel mouths as grounded, which they are not, so
+it is a guide to the **scaling** rather than a number to quote. It was enough to
+explain a suite-wide failure: widening the default channel from an effective
+5.24 mm half-width to 8 mm dropped $F$ by 24 %, and every test flying at the
+ideal voltage under-bent into an electrode. The default is now chosen so that
+$\psi_0$ matches the coverage the element was calibrated at.
 
 The distinction is not cosmetic. A sector deflects with a field everywhere
 perpendicular to the orbit, and the trajectory is a circular arc. A quadrupole
@@ -1002,13 +1029,15 @@ away from $V_0$ by a few per cent.
 > **This table is missing on purpose.** The calibration that used to sit here —
 > $V/V_0$ against $r_0/a$, and the transmission window either side — was
 > measured on the *previous* electrode shape: thin annular arcs separated by
-> wedge-shaped gaps. The geometry above replaces that with filled square blocks
-> and adds grounded corner posts, and the two changes push the matched voltage
-> in **opposite** directions (filled corners strengthen the field per volt,
-> posts weaken it). Which wins at a given set of proportions is a question for
-> a measurement, not for an argument, so the old numbers have been removed
-> rather than left to mislead. Re-measure with a sweep of $V/V_0$ against the
-> turn angle before quoting any.
+> wedge-shaped gaps.
+>
+> Reshaping the electrodes into filled blocks with corner posts turns out, by
+> §9.1.1, to leave the aperture field alone entirely, so the old numbers should
+> still hold *provided the arc coverage matches* — which is why the default
+> channel width is chosen to reproduce $\psi_0 = 16°$. They have not been
+> restored because that argument has not been checked against a measurement,
+> and an unchecked table is the thing this section exists to avoid. Re-measure
+> with a sweep of $V/V_0$ against the turn angle before quoting any.
 
 What does not depend on that measurement: the closed form is the right *size*,
 not the final answer, and the voltage tuner (§10) searches the solved field for

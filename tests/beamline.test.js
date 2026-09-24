@@ -948,28 +948,40 @@ describe('Quadrupole deflector', () => {
     // outer face, so either can eat it entirely.
     refuses({ channelWidth: 40 }, 'channels wider than the block leave nothing to hold a voltage');
     refuses({ channelWidth: 0 }, 'no channel leaves no way in or out');
-    refuses({ cornerSize: 14 }, 'a post that reaches the channels leaves nothing to hold a voltage');
+    // The electrode here is 0.5 mm thick in a 20 mm box, so the post has to be
+    // most of the box before it meets the channel.
+    refuses({ cornerSize: 16 }, 'a post that reaches the channels leaves nothing to hold a voltage');
   });
 
   /*
-    The corner posts.
+    The corner posts, and the shielding that makes them free.
 
     They are grounded structure - tie rods, in a real instrument - standing on
-    the diagonals, which is the one direction that crosses no beam channel. The
-    sketch they come from shows them at the outer corners, and what matters
-    electrically is that they put GROUND where the electrode would otherwise
-    put +-V, on the very diagonal where the quadrupole potential phi = C X Z is
-    largest. So they cannot be free: they must weaken the field an electrode
-    voltage produces in the aperture.
+    the diagonals, which is the one direction that crosses no beam channel.
+
+    The first version of these tests asserted that they must WEAKEN the field,
+    on the reasoning that they put ground on the diagonal where phi = C X Z is
+    largest. That reasoning is wrong, and the suite caught it: the measured
+    potential was 37.28 V with posts and 37.28 V without, identical to every
+    digit printed. The posts stand BEHIND the electrode blocks, an electrode is
+    a conductor, and nothing behind a conductor's surface reaches the field in
+    front of it. The aperture is bounded by the arcs and the channel mouths and
+    can see nothing else.
+
+    So these tests pin the shielding instead. That is the more valuable thing
+    to hold: it is what says the corner geometry is free to match the drawing,
+    and it is what identifies the CHANNEL WIDTH as the only part of this shape
+    that sets the voltage.
   */
   describe('corner posts', () => {
     // The shipped proportions, where a 5 mm post is a modest bite out of a
-    // 20 mm wide electrode rather than most of a thin one.
+    // 20 mm wide electrode rather than most of a thin one. Channel width left
+    // at its default, since that is the one dimension under test here that
+    // would change the field.
     const THICK = {
       apertureRadius: 19,
       electrodeThickness: 9,
       boxClearance: 1,
-      channelWidth: 16,
       height: 30,
       gridStep: 0.5,
     };
@@ -997,28 +1009,88 @@ describe('Quadrupole deflector', () => {
       );
     });
 
-    it('weakens the field an electrode voltage produces', () => {
+    it('leaves the field in the aperture completely unchanged', () => {
       const bare = createBender({ ...THICK, cornerSize: 0, voltage: 100 });
       const posted = createBender({ ...THICK, cornerSize: 5, voltage: 100 });
 
       // Inside the aperture, off both axes, so the quadrupole term is what is
-      // being read. Replacing driven metal with ground can only reduce it.
+      // being read - and on the diagonal, the direction the posts stand in and
+      // so the least favourable place to look for no effect.
       const a = Math.abs(phiAt(bare, 8, 8));
       const b = Math.abs(phiAt(posted, 8, 8));
       assert(a > 0.5, `expected a usable quadrupole potential, got ${a.toFixed(2)} V`);
+
+      // A thousandth is far below any real effect and far above the noise two
+      // SOR solves of different geometries leave behind.
+      assertRelClose(
+        b,
+        a,
+        1e-3,
+        `the blocks shield the posts, so the aperture field should not move: ` +
+          `${b.toFixed(4)} V with, ${a.toFixed(4)} V without`
+      );
+    });
+
+    it('shields the aperture from the corner whatever stands there', () => {
+      /*
+        The general statement, of which the posts are one case: the field
+        inside is set by the arcs and the channel mouths, so changing the
+        corner CANNOT move it. Sweeping the post size is the sharpest way to
+        say that - if any of this leaked through, a post four times the size
+        would show it.
+      */
+      const ref = Math.abs(phiAt(createBender({ ...THICK, cornerSize: 0, voltage: 100 }), 8, 8));
+      for (const cs of [2, 5, 10]) {
+        const v = Math.abs(phiAt(createBender({ ...THICK, cornerSize: cs, voltage: 100 }), 8, 8));
+        assertRelClose(v, ref, 1e-3, `a ${cs} mm post moved the aperture field`);
+      }
+    });
+
+    it('is the channel width, not the corner, that sets the field', () => {
+      /*
+        The other half of the same fact, and the one that cost a suite-wide
+        failure: widening the channel cuts the electrode arcs shorter, and a
+        shorter arc is a weaker quadrupole. F = (4/pi) cos(2 psi0) with
+        psi0 = asin(w/r0) predicts the ratio between two channel widths; this
+        checks the solved field falls the way that says, without leaning on the
+        absolute value, since the estimate treats the open channel mouths as
+        grounded and they are not.
+      */
+      const narrow = createBender({ ...THICK, channelWidth: 10.5, voltage: 100 });
+      const wide = createBender({ ...THICK, channelWidth: 16, voltage: 100 });
+      const a = Math.abs(phiAt(narrow, 8, 8));
+      const b = Math.abs(phiAt(wide, 8, 8));
+
+      const F = (w) => (4 / Math.PI) * Math.cos(2 * Math.asin(w / 2 / 19));
+      const predicted = F(16) / F(10.5); // about 0.76
       assert(
         b < a,
-        `posts should weaken the field: ${b.toFixed(2)} V with, ${a.toFixed(2)} V without`
+        `a wider channel should weaken the field: ${b.toFixed(2)} V at 16 mm, ` +
+          `${a.toFixed(2)} V at 10.5 mm`
+      );
+      assert(
+        Math.abs(b / a - predicted) < 0.15,
+        `measured ratio ${(b / a).toFixed(3)} against a predicted ${predicted.toFixed(3)}`
       );
     });
 
     it('still turns the beam through a right angle', () => {
-      // The posts change the voltage needed, not what the device does. The
-      // tuner is what finds the new voltage; this only asks that a right angle
-      // is still reachable, by sweeping around the ideal.
+      /*
+        The posts change the voltage needed, not what the device does. The
+        tuner is what finds the new voltage; this only asks that a right angle
+        is still reachable.
+
+        The sweep is deliberately wide. Neither the posts nor the filled
+        corners move the aperture field at all - the blocks shield both - so
+        the expectation is that a right angle lands near the ideal, and the
+        width is there to catch the case where that reasoning is wrong again
+        rather than to encode confidence in it. The failure message reports
+        where the right angle actually landed, so a run of this suite MEASURES
+        the calibration instead of assuming it.
+      */
       const V0 = matchedVoltage({ ...THICK, cornerSize: 5 }, 1000, 1);
       let best = null;
-      for (let f = 0.8; f <= 1.8; f += 0.05) {
+      for (let f = 0.3; f <= 1.9; f += 0.05) {
         const bl = new Beamline([
           createElement('drift', { length: 8, bore: 6 }),
           createElement('bender', { ...THICK, cornerSize: 5, voltage: f * V0 }),
@@ -1036,10 +1108,12 @@ describe('Quadrupole deflector', () => {
         const err = Math.abs(deg - 90);
         if (!best || err < best.err) best = { err, f, deg };
       }
-      assert(best, 'no voltage in 0.8..1.8 V0 transmitted the ion at all');
+      assert(best, 'no voltage between 0.3 and 1.9 V0 transmitted the ion at all');
       assert(
         best.err < 5,
-        `best turn was ${best.deg.toFixed(1)} deg at V/V0 = ${best.f.toFixed(2)}`
+        `best turn was ${best.deg.toFixed(1)} deg at V/V0 = ${best.f.toFixed(2)} ` +
+          `(V0 = ${V0.toFixed(0)} V) - if that ratio is far from 1, suspect the arc ` +
+          'coverage: F = (4/pi) cos(2 asin(w/r0)) says the channel width sets it'
       );
     });
   });

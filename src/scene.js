@@ -26,8 +26,17 @@
  *
  * Parameters are stored by name and merged over the element's current
  * defaults, so a file that predates a new parameter still loads - the new one
- * takes its default rather than becoming undefined. A file naming an element
- * type that no longer exists is reported rather than silently dropped.
+ * takes its default rather than becoming undefined.
+ *
+ * That merge is deliberately one-sided, and the other side is reported rather
+ * than swallowed. A parameter the FILE has and this version does not means it
+ * was renamed or removed, and the merge cannot tell that from an ordinary
+ * version bump: the old key rides along unread, the new key takes its default,
+ * and the element loads looking fine while describing different hardware. So
+ * `restore` lists those keys as problems. Likewise a file naming an element
+ * type that no longer exists, or hanging an element on a port that has since
+ * gone. The rule throughout is that a file may load imperfectly, but it may
+ * not load imperfectly and quietly.
  */
 
 import { ELEMENT_TYPES, createElement } from './elements/index.js';
@@ -107,12 +116,37 @@ export function restore(data) {
   const problems = validate(data);
   if (problems.length) return { elements: [], source: null, physics: {}, problems };
 
-  const built = data.elements.map((saved) => {
+  const built = data.elements.map((saved, i) => {
     // Merged over the current defaults, so a file written before a parameter
     // existed still loads and that parameter takes its default.
     const spec = ELEMENT_TYPES[saved.type];
     const e = createElement(saved.type, { ...spec.defaults, ...saved.params });
     e.align = { dx: 0, dy: 0, tiltX: 0, tiltY: 0, ...saved.align };
+
+    /*
+      A parameter the file has and this version does not.
+
+      Merging over defaults quietly handles the case a version bump usually
+      produces - a NEW parameter, absent from the file, taking its default. It
+      does not handle a parameter being RENAMED or dropped, and that case looks
+      identical from here: the old key rides along and is ignored, the new key
+      takes its default, the file loads without complaint and the element comes
+      back with different geometry from the one that was saved.
+
+      Silently different is the worst of the available outcomes, so say it. The
+      element is still built - the file is not wrong, it is just older than the
+      code - but the reload is not faithful and the person deserves to know
+      which setting stopped being honoured.
+    */
+    const known = Object.keys(spec.defaults ?? {});
+    const stale = Object.keys(saved.params ?? {}).filter((k) => !known.includes(k));
+    if (stale.length) {
+      problems.push(
+        `Element ${i + 1} (${saved.type}) was saved with ${stale.join(', ')}, which ` +
+          'this version no longer has; it now uses the current default instead, so ' +
+          'its geometry may differ from the saved one.'
+      );
+    }
     return e;
   });
 
