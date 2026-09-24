@@ -919,6 +919,28 @@ of a grounded box, at $+V$ and $-V$ on the diagonals, with the beam entering
 through the gap on one axis and leaving through the gap on the perpendicular
 one.
 
+Each electrode is a **square block** filling its quadrant, with a circular arc
+of radius $r_0$ cut out of the inner corner and a **straight-sided channel** of
+width $2w$ between it and each neighbour. Four grounded posts stand on the
+diagonals, in the corners of the box, and each block is cut back to clear them.
+Three consequences, none cosmetic:
+
+- The **arc** is what makes the near-axis potential quadrupolar. Four flat
+  plates give a large sextupole term and the device aberrates.
+- The **filled corner** is what makes the field strong. An annular arc of the
+  same inner radius leaves the rest of its quadrant empty, and the grounded box
+  reaches into that space and pulls the potential back down — so the same bend
+  costs more volts.
+- The **straight channel** means the clear width is the same where the beam
+  enters, where it passes the electrodes and where it leaves, so a single
+  number describes the acceptance. A wedge-shaped gap opening outward needs
+  three.
+
+The posts are the one feature that costs something. They put ground on the
+diagonal, which is precisely where $\phi = Cxz$ is largest, so they can only
+reduce the field a given electrode voltage produces: the matched voltage goes
+**up**. Setting `cornerSize` to zero removes them and restores the full block.
+
 The distinction is not cosmetic. A sector deflects with a field everywhere
 perpendicular to the orbit, and the trajectory is a circular arc. A quadrupole
 deflector sets up a two-dimensional quadrupole potential **in the plane the
@@ -972,31 +994,35 @@ integrating the orbit tells them apart.
 
 The formula assumes the ideal quadrupole potential everywhere inside the box
 and nothing outside it. The solved field is neither: electrodes subtend finite
-arcs, the grounded box shapes the field near the apertures, and the field does
-not stop abruptly at the entrance plane. Measured against the solved field,
-with a nine-ion beam of 1.5 mm radius and $V/V_0$ the voltage as a multiple of
-the ideal one:
+arcs, the grounded box shapes the field near the apertures, grounded posts
+interrupt the diagonals, and the field does not stop abruptly at the entrance
+plane. Each of those moves the voltage that turns the beam through exactly 90°
+away from $V_0$ by a few per cent.
 
-| $r_0/a$ | turns exactly 90° at | transmits 9/9 over |
-|---|---|---|
-| 0.655 | $V/V_0 \approx 1.00$ | 0.75 – 1.05 |
-| 0.905 | $V/V_0 \approx 1.02$ | 0.85 – 1.05 |
-| 0.950 | $V/V_0 \approx 1.07$ | 0.90 – 1.10 |
+> **This table is missing on purpose.** The calibration that used to sit here —
+> $V/V_0$ against $r_0/a$, and the transmission window either side — was
+> measured on the *previous* electrode shape: thin annular arcs separated by
+> wedge-shaped gaps. The geometry above replaces that with filled square blocks
+> and adds grounded corner posts, and the two changes push the matched voltage
+> in **opposite** directions (filled corners strengthen the field per volt,
+> posts weaken it). Which wins at a given set of proportions is a question for
+> a measurement, not for an argument, so the old numbers have been removed
+> rather than left to mislead. Re-measure with a sweep of $V/V_0$ against the
+> turn angle before quoting any.
 
-The closed form predicts the right angle well at every proportion, drifting a
-few per cent high as the electrodes thin and the box moves in. The window is at
-least a tenth either side throughout, which is the tolerance the interface
-shows. It is **asymmetric**, and which way it leans depends on the geometry —
-thick electrodes tolerate too little voltage, thin ones tolerate too much.
+What does not depend on that measurement: the closed form is the right *size*,
+not the final answer, and the voltage tuner (§10) searches the solved field for
+the value that actually maximises transmission. That is why the tuner exists.
 
 ### 9.4 The box has holes in it
 
 The Laplace problem needs the domain closed, so the grounded box is painted all
 the way round the solve. The beam apertures are real, though, and the collision
-test carves them back out: a clear channel of half-width $r_\text{outer}\sin
-\gamma$ on the entrance ($-Z$) and exit ($-X$) faces, where $\gamma$ is the
-angle by which the electrodes stop short of each axis. Treating the closed rim
-as metal destroys every ion on the entrance plane.
+test carves them back out: a clear channel of half-width $w$ on each of the
+four faces, the same $w$ that separates neighbouring electrodes. Because the
+channels are straight-sided, that is one number rather than a width that
+depends on where along the channel it is measured. Treating the closed rim as
+metal destroys every ion on the entrance plane.
 
 This is the same approximation as the open end faces of §2.1, and it has the
 same justification: a grounded plane with a hole in it is very nearly a

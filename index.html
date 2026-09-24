@@ -47,6 +47,16 @@
                   title="Search the electrode voltages for the best transmission">
             Optimise voltages
           </button>
+          <!--
+            A column is saved as JSON: it is a tree, every browser parses it
+            without a library, and a person can open the file and read it.
+            See src/scene.js for why not CSV.
+          -->
+          <button class="ghost-btn" id="save" type="button"
+                  title="Save this column to a file">Save</button>
+          <button class="ghost-btn" id="load" type="button"
+                  title="Load a column from a file">Load</button>
+          <input id="loadFile" type="file" accept="application/json,.json" hidden />
         </div>
       </div>
       <!--
@@ -264,11 +274,7 @@
             most to read.
           -->
           <div class="flow" id="flow" aria-label="Beamline flow chart" tabindex="0"></div>
-          <p class="hint track-hint">
-            Click a box to select it and see its settings; click the ions to
-            see the beam. Drag an element on the diagram above to hang it
-            somewhere else.
-          </p>
+          <p class="hint track-hint" id="trackHint"></p>
         </div>
 
         <div class="legend">

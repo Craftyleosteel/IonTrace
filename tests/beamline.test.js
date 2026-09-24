@@ -52,6 +52,7 @@ import {
 } from '../src/optimize.js';
 import { symmetricEigen, beamQuality, refineNullSpace } from '../src/reduced.js';
 import { axisymmetricRuns, canShareGrid, decayLength } from '../src/column.js';
+import { serialise, restore } from '../src/scene.js';
 import { makeIon, discBeam } from '../src/ion.js';
 import { flyIon, flyBeam, kineticEnergy } from '../src/integrator.js';
 import {
@@ -667,10 +668,18 @@ describe('Frames', () => {
 
 describe('Quadrupole deflector', () => {
   // r0/a = 0.95, the proportions of the reference instrument.
+  //
+  // No corner posts. Every test in this block is about the IDEAL quadrupole -
+  // the closed-form matched voltage, the purity of phi = C X Z, the right
+  // angle it produces - and a grounded post on the diagonal is a deliberate
+  // departure from that ideal. Its effect belongs in its own tests, below,
+  // not smeared through these as an unexplained few per cent. The electrode
+  // here is 0.5 mm thick, so a post of any useful size would take most of it.
   const PARAMS = {
     apertureRadius: 19,
     electrodeThickness: 0.5,
     boxClearance: 0.5,
+    cornerSize: 0,
     height: 30,
     gridStep: 0.5,
   };
@@ -926,13 +935,113 @@ describe('Quadrupole deflector', () => {
   });
 
   it('refuses a geometry with no electrode left', () => {
-    let threw = false;
-    try {
-      createBender({ ...PARAMS, gapAngle: 45 });
-    } catch {
-      threw = true;
-    }
-    assert(threw, 'a 45 degree gap leaves nothing to hold a voltage');
+    const refuses = (extra, why) => {
+      let threw = false;
+      try {
+        createBender({ ...PARAMS, ...extra });
+      } catch {
+        threw = true;
+      }
+      assert(threw, why);
+    };
+    // The electrode is what is LEFT between the four channels and inside the
+    // outer face, so either can eat it entirely.
+    refuses({ channelWidth: 40 }, 'channels wider than the block leave nothing to hold a voltage');
+    refuses({ channelWidth: 0 }, 'no channel leaves no way in or out');
+    refuses({ cornerSize: 14 }, 'a post that reaches the channels leaves nothing to hold a voltage');
+  });
+
+  /*
+    The corner posts.
+
+    They are grounded structure - tie rods, in a real instrument - standing on
+    the diagonals, which is the one direction that crosses no beam channel. The
+    sketch they come from shows them at the outer corners, and what matters
+    electrically is that they put GROUND where the electrode would otherwise
+    put +-V, on the very diagonal where the quadrupole potential phi = C X Z is
+    largest. So they cannot be free: they must weaken the field an electrode
+    voltage produces in the aperture.
+  */
+  describe('corner posts', () => {
+    // The shipped proportions, where a 5 mm post is a modest bite out of a
+    // 20 mm wide electrode rather than most of a thin one.
+    const THICK = {
+      apertureRadius: 19,
+      electrodeThickness: 9,
+      boxClearance: 1,
+      channelWidth: 16,
+      height: 30,
+      gridStep: 0.5,
+    };
+    const CENTRE = mmToM(29); // r0 + thickness + clearance
+
+    /** Potential at a point given in centred bend coordinates, in mm. */
+    const phiAt = (b, Xmm, Zmm) => b.potentialAt(mmToM(Xmm), 0, CENTRE + mmToM(Zmm));
+
+    it('puts ground on the diagonal where the electrode would be', () => {
+      const bare = createBender({ ...THICK, cornerSize: 0, voltage: 100 });
+      const posted = createBender({ ...THICK, cornerSize: 5, voltage: 100 });
+
+      // (26, 26) mm: on the diagonal, outside the 24 mm post boundary, and
+      // well inside the 28 mm electrode block. Metal either way - the question
+      // is whose.
+      assert(
+        Math.abs(phiAt(bare, 26, 26)) > 90,
+        `without a post the diagonal corner is driven metal, got ${phiAt(bare, 26, 26).toFixed(1)} V`
+      );
+      assertClose(
+        phiAt(posted, 26, 26),
+        0,
+        1e-9,
+        'with a post the diagonal corner is grounded'
+      );
+    });
+
+    it('weakens the field an electrode voltage produces', () => {
+      const bare = createBender({ ...THICK, cornerSize: 0, voltage: 100 });
+      const posted = createBender({ ...THICK, cornerSize: 5, voltage: 100 });
+
+      // Inside the aperture, off both axes, so the quadrupole term is what is
+      // being read. Replacing driven metal with ground can only reduce it.
+      const a = Math.abs(phiAt(bare, 8, 8));
+      const b = Math.abs(phiAt(posted, 8, 8));
+      assert(a > 0.5, `expected a usable quadrupole potential, got ${a.toFixed(2)} V`);
+      assert(
+        b < a,
+        `posts should weaken the field: ${b.toFixed(2)} V with, ${a.toFixed(2)} V without`
+      );
+    });
+
+    it('still turns the beam through a right angle', () => {
+      // The posts change the voltage needed, not what the device does. The
+      // tuner is what finds the new voltage; this only asks that a right angle
+      // is still reachable, by sweeping around the ideal.
+      const V0 = matchedVoltage({ ...THICK, cornerSize: 5 }, 1000, 1);
+      let best = null;
+      for (let f = 0.8; f <= 1.8; f += 0.05) {
+        const bl = new Beamline([
+          createElement('drift', { length: 8, bore: 6 }),
+          createElement('bender', { ...THICK, cornerSize: 5, voltage: f * V0 }),
+          createElement('drift', { length: 25, bore: 6 }),
+        ]);
+        const { stop, points } = flyIon(
+          bl,
+          makeIon({ mass: 100, charge: 1, energy: 1000 }),
+          { cfl: 0.05 }
+        );
+        if (stop !== 'exited' || points.length < 6) continue;
+        const p1 = points[points.length - 1];
+        const p0 = points[points.length - 6];
+        const deg = (Math.atan2(-(p1.x - p0.x), p1.z - p0.z) * 180) / Math.PI;
+        const err = Math.abs(deg - 90);
+        if (!best || err < best.err) best = { err, f, deg };
+      }
+      assert(best, 'no voltage in 0.8..1.8 V0 transmitted the ion at all');
+      assert(
+        best.err < 5,
+        `best turn was ${best.deg.toFixed(1)} deg at V/V0 = ${best.f.toFixed(2)}`
+      );
+    });
   });
 });
 
@@ -954,7 +1063,15 @@ describe('Elements as placed from the toolbar', () => {
 
   const describeIon = (i) => `${i.mass} u, ${i.charge > 0 ? '+' : ''}${i.charge}, ${i.energy} eV`;
 
-  /** One element between two drifts, exactly as placing it from the toolbar. */
+  /**
+   * How many ions an element passes on, placing it exactly as the toolbar
+   * does.
+   *
+   * A detector is scored on what it COLLECTS rather than on what it passes on,
+   * because passing ions on is precisely what it is not for. Counting it the
+   * same way as the rest would demand that a working detector let the beam
+   * through it.
+   */
   function alone(type, ion) {
     const bl = new Beamline([
       createElement('drift', { length: 12, bore: 5 }),
@@ -965,6 +1082,12 @@ describe('Elements as placed from the toolbar', () => {
       cfl: 0.05,
       maxSteps: 600000,
     });
+    if (type === 'detector') {
+      return tracks.filter((t) => {
+        const p = t.points[t.points.length - 1];
+        return t.stop === 'electrode' && bl.detected(p.x, p.y ?? 0, p.z);
+      }).length;
+    }
     return tracks.filter((t) => t.stop === 'exited').length;
   }
 
@@ -1386,6 +1509,181 @@ describe('Ion funnel', () => {
       threw = true;
     }
     assert(threw, 'rings thicker than their pitch are not a stack');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* detector                                                            */
+/* ------------------------------------------------------------------ */
+
+describe('Ion detector', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+
+  it('pulls ions in rather than waiting to be hit', () => {
+    // The bias reaches out through the aperture, which is where a detector's
+    // collection efficiency comes from. An ion aimed to MISS the collecting
+    // surface should be bent onto it.
+    const aimed = (volts) => {
+      const bl = new Beamline([
+        createElement('drift', { length: 20, bore: 10 }),
+        createElement('detector', { voltage: volts, entranceRadius: 8, activeRadius: 8 }),
+      ]);
+      const { tracks } = flyBeam(bl, discBeam({ ...SPEC, count: 9, radius: 5 }), {
+        cfl: 0.05,
+        maxSteps: 400000,
+      });
+      return tracks.filter((t) => {
+        const p = t.points[t.points.length - 1];
+        return t.stop === 'electrode' && bl.detected(p.x, p.y ?? 0, p.z);
+      }).length;
+    };
+    const off = aimed(0);
+    const on = aimed(-3000);
+    assert(on >= off, `bias should not collect less: ${off} -> ${on}`);
+    assert(on >= 8, `a -3 kV detector should collect nearly everything, got ${on}/9`);
+  });
+
+  it('tells its collecting surface from its housing', () => {
+    // Both are strikes; only one is a count, and the difference is the whole
+    // reason the element exists.
+    const d = createElement('detector', {});
+    const back = d.length;
+    assert(d.detects(0, 0, back), 'the middle of the surface counts');
+    assert(!d.detects(mmToM(13), 0, back * 0.2), 'the housing wall does not');
+    assert(!d.detects(0, 0, back * 0.3), 'and nor does empty space in front of it');
+  });
+
+  it('accelerates what it collects', () => {
+    // Which matters for a real detector: secondary-electron yield depends on
+    // impact energy, so a collector at a few kilovolts is not just a target.
+    const bl = new Beamline([
+      createElement('drift', { length: 20, bore: 10 }),
+      createElement('detector', { voltage: -3000 }),
+    ]);
+    const { tracks } = flyBeam(bl, [makeIon({ ...SPEC, x: 0 })], { cfl: 0.05, maxSteps: 400000 });
+    const t = tracks[0];
+    const gained = joulesToEV(kineticEnergy(t.points[t.points.length - 1])) - SPEC.energy;
+    assertRelClose(gained, 3000, 0.05, 'an ion lands with the bias added to its energy');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* saving and loading                                                  */
+/* ------------------------------------------------------------------ */
+
+describe('Saving a column', () => {
+  const SPEC = { mass: 100, charge: 1, energy: 50 };
+
+  /** A branching column with something set on every branch. */
+  function built() {
+    const bl = new Beamline([
+      createElement('drift', { length: 12, bore: 5 }),
+      createElement('bender', { voltage: startingParams('bender', SPEC).voltage }),
+    ]);
+    const sw = bl.elements[1];
+    const a = bl.add(createElement('drift', { length: 30, bore: 5 }), 2, {
+      parent: sw, port: 'bend',
+    });
+    bl.add(createElement('einzel', { gridStep: 1, voltage: -275 }), 3, {
+      parent: a, port: 'out',
+    });
+    bl.add(createElement('detector', { voltage: -2500, gridStep: 0.6 }), 4, {
+      parent: sw, port: 'straight',
+    });
+    bl.elements[0].align = { dx: mmToM(0.35), dy: mmToM(-0.2), tiltX: 0, tiltY: 0 };
+    return bl;
+  }
+
+  it('round-trips the tree, the settings and the alignment', () => {
+    const before = built();
+    const data = JSON.parse(JSON.stringify(serialise(before, { source: SPEC })));
+    const { elements, problems } = restore(data);
+    assert(problems.length === 0, `expected a clean load, got: ${problems.join(' ')}`);
+
+    const after = new Beamline().adopt(elements);
+    assert(after.elements.length === before.elements.length, 'same number of elements');
+
+    for (let i = 0; i < before.elements.length; i++) {
+      const a = before.elements[i];
+      const b = after.elements[i];
+      assert(a.typeKey === b.typeKey, `element ${i} is the same kind`);
+      // The port it hangs from, and which element that is, by position.
+      assert(a.from.port === b.from.port, `element ${i} keeps its port`);
+      const pa = a.from.parent ? before.elements.indexOf(a.from.parent) : null;
+      const pb = b.from.parent ? after.elements.indexOf(b.from.parent) : null;
+      assert(pa === pb, `element ${i} keeps its parent`);
+      assertClose(a.align.dx, b.align.dx, 1e-15, `element ${i} keeps its offset`);
+      assertClose(a.align.dy, b.align.dy, 1e-15, `element ${i} keeps its offset`);
+    }
+  });
+
+  it('rebuilds the same fields, not just the same numbers', () => {
+    // A file describes a column; loading it re-solves. So the reloaded column
+    // must fly the beam to the same place, not merely list the same settings.
+    const before = built();
+    const after = new Beamline().adopt(
+      restore(JSON.parse(JSON.stringify(serialise(before, {})))).elements
+    );
+    const ions = () => discBeam({ ...SPEC, count: 9, radius: 1 });
+    const fly = (bl) =>
+      flyBeam(bl, ions(), { cfl: 0.05, maxSteps: 400000 }).tracks.map((t) => ({
+        stop: t.stop,
+        end: t.points[t.points.length - 1],
+      }));
+
+    const a = fly(before);
+    const b = fly(after);
+    for (let i = 0; i < a.length; i++) {
+      assert(a[i].stop === b[i].stop, `ion ${i} meets the same fate`);
+      for (const k of ['x', 'y', 'z']) {
+        assertClose(a[i].end[k], b[i].end[k], 1e-12, `ion ${i} lands in the same place`);
+      }
+    }
+  });
+
+  it('survives a parameter that did not exist when it was written', () => {
+    // Settings are merged over today's defaults, so an older file loads with
+    // the new parameter at its default rather than as undefined.
+    const bl = built();
+    const data = serialise(bl, {});
+    for (const e of data.elements) delete e.params.gridStep;
+    const { elements, problems } = restore(data);
+    assert(problems.length === 0, `should still load: ${problems.join(' ')}`);
+    // Only the elements that have one - a drift has no grid to step over.
+    const solved = elements.filter((e) => 'gridStep' in ELEMENT_TYPES[e.typeKey].defaults);
+    assert(solved.length > 0, 'the column has elements with a grid step');
+    assert(
+      solved.every((e) => Number.isFinite(e.params.gridStep)),
+      'the missing parameter takes its default'
+    );
+  });
+
+  it('refuses a file that is not a column, and says why', () => {
+    for (const bad of [null, {}, { format: 'something-else', elements: [] }]) {
+      const { elements, problems } = restore(bad);
+      assert(elements.length === 0, 'nothing is built');
+      assert(problems.length > 0, 'and there is a reason given');
+    }
+    // A parent that is not in the file, rather than a silently broken tree.
+    const { problems } = restore({
+      format: 'iontrace.column',
+      version: 1,
+      elements: [{ type: 'drift', params: {}, parent: 7, port: 'out', align: {} }],
+    });
+    assert(problems.length > 0, 'a dangling parent is reported');
+  });
+
+  it('moves an element whose exit no longer exists rather than dropping it', () => {
+    const data = serialise(built(), {});
+    const onStraight = data.elements.findIndex((e) => e.port === 'straight');
+    data.elements[onStraight].port = 'sideways'; // a port from some other version
+    const { elements, problems } = restore(data);
+    assert(elements.length === data.elements.length, 'nothing is lost');
+    assert(
+      problems.some((p) => /no longer exists/.test(p)),
+      `the change is reported, got: ${problems.join(' ')}`
+    );
+    assert(elements[onStraight].from.port === 'bend', 'and it lands on a real exit');
   });
 });
 
@@ -1841,6 +2139,7 @@ describe('Voltage optimiser', () => {
     apertureRadius: 19,
     electrodeThickness: 0.5,
     boxClearance: 0.5,
+    cornerSize: 0, // as above: these tests are about the tuner, not the posts
     gridStep: 0.5,
   };
   const SPEC = { mass: 100, charge: 1, energy: 1000 };

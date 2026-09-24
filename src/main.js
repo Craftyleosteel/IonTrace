@@ -26,6 +26,7 @@ import { MATHIEU_Q_LIMIT } from './elements/quadrupole.js';
 import { discBeam, focalCrossing } from './ion.js';
 import { createFlight, kineticEnergy } from './integrator.js';
 import { tunableKnobs, optimizeVoltages, TUNABLE } from './optimize.js';
+import { serialise, restore } from './scene.js';
 import {
   joulesToEV,
   mToMm,
@@ -62,6 +63,10 @@ const repulsionNote = el('repulsionNote');
 const flowEl = el('flow');
 const readoutHint = el('readoutHint');
 const fieldPanel = el('fieldPanel');
+const trackHint = el('trackHint');
+const saveBtn = el('save');
+const loadBtn = el('load');
+const loadFile = el('loadFile');
 
 const inputs = {
   mass: el('mass'),
@@ -379,57 +384,6 @@ function onSourceHandle(px, py) {
   return false;
 }
 
-/**
- * Where a drop lands: the exit of the element nearest the cursor.
- *
- * Path distance used to answer this, which worked while a column was a line.
- * On a tree two elements on different branches sit at the same distance from
- * the source, so distance no longer identifies a place. Proximity in the view
- * does, and it is also what the gesture means - drop it next to that one.
- */
-function dropTargetAt(g, dragged = null) {
-  // An element cannot be dropped onto itself or onto anything hanging below
-  // it - that would cut a loop out of the tree - so those are not offered as
-  // targets. Without this the nearest element to a small drag is the dragged
-  // one, the move is refused, and the gesture appears to do nothing.
-  const forbidden = new Set();
-  if (dragged) {
-    const bury = (x) => {
-      forbidden.add(x);
-      for (const c of beamline.childrenOf(x)) bury(c);
-    };
-    bury(dragged);
-  }
-
-  /*
-    Scored over EXITS, not over elements.
-
-    Finding the nearest element and then taking its first free port was fine
-    while every element had one exit. A deflector has three, pointing three
-    different ways, so "nearest element" does not say where the thing goes -
-    drop anywhere near a deflector and it attached to whichever port happened
-    to be free first, which from the outside looks like the drop landing
-    somewhere at random.
-
-    Every exit has a place: the frame a child hanging there would start at.
-    Scoring on those means the drop goes where it was aimed, and means the
-    indicator drawn at that exit is telling the truth.
-  */
-  let best = null;
-  let bestD = Infinity;
-  for (const e of beamline.elements) {
-    if (forbidden.has(e)) continue;
-    for (const exit of exitsOf(e)) {
-      const o = compose(e.nominalFrame, exit.transform).o;
-      const d = Math.hypot(o[0] - g[0], o[1] - g[1], o[2] - g[2]);
-      if (d < bestD) {
-        bestD = d;
-        best = { parent: e, port: exit.port };
-      }
-    }
-  }
-  return best;
-}
 
 function select(next) {
   // A geometry rebuild waiting on a timer belongs to the element that was
@@ -470,10 +424,11 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  // Selection only. Re-hanging an element is done in the flow chart, which is
+  // a picture of the structure being edited rather than a picture of hardware
+  // drawn to scale - so nothing there overlaps, and what you aim at is what
+  // you get.
   select({ kind: 'element', index });
-  drag = { kind: 'element', from: index, startPx: px, startPy: py, moved: false };
-  canvas.setPointerCapture(e.pointerId);
-  canvas.style.cursor = 'grabbing';
 });
 
 canvas.addEventListener('pointermove', (e) => {
@@ -483,11 +438,9 @@ canvas.addEventListener('pointermove', (e) => {
   if (!drag) {
     canvas.style.cursor = onSourceHandle(px, py)
       ? 'grab'
-      : elementIndexAtWorld(worldAt(px, py)) >= 0
-        ? 'grab'
-        : onTrajectory(px, py)
-          ? 'pointer'
-          : 'default';
+      : elementIndexAtWorld(worldAt(px, py)) >= 0 || onTrajectory(px, py)
+        ? 'pointer'
+        : 'default';
     return;
   }
 
@@ -507,30 +460,16 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
 
-  if (Math.hypot(px - drag.startPx, py - drag.startPy) > 5) drag.moved = true;
-  drag.dropTo = dropTargetAt(worldAt(px, py), beamline.elements[drag.from]);
-  render();
 });
 
 function endDrag(e) {
   if (!drag) return;
-  const finished = drag;
   drag = null;
   canvas.style.cursor = 'default';
   try {
     canvas.releasePointerCapture(e.pointerId);
   } catch {
     /* already released */
-  }
-
-  if (finished.kind === 'element' && finished.moved && finished.dropTo) {
-    const moved = beamline.elements[finished.from];
-    const { parent, port } = finished.dropTo;
-    if (moved && parent !== moved && beamline.reparent(moved, parent, port)) {
-      selection = { kind: 'element', index: beamline.elements.indexOf(moved) };
-      afterStructureChange();
-      return;
-    }
   }
   render();
   drawReadout();
@@ -548,35 +487,54 @@ const escapeHtml = (s) =>
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
   })[c]);
 
-/** One-line summary of what an element is currently set to. */
+/**
+ * What an element is currently set to, as SHORT lines.
+ *
+ * Two of them at most, because an SVG `<text>` does not wrap - it runs on out
+ * of the box and over whatever is beside it. A deflector's settings came to
+ * 33 characters and a funnel's to 35, in a box that holds about 26, so both
+ * spilled across the diagram.
+ *
+ * So the settings are split rather than truncated wherever possible: a clipped
+ * line hides a number, and the numbers are the reason the line is there. The
+ * clip in `fit` is a backstop for a value nobody anticipated being long, not
+ * the normal case.
+ */
 function summarise(e) {
   const p = e.params;
   switch (e.typeKey) {
     case 'drift':
-      return `${p.length} mm · ⌀${p.bore * 2} mm`;
+      return [`⌀${p.bore * 2} mm bore`];
     case 'aperture':
-      return `${p.voltage} V · ⌀${p.bore * 2} mm`;
+      return [`${p.voltage} V · ⌀${p.bore * 2} mm`];
     case 'einzel':
-      return `${p.voltage} V · ⌀${p.boreRadius * 2} mm`;
+      return [`${p.voltage} V · ⌀${p.boreRadius * 2} mm`];
     case 'quadrupole':
       return p.rfAmplitude === 0
-        ? `DC ${p.dcVoltage} V · ${p.length} mm`
-        : `${p.rfAmplitude} V @ ${p.frequency} MHz · ${p.length} mm`;
+        ? [`DC ${p.dcVoltage} V`]
+        : [`${p.rfAmplitude} V @ ${p.frequency} MHz`, `r₀ ${p.fieldRadius} mm`];
     case 'multipole':
-      return `${e.poles} rods · ${p.rfAmplitude} V @ ${p.frequency} MHz · r₀ ${p.fieldRadius} mm`;
+      return [
+        `${e.poles} rods · r₀ ${p.fieldRadius} mm`,
+        `${p.rfAmplitude} V @ ${p.frequency} MHz`,
+      ];
     case 'funnel':
-      return (
-        `${p.rings} rings · ⌀${p.entryRadius * 2}→${p.exitRadius * 2} mm · ` +
-        `${p.rfAmplitude} V @ ${p.frequency} MHz`
-      );
+      return [
+        `${p.rings} rings · ⌀${p.entryRadius * 2}→${p.exitRadius * 2} mm`,
+        `${p.rfAmplitude} V @ ${p.frequency} MHz`,
+      ];
     case 'bender':
-      return `90° ${p.bendPlane === 0 ? 'horizontal' : 'vertical'} · ±${p.voltage.toFixed(
-        0
-      )} V · r₀ ${p.apertureRadius} mm`;
+      return [
+        `±${p.voltage.toFixed(0)} V · r₀ ${p.apertureRadius} mm`,
+        `90° ${p.bendPlane === 0 ? 'horizontal' : 'vertical'}`,
+      ];
     default:
-      return '';
+      return [];
   }
 }
+
+/** Clip a string to `n` characters, marking that something was cut. */
+const fit = (s, n) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
 /**
  * The beamline panel.
@@ -604,7 +562,23 @@ function renderTrack() {
   and neither is shrunk to squeeze into the panel - which would make the chart
   least legible exactly when there is most in it.
 */
-const FLOW = { w: 210, h: 66, gapX: 62, gapY: 26, pad: 18 };
+const FLOW = { w: 228, h: 66, gapX: 62, gapY: 26, pad: 18 };
+
+/*
+  How much text a row holds, in characters.
+
+  Derived from the box, not guessed. The name row runs from the left padding to
+  the remove control, 182 px, at a 14 px proportional face whose average glyph
+  is near 0.55 em. The settings rows have the full inner width, 200 px, at
+  11.5 px monospace where every glyph is 0.6 em.
+
+  Conservative on purpose. An SVG text element neither wraps nor clips; going
+  over does not look crowded, it looks like the box has sprung a leak across
+  whatever is beside it. Checked against every element at the extremes of every
+  field it displays: the longest settings line fills 69 % of its row.
+*/
+const NAME_CHARS = 23;
+const SUB_CHARS = 28;
 
 /**
  * Lay the column out as a tidy tree.
@@ -766,16 +740,33 @@ function renderFlow() {
       }
     }
 
+    /*
+      Three rows, each one line and none of them wrapping.
+
+      The length is right-aligned on the BOTTOM row rather than beside the
+      name. Sharing the name's row cost it 40 px, which is what pushed
+      "Quadrupole deflector" over the edge; the settings lines only fill about
+      two thirds of their row, so down there it has room to spare and nothing
+      to collide with.
+    */
     const nudged = Math.hypot(e.align.dx, e.align.dy) > 0;
+    const lines = summarise(e).slice(0, 2);
+    const rows = [y + 41, y + 57];
     parts.push(
-      `<g class="node ${i === idx ? 'sel' : ''} node-${e.typeKey}">
-         <rect class="hit" x="${x}" y="${y}" width="${FLOW.w}" height="${FLOW.h}" rx="9"
-               data-act="select" data-index="${i}"/>
-         <text class="name" x="${x + 14}" y="${y + 24}" data-act="select" data-index="${i}"
-           >${escapeHtml(e.label)}${nudged ? ' ·off axis' : ''}</text>
-         <text class="sub" x="${x + 14}" y="${y + 42}" data-act="select" data-index="${i}"
-           >${escapeHtml(summarise(e))}</text>
-         <text class="len" x="${x + 14}" y="${y + 57}" data-act="select" data-index="${i}"
+      `<g class="node ${i === idx ? 'sel' : ''} node-${e.typeKey}"
+          data-act="select" data-index="${i}">
+         <rect class="hit" x="${x}" y="${y}" width="${FLOW.w}" height="${FLOW.h}" rx="9"/>
+         <text class="name" x="${x + 14}" y="${y + 23}"
+           >${escapeHtml(fit(e.label + (nudged ? ' (off axis)' : ''), NAME_CHARS))}</text>
+         ${lines
+           .map(
+             (t, r) =>
+               `<text class="sub" x="${x + 14}" y="${rows[r]}">${escapeHtml(
+                 fit(t, SUB_CHARS)
+               )}</text>`
+           )
+           .join('')}
+         <text class="len" text-anchor="end" x="${x + FLOW.w - 14}" y="${y + 57}"
            >${mToMm(e.length).toFixed(0)} mm</text>
          <g class="kill" data-act="remove" data-index="${i}">
            <circle cx="${x + FLOW.w - 16}" cy="${y + 16}" r="9"/>
@@ -1333,7 +1324,14 @@ function finishFlight() {
   const through = trajectories.filter((t) => t.stop === 'exited');
   stats.transmitted = through.length;
   stats.reflected = trajectories.filter((t) => t.stop === 'reflected').length;
-  stats.struck = trajectories.filter((t) => t.stop === 'electrode').length;
+  // Landing on a detector's collecting surface is a strike, but it is the one
+  // strike that means the experiment worked, so it is counted separately.
+  const struck = trajectories.filter((t) => t.stop === 'electrode');
+  stats.detected = struck.filter((t) => {
+    const p = t.points[t.points.length - 1];
+    return beamline.detected(p.x, p.y ?? 0, p.z);
+  }).length;
+  stats.struck = struck.length - stats.detected;
   stats.total = trajectories.length;
   stats.drift = Math.max(0, ...trajectories.map((t) => t.energyDrift));
   stats.steps = flight?.steps ?? 0;
@@ -2184,7 +2182,7 @@ function drawSelection(T) {
     ctx.lineWidth = Math.max(3, e.bore * 2 * T.scale);
     ctx.stroke();
   } else {
-    ctx.globalAlpha = drag?.kind === 'element' && drag.from === selectedIndex() ? 0.22 : 0.1;
+    ctx.globalAlpha = 0.1;
     ctx.beginPath();
     corners.forEach((c, i) => {
       const [px, py] = T.project(toGlobal(e.frame, c));
@@ -2238,33 +2236,6 @@ function drawSource(T) {
   ctx.restore();
 }
 
-/** Where a dragged or dropped element would land. */
-function drawDropIndicator(T) {
-  if (!drag || !drag.dropTo) return;
-  if (drag.kind === 'element' && !drag.moved) return;
-
-  // Marked at the exit it will hang from, which is where it will actually
-  // appear - on a branching column "after element i" is not a place.
-  const parent = drag.dropTo.parent;
-  const exit = exitsOf(parent).find((x) => x.port === drag.dropTo.port) ?? exitsOf(parent)[0];
-  const at = {
-    frame: compose(parent.nominalFrame, exit.transform),
-    r: parent.outerRadius,
-  };
-
-  const a = T.project(toGlobal(at.frame, across(T, at.r * 1.4)));
-  const b = T.project(toGlobal(at.frame, across(T, -at.r * 1.4)));
-
-  ctx.save();
-  ctx.strokeStyle = cssVar('--accent');
-  ctx.lineWidth = 3;
-  ctx.setLineDash([6, 4]);
-  ctx.beginPath();
-  ctx.moveTo(a[0], a[1]);
-  ctx.lineTo(b[0], b[1]);
-  ctx.stroke();
-  ctx.restore();
-}
 
 /** A scale bar, since the view now fits itself rather than using a fixed span. */
 function drawScale(T, width, height) {
@@ -2532,7 +2503,6 @@ function drawPane(T, width) {
   drawSelection(T);
   drawTrajectories(T);
   drawSource(T);
-  drawDropIndicator(T);
 
   // Say which plane this is, since the two look alike for a straight column.
   ctx.fillStyle = cssVar('--text-muted');
@@ -2580,6 +2550,7 @@ function drawReadout() {
   const loaded = stats.repulsion && stats.repulsion !== 'none';
   const rf = beamline.shortestPeriod !== null;
   const fate = [
+    stats.detected ? `${stats.detected} detected` : null,
     `${stats.transmitted} through`,
     stats.reflected ? `${stats.reflected} reflected` : null,
     stats.struck ? `${stats.struck} on metal` : null,
@@ -2786,6 +2757,122 @@ function handleAction(act, index) {
  */
 let pendingPort = null;
 
+const TRACK_HINT =
+  'Click a box to select it, or the ions to see the beam. Drag a box onto ' +
+  'another to re-hang it, and drag from the toolbar onto a socket to add.';
+
+/* ------------------------------------------------------------------ */
+/* dragging in the flow chart                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Re-hanging an element by dragging its box.
+ *
+ * This used to be done on the diagram, where it was a poor fit: the diagram
+ * draws a column to scale, so two branches can overlap, a long drift can be a
+ * hundred times the size of the plate beside it, and what you are aiming at is
+ * a picture of hardware rather than a picture of the structure you are
+ * editing. The flow chart is the structure, drawn at a legible size with one
+ * box per element - so that is where the editing gesture belongs, and the
+ * diagram is left to do the one thing it is good at.
+ */
+let flowDrag = null;
+
+/** The element or socket under a client point, if any. */
+function flowTargetAt(clientX, clientY) {
+  const hit = document.elementFromPoint(clientX, clientY)?.closest('[data-act]');
+  if (!hit) return null;
+  const index = Number(hit.dataset.index);
+  if (hit.dataset.act === 'port') {
+    return { kind: 'port', parent: beamline.elements[index] ?? null, port: hit.dataset.port };
+  }
+  if (hit.dataset.act === 'select' && beamline.elements[index]) {
+    return { kind: 'element', element: beamline.elements[index] };
+  }
+  return null;
+}
+
+flowEl.addEventListener('pointerdown', (e) => {
+  const node = e.target.closest('[data-act="select"]');
+  if (!node || e.target.closest('[data-act="remove"]')) return;
+  const element = beamline.elements[Number(node.dataset.index)];
+  if (!element) return;
+  flowDrag = { element, startX: e.clientX, startY: e.clientY, moved: false };
+});
+
+flowEl.addEventListener('pointermove', (e) => {
+  if (!flowDrag) return;
+  if (Math.hypot(e.clientX - flowDrag.startX, e.clientY - flowDrag.startY) > 5) {
+    flowDrag.moved = true;
+    flowEl.classList.add('dragging');
+  }
+});
+
+flowEl.addEventListener('pointerup', (e) => {
+  const drag = flowDrag;
+  flowDrag = null;
+  flowEl.classList.remove('dragging');
+  if (!drag || !drag.moved) return;
+
+  const target = flowTargetAt(e.clientX, e.clientY);
+  if (!target) return;
+
+  // Onto a socket: hang it on that exact exit. Onto a box: hang it on that
+  // element's first free exit, or push whatever is there downstream.
+  const parent = target.kind === 'port' ? target.parent : target.element;
+  if (!parent || parent === drag.element) return;
+  const port =
+    target.kind === 'port'
+      ? target.port
+      : (exitsOf(parent).find((x) => !beamline.childAt(parent, x.port)) ?? exitsOf(parent)[0]).port;
+
+  if (beamline.reparent(drag.element, parent, port)) {
+    selection = { kind: 'element', index: beamline.elements.indexOf(drag.element) };
+    afterStructureChange();
+  }
+});
+
+flowEl.addEventListener('pointercancel', () => {
+  flowDrag = null;
+  flowEl.classList.remove('dragging');
+});
+
+/* Dropping a new element from the toolbar onto a socket or a box. */
+flowEl.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer.types.includes('text/iontrace-element')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+
+flowEl.addEventListener('drop', (e) => {
+  const type = e.dataTransfer.getData('text/iontrace-element');
+  if (!type || !ELEMENT_TYPES[type]) return;
+  e.preventDefault();
+
+  const target = flowTargetAt(e.clientX, e.clientY);
+  const parent = target ? (target.kind === 'port' ? target.parent : target.element) : null;
+  const attach = parent
+    ? {
+        parent,
+        port:
+          target.kind === 'port'
+            ? target.port
+            : (exitsOf(parent).find((x) => !beamline.childAt(parent, x.port)) ??
+                exitsOf(parent)[0]).port,
+      }
+    : pendingPort;
+  armPort(null);
+  addElement(type, attach);
+});
+
+/**
+ * Arm an exit for the next element placed, and say so.
+ *
+ * Clicking a socket used to change a border and nothing else, which is not
+ * enough to tell anyone that the click worked, let alone what to do next: the
+ * button appeared to be broken. It now names the exit it armed and says where
+ * the element comes from, and the toolbar lights up to match.
+ */
 function armPort(next) {
   pendingPort = next;
   for (const b of document.querySelectorAll('[data-act="port"]')) {
@@ -2795,6 +2882,20 @@ function armPort(next) {
       b.dataset.port === next.port;
     b.classList.toggle('armed', Boolean(mine));
   }
+  toolsEl.classList.toggle('awaiting', Boolean(next));
+
+  if (!next) {
+    trackHint.textContent = TRACK_HINT;
+    trackHint.classList.remove('armed');
+    return;
+  }
+  const exit = exitsOf(next.parent).find((x) => x.port === next.port);
+  const where =
+    exitsOf(next.parent).length > 1
+      ? `the ${next.parent.label}’s ${exit.label.toLowerCase()} exit`
+      : `after the ${next.parent.label}`;
+  trackHint.textContent = `Pick an element from the toolbar above to put it ${where}, or drag one onto the socket.`;
+  trackHint.classList.add('armed');
 }
 
 /**
@@ -2828,7 +2929,7 @@ toolsEl.addEventListener('click', (e) => {
   const button = e.target.closest('button[data-add]');
   if (!button) return;
   const attach = pendingPort ?? defaultAttach();
-  pendingPort = null;
+  armPort(null);
   addElement(button.dataset.add, attach);
 });
 
@@ -2839,35 +2940,113 @@ toolsEl.addEventListener('dragstart', (e) => {
   e.dataTransfer.effectAllowed = 'copy';
 });
 
-/* Dropping a tool onto the beamline places it where it was dropped, rather
-   than at the end. The insertion point comes from the closest point on the
-   reference orbit, so it works after the column bends. */
-canvas.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-  const { px, py } = pointerPos(e);
-  drag = { kind: 'insert', dropTo: dropTargetAt(worldAt(px, py)) };
-  render();
+/*
+  Nothing is dropped onto the diagram any more; it is dropped onto the flow
+  chart. The diagram draws a column to scale, which is the right thing for
+  seeing where ions go and the wrong thing for aiming at: two branches can
+  overlap, and a long drift can be a hundred times the size of the plate beside
+  it, so what you hit is not reliably what you meant. Editing happens on the
+  picture of the structure; the diagram shows the result.
+*/
+
+/* ------------------------------------------------------------------ */
+/* saving and loading                                                  */
+/* ------------------------------------------------------------------ */
+
+/** Everything outside the beamline object that belongs in a saved file. */
+function sceneExtras() {
+  return {
+    source: {
+      ...beamSpec(),
+      rays: readNumber(inputs.rays, 9),
+      beamRadius: readNumber(inputs.beamRadius, 1),
+      divergence: readNumber(inputs.divergence, 0),
+    },
+    repulsion: inputs.repulsion.value,
+    beamCurrent: readNumber(inputs.beamCurrent, 5),
+    ionsPerParticle: readNumber(inputs.ionsPerParticle, 6),
+  };
+}
+
+saveBtn.addEventListener('click', () => {
+  const data = serialise(beamline, sceneExtras());
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  a.download = `iontrace-${stamp}.json`;
+  a.click();
+  // Revoked on the next turn of the loop, once the click has been handled.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  setTuneNote(
+    `Saved ${beamline.elements.length} elements as ${a.download}. The file holds the ` +
+      'column and the beam, not the solved fields — loading it re-solves.'
+  );
 });
 
-canvas.addEventListener('dragleave', () => {
-  if (drag?.kind === 'insert') {
-    drag = null;
-    render();
-  }
-});
+loadBtn.addEventListener('click', () => loadFile.click());
 
-canvas.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const type = e.dataTransfer.getData('text/iontrace-element');
-  const attach = drag?.dropTo ?? null;
-  drag = null;
-  if (!type || !ELEMENT_TYPES[type]) {
-    render();
+loadFile.addEventListener('change', async () => {
+  const file = loadFile.files?.[0];
+  loadFile.value = ''; // so the same file can be loaded twice running
+  if (!file) return;
+
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (err) {
+    setTuneNote(`Could not read ${file.name}: ${err.message}`, true);
     return;
   }
-  pendingPort = null;
-  addElement(type, attach);
+
+  statusEl.classList.add('busy');
+  let restored;
+  try {
+    restored = restore(data);
+  } catch (err) {
+    statusEl.classList.remove('busy');
+    setTuneNote(`Could not rebuild that column: ${err.message}`, true);
+    return;
+  }
+
+  if (!restored.elements.length) {
+    statusEl.classList.remove('busy');
+    setTuneNote(`Nothing loaded from ${file.name}. ${restored.problems.join(' ')}`, true);
+    return;
+  }
+
+  // The source first, so the elements are laid out against the right ion.
+  const s = restored.source;
+  if (s) {
+    if (s.mass != null) inputs.mass.value = s.mass;
+    if (s.charge != null) inputs.charge.value = s.charge;
+    if (s.energy != null) inputs.energy.value = s.energy;
+    if (s.rays != null) inputs.rays.value = s.rays;
+    if (s.beamRadius != null) inputs.beamRadius.value = s.beamRadius;
+    if (s.divergence != null) inputs.divergence.value = s.divergence;
+  }
+  const phys = restored.physics ?? {};
+  if (phys.repulsion) inputs.repulsion.value = phys.repulsion;
+  if (phys.beamCurrent != null) inputs.beamCurrent.value = phys.beamCurrent;
+  if (phys.ionsPerParticle != null) inputs.ionsPerParticle.value = phys.ionsPerParticle;
+  fringeToggle.checked = Boolean(phys.fringe);
+
+  beamline = new Beamline();
+  beamline.fringe = Boolean(phys.fringe);
+  beamline.adopt(restored.elements);
+  statusEl.classList.remove('busy');
+
+  selection = null;
+  armPort(null);
+  syncOutputs();
+  describeFringe();
+  afterStructureChange();
+  setTuneNote(
+    `Loaded ${restored.elements.length} elements from ${file.name}.` +
+      (restored.problems.length ? ` ${restored.problems.join(' ')}` : ''),
+    restored.problems.length > 0
+  );
 });
 
 autoAlignBtn.addEventListener('click', () => {
@@ -3074,6 +3253,7 @@ selection = null;
 syncOutputs();
 describeFringe();
 renderTools();
+armPort(null);
 renderTrack();
 renderInspector();
 render();

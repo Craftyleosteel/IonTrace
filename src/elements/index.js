@@ -18,6 +18,7 @@ import { createQuadrupole, QUADRUPOLE_DEFAULTS, amplitudeForQ } from './quadrupo
 import { createBender, BENDER_DEFAULTS, matchedVoltage } from './bender.js';
 import { createMultipole, MULTIPOLE_DEFAULTS } from './multipole.js';
 import { createFunnel, FUNNEL_DEFAULTS } from './funnel.js';
+import { createDetector, DETECTOR_DEFAULTS } from './detector.js';
 
 /** @typedef {{key: string, label: string, unit?: string, min: number, max: number, step: number, rebuild: boolean, help?: string, scale?: Function}} FieldSpec */
 
@@ -44,6 +45,12 @@ const ICONS = {
     '<circle cx="22.6" cy="9" r="1.9"/><circle cx="20.7" cy="13.7" r="1.9"/>' +
     '<circle cx="16" cy="15.6" r="1.9"/><circle cx="11.3" cy="13.7" r="1.9"/>' +
     '<circle cx="9.4" cy="9" r="1.9"/><circle cx="11.3" cy="4.3" r="1.9"/>',
+  // An aperture plate with a collecting surface behind it, and ions arriving.
+  detector:
+    '<path d="M2 9h9M13 9h3"/>' +
+    '<path d="M18 2v14"/>' +
+    '<path d="M22 4h6M22 14h6M28 4v10"/>' +
+    '<circle cx="15" cy="9" r="1.4" fill="currentColor" stroke="none"/>',
   // A stack of rings closing down towards the exit.
   funnel:
     '<path d="M2 1v3M6 1v4M10 1v5M14 1v6M18 1v6.6M22 1v7M26 1v7.4M30 1v7.6"/>' +
@@ -107,6 +114,22 @@ export const ELEMENT_TYPES = {
       { key: 'boreRadius', label: 'Bore', unit: 'mm', min: 3, max: 10, step: 0.5, rebuild: true },
       { key: 'centreLength', label: 'Centre length', unit: 'mm', min: 5, max: 40, step: 1, rebuild: true },
       { key: 'gap', label: 'Gap', unit: 'mm', min: 1, max: 12, step: 0.5, rebuild: true },
+    ],
+  },
+
+  detector: {
+    icon: ICONS.detector,
+    label: 'Ion detector',
+    blurb:
+      'A grounded aperture with a collecting surface a few kilovolts below it. Not a target painted on the end of the line — the bias reaches out through the aperture and pulls ions in, which is where a detector’s collection efficiency comes from. Ions landing on the surface are counted; ions landing on its housing are not.',
+    create: createDetector,
+    defaults: DETECTOR_DEFAULTS,
+    fields: [
+      { key: 'voltage', label: 'Bias', unit: 'V', min: -30000, max: 30000, step: 50, rebuild: false, help: 'Negative to collect positive ions. The deeper it is, the further out it reaches — with fringe fields on, a long way up the column.' },
+      { key: 'entranceRadius', label: 'Entrance aperture', unit: 'mm', min: 1, max: 20, step: 0.5, rebuild: true },
+      { key: 'activeRadius', label: 'Collecting surface', unit: 'mm', min: 1, max: 25, step: 0.5, rebuild: true },
+      { key: 'depth', label: 'Depth', unit: 'mm', min: 2, max: 40, step: 0.5, rebuild: true, help: 'Aperture to surface. Deeper lets the field spread before the ions reach the surface.' },
+      { key: 'margin', label: 'Front margin', unit: 'mm', min: 4, max: 40, step: 1, rebuild: true },
     ],
   },
 
@@ -177,7 +200,8 @@ export const ELEMENT_TYPES = {
       { key: 'apertureRadius', label: 'Aperture radius r₀', unit: 'mm', min: 4, max: 40, step: 0.5, rebuild: true, help: 'Centre to the concave electrode faces. The matched voltage goes as (r₀/a)², so this and the two below set the operating voltage between them.' },
       { key: 'electrodeThickness', label: 'Electrode thickness', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true },
       { key: 'boxClearance', label: 'Box clearance', unit: 'mm', min: 0.5, max: 20, step: 0.5, rebuild: true, help: 'Electrode backs to the grounded box. r₀ plus these two is the half-width a.' },
-      { key: 'gapAngle', label: 'Aperture gap', unit: '°', min: 5, max: 40, step: 1, rebuild: true, help: 'How far short of each axis the electrodes stop. This is the beam’s way in and out.' },
+      { key: 'channelWidth', label: 'Beam channel', unit: 'mm', min: 2, max: 40, step: 0.5, rebuild: true, help: 'The clear straight-sided gap between neighbouring electrodes, on all four sides. This is the beam’s way in and out.' },
+      { key: 'cornerSize', label: 'Corner posts', unit: 'mm', min: 0, max: 20, step: 0.5, rebuild: true, help: 'Grounded posts on the diagonals. They cut the corner off each electrode — where the quadrupole potential is largest — so raising this weakens the field per volt. 0 removes them.' },
       { key: 'height', label: 'Vertical aperture', unit: 'mm', min: 4, max: 60, step: 1, rebuild: true },
     ],
   },

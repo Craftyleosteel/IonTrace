@@ -8,6 +8,32 @@
  * enters through the gap on one axis and leaves through the gap on the
  * perpendicular one.
  *
+ * The shape of the electrodes
+ * ---------------------------
+ * Each one is a SQUARE BLOCK filling its quadrant, with a circular arc of
+ * radius r0 bitten out of the inner corner and a straight-sided channel of
+ * width `channelWidth` separating it from each neighbour. Four grounded posts
+ * stand on the diagonals, in the corners, and each block is cut back to clear
+ * them.
+ *
+ * Three of those details are load-bearing, not decoration:
+ *
+ *   - The arc is what makes the near-axis field quadrupolar. Four flat plates
+ *     give a field with a large sextupole term and the device aberrates.
+ *   - The FILLED corner is what makes it strong. An annular arc of the same
+ *     inner radius leaves the rest of the quadrant empty, and the grounded box
+ *     reaches into that emptiness and pulls the potential back down, so more
+ *     volts are needed for the same bend.
+ *   - The channel being straight, rather than a wedge opening outward, means
+ *     the clear width is the same where the beam enters, where it passes the
+ *     electrodes and where it leaves. One number describes the acceptance
+ *     instead of three.
+ *
+ * The posts are the one part that costs something. They put ground on the
+ * diagonal, which is exactly where phi = C X Z is largest, so they can only
+ * reduce the field a given electrode voltage produces - the matched voltage
+ * goes up. `cornerSize: 0` removes them.
+ *
  * Why it is not a sector bender
  * -----------------------------
  * A cylindrical sector deflects by pushing the beam radially inward with a
@@ -66,23 +92,20 @@
  * ------------------------------------------------------
  * It assumes the ideal quadrupole potential everywhere inside the box and
  * nothing outside it. The solved field is neither: real electrodes subtend
- * finite arcs, the grounded box shapes the field near the apertures, and the
- * field does not stop abruptly at the entrance plane. Measured against the
- * solved field, with V/V0 the voltage as a multiple of the ideal one and a
- * nine-ion beam of 1.5 mm radius:
+ * finite arcs, the grounded box shapes the field near the apertures, grounded
+ * posts interrupt the diagonals, and the field does not stop abruptly at the
+ * entrance plane. Every one of those pushes the voltage that turns the beam
+ * through exactly ninety degrees away from V0, by a few per cent, in a
+ * direction that depends on the proportions.
  *
- *     r0/a    turns exactly 90 deg at   transmits 9/9 over
- *     0.655           V/V0 ~ 1.00         0.75 .. 1.05
- *     0.905           V/V0 ~ 1.02         0.85 .. 1.05
- *     0.950           V/V0 ~ 1.07         0.90 .. 1.10
- *
- * So the formula is a good predictor of the right angle at every proportion,
- * drifting a few per cent high as the electrodes thin and the box moves in.
- * The window is at least a tenth either side throughout, which is what the
- * tolerance shown in the interface is based on. It is asymmetric, and which
- * way it leans depends on the geometry - thick electrodes tolerate too little
- * voltage, thin ones tolerate too much - which is the kind of thing worth
- * finding with the tuner rather than reasoning about.
+ * What the two changes above do to that number, in opposite directions:
+ * filling the electrode corners strengthens the field per volt, so less
+ * voltage is needed; the grounded posts weaken it, so more is. Which wins at
+ * a given set of proportions is a question for a measurement, and the
+ * calibration table that used to sit here was measured on the previous
+ * electrode shape - thin annular arcs with wedge-shaped gaps - so it has been
+ * removed rather than left to mislead. Re-measure it with `npm test`, or with
+ * a sweep of V/V0 against the turn angle, before quoting numbers.
  *
  * So the matched voltage is a starting point of the right size, not the final
  * answer - which is exactly why a real deflector of this kind is followed by a
@@ -98,9 +121,10 @@ import { yawFrame, compose, translation, rollFrame, inverse } from '../frames.js
 
 export const BENDER_DEFAULTS = {
   apertureRadius: 19, // mm, r0 - centre to the concave electrode faces
-  electrodeThickness: 9, // mm, radial thickness of each electrode
+  electrodeThickness: 9, // mm, metal from the arc to the flat back face
   boxClearance: 1, // mm, gap between electrode backs and the grounded box
-  gapAngle: 16, // degrees of clear aperture either side of each axis
+  channelWidth: 16, // mm, full width of the four straight beam channels
+  cornerSize: 5, // mm, the grounded corner posts (0 leaves them out)
   height: 30, // mm, aperture perpendicular to the bend plane
   voltage: 0, // V on each electrode (+V and -V on the diagonals)
   bendPlane: 0, // degrees of roll: 0 bends horizontally, 90 vertically
@@ -136,15 +160,37 @@ export function createBender(params = {}, solverOpts = {}) {
   const outer = mmToM(p.apertureRadius + p.electrodeThickness);
   const a = mmToM(p.apertureRadius + p.electrodeThickness + p.boxClearance);
   const halfHeight = mmToM(p.height) / 2;
-  const gap = (p.gapAngle * Math.PI) / 180;
+  const w = mmToM(p.channelWidth) / 2; // channel HALF-width, used throughout
+  const clear = mmToM(p.boxClearance);
+  const post = mmToM(Math.max(0, p.cornerSize));
 
-  if (p.gapAngle >= 45) {
-    throw new Error('Aperture gaps of 45 degrees or more leave no electrode');
+  if (p.channelWidth <= 0) {
+    throw new Error('The deflector needs beam channels to get ions in and out');
   }
-  if (p.gapAngle < 5) {
+  if (w >= outer) {
+    throw new Error('Beam channels this wide leave no electrode between them');
+  }
+  if (w >= r0) {
     warnings.push(
-      `Aperture gaps of ${p.gapAngle} degrees are narrow; the beam has little ` +
-        'clearance entering and leaving.'
+      `Channels ${p.channelWidth} mm wide are wider than the ${2 * p.apertureRadius} mm ` +
+        'aperture, so the concave faces are cut away entirely and the aperture is ' +
+        'square. The field will be a poor quadrupole.'
+    );
+  }
+  /*
+    Square blocks put a flat back face parallel to the box wall along its whole
+    width; the old curved backs only came that close at a single point. If the
+    clearance is a step or less, the electrode node and the box node are
+    NEIGHBOURS - both fixed, with nothing relaxing between them - so the gap
+    carries no solved field at all and the electrode is, as far as the solve is
+    concerned, sitting against the box. It is not an error and nothing detects
+    it downstream, which is the reason to say so here.
+  */
+  if (p.boxClearance < 2 * p.gridStep) {
+    warnings.push(
+      `A box clearance of ${p.boxClearance} mm is under two grid steps, so the gap ` +
+        'behind each electrode has no free nodes in it and is not resolved at all. ' +
+        'Widen the clearance or refine the grid.'
     );
   }
 
@@ -192,22 +238,48 @@ export function createBender(params = {}, solverOpts = {}) {
   const poleB = grid.addElectrode('poleB'); // the x.z < 0 diagonal
   grid.paintEnclosure(box);
 
+  /*
+    The corner posts, and how much of each electrode they cost.
+
+    They sit in the corners of the box, on the diagonals, which is the one
+    place a tie rod can run without crossing a beam channel. Being grounded
+    they cannot touch the electrodes, so each block's diagonal corner is cut
+    back by a clearance to make room - and that cut is not free. The diagonal
+    is exactly where the quadrupole potential is largest, so replacing driven
+    metal there with ground is a real change to the field, not a detail of the
+    drawing. `cornerSize: 0` removes them and restores the full square block.
+  */
+  const postInner = extent - post;
+  const blockCut = postInner - clear; // block corners stop here
+
+  if (post > 0 && blockCut <= w) {
+    throw new Error('Corner posts this large leave no electrode between the channels');
+  }
+
   /**
-   * One electrode: a quadrant of the annulus between r0 and `outer`, stopping
-   * `gapAngle` short of each axis so the beam has somewhere to enter and
-   * leave. The concave face is what makes the field quadrupolar near the
-   * centre.
+   * One electrode: a square block filling its quadrant, with a concave
+   * circular face of radius r0 bitten out of the inner corner, straight-sided
+   * beam channels of half-width `w` along both axes, and its diagonal corner
+   * cut back to clear the grounded post.
+   *
+   * The concave face is what makes the field quadrupolar near the centre; the
+   * filled corners are what make it strong. An annular arc of the same inner
+   * radius leaves the quadrant behind it empty, and that emptiness is a region
+   * the grounded box reaches into.
    *
    * The grid's "z" axis carries the axial coordinate Z and its "r" axis the
    * transverse X, both measured from the deflector centre.
    */
+  const tol = step * 1e-6;
   const quadrant = (sx, sz) => (Z, X) => {
-    const rho = Math.hypot(X, Z);
-    if (rho < r0 - step * 1e-6 || rho > outer + step * 1e-6) return false;
     if (Math.sign(X) !== sx || Math.sign(Z) !== sz) return false;
-    // Angle away from the nearer axis, so the gap is symmetric about both.
-    const psi = Math.atan2(Math.abs(X), Math.abs(Z));
-    return psi > gap && psi < Math.PI / 2 - gap;
+    const ax = Math.abs(X);
+    const az = Math.abs(Z);
+    if (ax < w || az < w) return false; // the beam channels
+    if (ax > outer + tol || az > outer + tol) return false; // the flat back faces
+    if (Math.hypot(X, Z) < r0 - tol) return false; // the concave face
+    if (post > 0 && ax > blockCut && az > blockCut) return false; // room for the post
+    return true;
   };
 
   // Sign convention: a POSITIVE voltage bends a POSITIVE ion towards -x. That
@@ -223,6 +295,14 @@ export function createBender(params = {}, solverOpts = {}) {
     grid.paint(poleB, quadrant(-1, 1)) + grid.paint(poleB, quadrant(1, -1));
   if (paintedA === 0 || paintedB === 0) {
     throw new Error('Deflector electrodes covered no grid nodes; check the geometry');
+  }
+
+  // The posts, grounded along with the box they stand in the corners of. They
+  // get no voltage of their own, so they add no basis solution and cost
+  // nothing to paint - but they are metal, and the ion collision test and the
+  // Laplace solve both see them.
+  if (post > 0) {
+    grid.paint(box, (Z, X) => Math.abs(X) >= postInner && Math.abs(Z) >= postInner);
   }
 
   const { basis, reports } = solveBasis(grid, solverOpts);
@@ -257,9 +337,11 @@ export function createBender(params = {}, solverOpts = {}) {
    * is total rather than subtle: every ion is destroyed the instant it reaches
    * the entrance plane, at every voltage.
    *
-   * The hole is as wide as the channel it feeds: the electrodes stop `gapAngle`
-   * short of each axis, so the clear width where the channel meets the box is
-   * `outer sin(gap)` either side.
+   * The hole is as wide as the channel it feeds, and no guesswork is needed to
+   * say how wide that is: the channels are straight-sided, so the hole is
+   * exactly `channelWidth` across. That is the point of a straight channel
+   * over a wedge - the clear width is the same where the beam enters, where it
+   * passes the electrodes and where it leaves, so one number describes it.
    *
    * There are FOUR of them, one on each face. That is not generosity, it is
    * the symmetry of the device: the electrodes stop short of both axes in both
@@ -269,7 +351,7 @@ export function createBender(params = {}, solverOpts = {}) {
    * through a side. Cutting only the two holes the bend needs would wall off
    * the straight path and quietly destroy every ion that took it.
    */
-  const holeHalf = outer * Math.sin(gap);
+  const holeHalf = w;
   const rim = step * 1.5;
   const inAperture = (X, Z) =>
     (Math.abs(Z) > extent - rim && Math.abs(X) < holeHalf) ||
@@ -434,22 +516,62 @@ export function createBender(params = {}, solverOpts = {}) {
         return [x, y, a + Z];
       };
 
-      const span = Math.PI / 2 - 2 * gap;
-      const arcSteps = 10;
       const out = [];
+      const arcSteps = 12;
+
+      /*
+        The angle at which the concave face meets a channel wall. The wall is
+        the straight line X = w, so the face runs from where that line cuts the
+        circle round to its mirror image at Z = w. Wider channels eat the face
+        from both ends; once the channel is wider than the aperture there is no
+        face left and the inner corner is simply square.
+      */
+      const faceEnds = w < r0;
+      const psi0 = faceEnds ? Math.asin(w / r0) : 0;
+      const span = Math.PI / 2 - 2 * psi0;
+      const notched = post > 0 && blockCut < outer;
 
       for (const [sx, sz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
-        const arc = (rho, reverse) => {
-          const pts = [];
+        const at = (X, Z) => corner(sx * X, sz * Z);
+        const pts = [];
+
+        if (faceEnds) {
+          // The concave face, from the channel wall at X = w round to Z = w.
           for (let k = 0; k <= arcSteps; k++) {
-            const f = reverse ? 1 - k / arcSteps : k / arcSteps;
-            const psi = gap + f * span;
-            pts.push(corner(sx * rho * Math.sin(psi), sz * rho * Math.cos(psi)));
+            const psi = psi0 + (k / arcSteps) * span;
+            pts.push(at(r0 * Math.sin(psi), r0 * Math.cos(psi)));
           }
-          return pts;
-        };
-        // Down the concave face, back along the outside.
-        out.push({ points: [...arc(r0, false), ...arc(outer, true)] });
+        } else {
+          pts.push(at(w, w));
+        }
+
+        // Out along one channel wall, round the flat back, home along the
+        // other - with the diagonal corner cut square where a post stands.
+        pts.push(at(outer, w));
+        if (notched) {
+          pts.push(at(outer, blockCut), at(blockCut, blockCut), at(blockCut, outer));
+        } else {
+          pts.push(at(outer, outer));
+        }
+        pts.push(at(w, outer));
+
+        out.push({ points: pts });
+      }
+
+      // The posts themselves, drawn as the grounded structure they are.
+      if (post > 0) {
+        for (const [sx, sz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+          const at = (X, Z) => corner(sx * X, sz * Z);
+          out.push({
+            points: [
+              at(postInner, postInner),
+              at(extent, postInner),
+              at(extent, extent),
+              at(postInner, extent),
+            ],
+            wall: true,
+          });
+        }
       }
 
       // The grounded box, as four thin walls.

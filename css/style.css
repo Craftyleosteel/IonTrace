@@ -631,6 +631,17 @@ input[type="range"]:focus-visible {
   margin: 0;
 }
 
+/* The toolbar, while an exit is waiting for something to be put on it. */
+.tools.awaiting .tool {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.track-hint.armed {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /*
   The flow chart. A branching column is a shape, and a shape is easier to read
   drawn than indented - two lines leaving a deflector sit side by side here
@@ -671,7 +682,17 @@ input[type="range"]:focus-visible {
   stroke-width: 1;
 }
 
-.flow .node { cursor: pointer; }
+/* Boxes are draggable onto one another to re-hang an element. */
+.flow .node { cursor: grab; }
+.flow.dragging { cursor: grabbing; }
+.flow.dragging .node { cursor: grabbing; }
+
+/* While a drag is in progress, everything that can receive it lights up. */
+.flow.dragging .socket rect,
+.flow.dragging .node rect.hit {
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+}
 
 .flow .node:hover rect {
   stroke: var(--accent);

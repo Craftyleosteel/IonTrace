@@ -298,6 +298,32 @@ export class Beamline {
     return true;
   }
 
+  /**
+   * Take a set of elements that already know how they hang together.
+   *
+   * `add` decides an element's parent from where it is being inserted, which
+   * is right for building a column by hand and wrong for loading one that has
+   * already been built - it would overwrite the very structure being restored.
+   * This takes the wiring as given, checks it forms one tree rooted somewhere,
+   * and lays it out.
+   */
+  adopt(elements) {
+    this.elements = elements.slice();
+    for (const e of this.elements) {
+      e.align ??= { dx: 0, dy: 0, tiltX: 0, tiltY: 0 };
+      e.from ??= { parent: null, port: 'out' };
+      // A parent outside this set would leave the element unreachable from the
+      // source, which is not a column.
+      if (e.from.parent && !this.elements.includes(e.from.parent)) {
+        e.from = { parent: null, port: 'out' };
+      }
+    }
+    this.#reorder();
+    this.layout();
+    this.rebuildRuns();
+    return this;
+  }
+
   /* ---------------------------------------------------------------- */
   /* topology                                                          */
   /* ---------------------------------------------------------------- */
@@ -314,6 +340,20 @@ export class Beamline {
 
   childAt(element, port) {
     return this.elements.find((e) => e.from?.parent === element && e.from.port === port) ?? null;
+  }
+
+  /**
+   * Was this point collected by a detector, rather than merely lost on metal?
+   *
+   * Both are strikes and neither is transmission, so the flight itself does
+   * not need to tell them apart - but they mean opposite things to whoever is
+   * reading the result, and reporting them as one number would hide the
+   * distinction a detector exists to draw.
+   */
+  detected(x, y, z) {
+    const hit = this.locate([x, y, z]);
+    if (!hit || typeof hit.element.detects !== 'function') return false;
+    return hit.element.detects(hit.local[0], hit.local[1], hit.local[2]);
   }
 
   /** The frame of a named open end, or the main exit if it is not one. */
